@@ -4215,12 +4215,19 @@ def test_tiktok_api_mode_zero_posts_sets_structured_failure_metadata(
     assert scraper.last_retrieval_meta["stop_reason"] == "api_zero_posts"
 
 
-def test_tiktok_fetch_comments_is_parked_by_default(
+def test_tiktok_direct_comment_api_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Logged-out comment fetching works (verified live 2026-10-27), so it is on by default.
+    scraper = TikTokScraper(cookies={})
+    monkeypatch.delenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", raising=False)
+    assert scraper._direct_comment_api_experiment_enabled() is True
+
+
+def test_tiktok_fetch_comments_is_parked_only_when_explicitly_disabled(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scraper = TikTokScraper(cookies={"sessionid": "token"})
-    monkeypatch.delenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", raising=False)
+    monkeypatch.setenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", "false")
 
     with caplog.at_level("WARNING"):
         comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)

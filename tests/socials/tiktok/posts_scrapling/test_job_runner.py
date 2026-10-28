@@ -117,8 +117,9 @@ def test_canonical_fallback_uses_ytdlp_without_api_fallthrough(monkeypatch: pyte
         def scrape(self, _config: Any) -> list[Any]:
             raise AssertionError("canonical fallback must not call scrape()")
 
-        def _scrape_via_ytdlp(self, config: Any) -> list[Any]:
+        def _scrape_via_ytdlp(self, config: Any, **kwargs: Any) -> list[Any]:
             assert config.username == "bravotv"
+            assert kwargs.get("max_posts_hint") is None  # unbounded run stays uncapped
             self.last_retrieval_meta = {
                 "retrieval_mode": "ytdlp",
                 "fallback_chain": ["yt_dlp"],
@@ -142,6 +143,45 @@ def test_canonical_fallback_uses_ytdlp_without_api_fallthrough(monkeypatch: pyte
     assert metadata["fallback_chain"] == ["yt_dlp"]
     assert metadata["used"] is True
     assert metadata["trigger_reason"] == "non_json_response"
+
+
+def test_canonical_fallback_caps_ytdlp_at_job_page_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-page smoke job must not list and persist an entire account via yt-dlp."""
+    from trr_backend.socials.tiktok import scraper as scraper_module
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE", "30")
+    real_scraper_cls = scraper_module.TikTokScraper
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd, **_kwargs):  # noqa: ANN001
+        captured["cmd"] = list(cmd)
+        lines = "\n".join(
+            f'{{"id": "{index}", "timestamp": {1_700_000_000 - index}, "title": "post {index}"}}'
+            for index in range(1, 81)
+        )
+        return SimpleNamespace(returncode=0, stdout=lines, stderr="")
+
+    def _scraper_factory(*, cookies: dict[str, Any]) -> Any:
+        instance = real_scraper_cls(cookies=cookies)
+        instance._has_ytdlp = lambda: True  # type: ignore[method-assign]
+        instance._find_ytdlp_cookie_file = lambda: None  # type: ignore[method-assign]
+        return instance
+
+    monkeypatch.setattr(scraper_module, "TikTokScraper", _scraper_factory)
+    monkeypatch.setattr(scraper_module.subprocess, "run", _fake_run)
+
+    posts, metadata = jr._scrape_canonical_tiktok_fallback_posts(  # noqa: SLF001
+        account_handle="bravotv",
+        cookies={},
+        max_pages=1,
+        trigger_reason="non_json_response",
+    )
+
+    assert len(posts) == 30
+    assert metadata["post_cap"] == 30
+    assert metadata["stop_reason"] == "max_posts_reached"
+    assert captured["cmd"][captured["cmd"].index("--playlist-end") + 1] == "30"
 
 
 @pytest.mark.parametrize("finish_accepted", [True, False])
@@ -432,9 +472,11 @@ def test_tiktok_job_runner_retries_incomplete_shared_catalog_persistence(
     assert finish["metadata"]["listing_progress"]["stop_reason"] == "tiktok_shared_catalog_persistence_incomplete"
 
 
+@pytest.mark.parametrize("public_browser", [False, True])
 def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,
+    public_browser: bool,
 ) -> None:
     from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
 
@@ -473,7 +515,9 @@ def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(
         fallback_calls.append(kwargs)
         return fallback_posts, {
             "used": True,
-            "retrieval_mode": "ytdlp",
+            "retrieval_mode": "public_browser" if public_browser else "ytdlp",
+            "pages_scanned": 1,
+            "stop_reason": "max_pages" if public_browser else "completed",
             "trigger_reason": kwargs["trigger_reason"],
             "posts_found": len(fallback_posts),
         }
@@ -509,7 +553,8 @@ def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(
     assert finish["items_found"] == 1
     assert metadata["stage_counters"] == {"posts": 1, "pages": 1}
     assert metadata["persist_counters"]["posts_upserted"] == 1
-    assert metadata["listing_progress"]["partial"] is False
+    assert metadata["listing_progress"]["partial"] is public_browser
+    assert metadata["stop_reason"] == ("max_pages" if public_browser else "completed")
     assert metadata["runtime_metadata"]["fetcher_runtime"]["canonical_fallback"]["used"] is True
     assert metadata["runtime_metadata"]["fetcher_runtime"]["canonical_fallback"]["trigger_reason"] == (
         "non_json_response"
@@ -739,3 +784,110 @@ def test_tiktok_job_runner_returns_degraded_summary_when_final_db_read_fails(
     assert result["metadata"]["database_service_unavailable"] is True
     assert result["metadata"]["stage_counters"] == {"posts": 1, "pages": 1}
     assert result["metadata"]["persist_counters"]["posts_upserted"] == 1
+
+
+def test_bounded_canonical_fallback_uses_anonymous_browser_after_empty_ytdlp(monkeypatch):
+    from trr_backend.socials.tiktok import scraper as scraper_module
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+    from trr_backend.socials.tiktok.transports import public_profile
+
+    class EmptyScraper:
+        def __init__(self, *, cookies):
+            assert cookies == {"sessionid": "existing-secret"}
+            self.last_retrieval_meta = {"retrieval_mode": "ytdlp", "error_code": "ytdlp_nonzero_exit"}
+
+        def _scrape_via_ytdlp(self, *_args, **_kwargs):
+            return []
+
+    calls = []
+    expected = [SimpleNamespace(video_id="native-1")]
+
+    def native(**kwargs):
+        calls.append(kwargs)
+        return expected, {"retrieval_mode": "public_browser", "auth_mode": "public_anonymous", "pages_scanned": 1}
+
+    monkeypatch.setattr(scraper_module, "TikTokScraper", EmptyScraper)
+    monkeypatch.setattr(public_profile, "scrape_public_profile_posts", native)
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE", "30")
+    posts, metadata = jr._scrape_canonical_tiktok_fallback_posts(
+        account_handle="bravotv",
+        cookies={"sessionid": "existing-secret"},
+        max_pages=1,
+        trigger_reason="non_json_response",
+    )
+    assert posts == expected
+    assert calls == [{"account_handle": "bravotv", "max_pages": 1, "page_size": 30}]
+    assert metadata["auth_mode"] == "public_anonymous"
+    assert metadata["ytdlp"]["error_code"] == "ytdlp_nonzero_exit"
+
+
+def test_unbounded_canonical_fallback_does_not_start_public_browser(monkeypatch):
+    from trr_backend.socials.tiktok import scraper as scraper_module
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+    from trr_backend.socials.tiktok.transports import public_profile
+
+    class EmptyScraper:
+        def __init__(self, **_kwargs):
+            self.last_retrieval_meta = {"retrieval_mode": "ytdlp", "error_code": "ytdlp_nonzero_exit"}
+
+        def _scrape_via_ytdlp(self, *_args, **_kwargs):
+            return []
+
+    def unexpected(**_kwargs):
+        pytest.fail("The anonymous fallback requires an explicit page budget")
+
+    monkeypatch.setattr(scraper_module, "TikTokScraper", EmptyScraper)
+    monkeypatch.setattr(public_profile, "scrape_public_profile_posts", unexpected)
+    posts, metadata = jr._scrape_canonical_tiktok_fallback_posts(
+        account_handle="bravotv", cookies={}, max_pages=None, trigger_reason="non_json_response"
+    )
+    assert posts == []
+    assert metadata["error_code"] == "ytdlp_nonzero_exit"
+
+
+@pytest.mark.parametrize("failure_phase", ["warmup", "sec_uid"])
+def test_early_public_fallback_retries_required_persistence_failure(monkeypatch, fake_lifecycle, failure_phase):
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class Fetcher:
+        runtime_metadata = {}
+
+        async def warmup(self, _account):
+            if failure_phase == "warmup":
+                raise RuntimeError("non_json_response")
+
+        async def resolve_sec_uid(self, _account):
+            raise RuntimeError("non_json_response")
+
+        async def aclose(self):
+            pass
+
+    _install_common_fakes(monkeypatch, jr, fetcher=Fetcher())
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+    monkeypatch.setattr(
+        jr,
+        "_scrape_canonical_tiktok_fallback_posts",
+        lambda **_kwargs: (
+            [SimpleNamespace(video_id="123")],
+            {"retrieval_mode": "public_browser", "pages_scanned": 1, "stop_reason": "max_pages"},
+        ),
+    )
+    monkeypatch.setattr(
+        jr,
+        "persist_tiktok_post_dtos",
+        lambda **_kwargs: PersistedTikTokPosts(posts_upserted=0, posts_skipped=1, required_catalog_upsert_failures=1),
+    )
+    jr.run_tiktok_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempts": 1,
+            "max_attempts": 3,
+            "config": {"account": "bravotv", "max_pages": 1},
+        },
+        worker_id="worker-1",
+    )
+    finish = fake_lifecycle.finish_calls[-1]
+    assert finish["status"] == "retrying"
+    assert finish["last_error_code"] == "tiktok_shared_catalog_persistence_incomplete"
+    assert finish["metadata"]["persist_counters"]["posts_upserted"] == 0

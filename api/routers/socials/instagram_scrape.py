@@ -333,7 +333,7 @@ async def preview_instagram_profile(
     logger.info(f"Instagram preview requested by {user.get('email')} for @{username}")
 
     try:
-        scraper = InstagramScraper(cookies={})
+        scraper = InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True)
         data = scraper.fetch_profile_info(username, delay=0)
 
         if not data:

@@ -1,0 +1,338 @@
+{
+  "Resource000": {
+    "items": [
+      {
+        "code": "Resource000",
+        "pk": "100001",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource001": {
+    "items": [
+      {
+        "code": "Resource001",
+        "pk": "100002",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource002": {
+    "items": [
+      {
+        "code": "Resource002",
+        "pk": "100003",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource003": {
+    "items": [
+      {
+        "code": "Resource003",
+        "pk": "100004",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource004": {
+    "items": [
+      {
+        "code": "Resource004",
+        "pk": "100005",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource005": {
+    "items": [
+      {
+        "code": "Resource005",
+        "pk": "100006",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource006": {
+    "items": [
+      {
+        "code": "Resource006",
+        "pk": "100007",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource007": {
+    "items": [
+      {
+        "code": "Resource007",
+        "pk": "100008",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource008": {
+    "items": [
+      {
+        "code": "Resource008",
+        "pk": "100009",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource009": {
+    "items": [
+      {
+        "code": "Resource009",
+        "pk": "100010",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource010": {
+    "items": [
+      {
+        "code": "Resource010",
+        "pk": "100011",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "Resource011": {
+    "items": [
+      {
+        "code": "Resource011",
+        "pk": "100012",
+        "taken_at": 1792065600,
+        "media_type": 1,
+        "caption": {
+          "text": "A #Premiere with @cast_member"
+        },
+        "like_count": 12,
+        "comment_count": 4,
+        "user": {
+          "pk": "fixture-owner",
+          "username": "fixture_account"
+        },
+        "image_versions2": {
+          "candidates": [
+            {
+              "url": "https://cdn.example/slide1.jpg",
+              "width": 1080,
+              "height": 1350
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

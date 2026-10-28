@@ -267,7 +267,38 @@ if TYPE_CHECKING:
 
 
 _IMPORTED_CORE_NAMES: set[str] = set()
-_LOCAL_ROOM_NAMES: set[str] = set()
+_LOCAL_ROOM_NAMES: set[str] = {
+    "_shared_instagram_catalog_graphql_page_size",
+    "_shared_instagram_catalog_delay_seconds",
+    "_instagram_post_payload",
+    "_upsert_instagram_post",
+    "_batch_upsert_instagram_posts",
+    "_upsert_shared_catalog_instagram_post",
+    "_shared_catalog_instagram_post_payload",
+    "_batch_upsert_shared_catalog_instagram_posts",
+    "_build_instagram_scraper_with_auth_fallback",
+    "_build_shared_instagram_scraper",
+    "_shared_instagram_graphql_page_has_posts",
+    "_shared_instagram_graphql_candidate_scrapers",
+    "_shared_instagram_graphql_empty_page_meta",
+    "_fetch_shared_instagram_graphql_page",
+    "_shared_instagram_frontier_auth_validation",
+    "_shared_instagram_frontier_auth_state",
+    "_shared_instagram_frontier_auth_error_code",
+    "_shared_instagram_frontier_transport_preferences",
+    "_shared_instagram_posted_at_bounds",
+    "_shared_instagram_graphql_delay_seconds",
+    "_shared_instagram_account_lock_key",
+    "_shared_instagram_account_lock_max_attempts",
+    "_shared_instagram_account_lock_wait_seconds",
+    "_shared_instagram_account_execution",
+    "_shared_instagram_account_lock_heartbeat",
+    "_fetch_shared_instagram_graphql_posts_page",
+    "_discover_instagram_cursor_partitions",
+    "_scrape_shared_instagram_posts_partitioned",
+    "_scrape_shared_instagram_post_details_refresh",
+    "_scrape_shared_instagram_posts",
+}
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 
@@ -1335,8 +1366,20 @@ def _build_instagram_scraper_with_auth_fallback(
         return scraper
     return InstagramScraper(
         cookies={},
-        browser_account_id=_sanitize_instagram_browser_account_id(browser_account_id),
+        browser_account_id=None,
+        attach_auth_session=False,
+        strict_public_credentials=True,
     )
+
+
+def _shared_instagram_public_mode(config: Mapping[str, Any] | None = None) -> bool:
+    metadata = config or {}
+    mode = (
+        metadata.get("instagram_scrape_mode")
+        or metadata.get("scrape_mode")
+        or os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE")
+    )
+    return str(mode or "public_first").strip().lower() not in {"authenticated", "auth", "login"}
 
 
 def _build_shared_instagram_scraper(
@@ -1366,7 +1409,7 @@ def _build_shared_instagram_scraper(
 
     # Shared-account catalog backfills prefer the warmed public path first to
     # avoid depending on auth cookies when the public transport is healthy.
-    return InstagramScraper(cookies={}, browser_account_id=browser_account_id)
+    return InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True)
 
 
 def _shared_instagram_graphql_page_has_posts(data: Mapping[str, Any] | None) -> bool:
@@ -1471,6 +1514,8 @@ def _fetch_shared_instagram_graphql_page(
 
 
 def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None = None) -> tuple[bool, str | None]:
+    if _shared_instagram_public_mode(config):
+        return False, "public_mode"
     _sync_core_overrides()
     metadata = _metadata_dict(config)
     if metadata.get("frontier_auth_allowed") is True:
@@ -1495,6 +1540,8 @@ def _shared_instagram_frontier_auth_state(
     *,
     frontier_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str | None]:
+    if _shared_instagram_public_mode(config):
+        return False, "public_mode"
     _sync_core_overrides()
     metadata = _metadata_dict(config)
     if metadata.get("frontier_auth_allowed") is True:
@@ -3469,40 +3516,6 @@ def _scrape_shared_instagram_posts(
     return rows, retrieval_meta
 
 
-_LOCAL_ROOM_NAMES.update(
-    {
-        "_shared_instagram_catalog_graphql_page_size",
-        "_shared_instagram_catalog_delay_seconds",
-        "_instagram_post_payload",
-        "_upsert_instagram_post",
-        "_batch_upsert_instagram_posts",
-        "_upsert_shared_catalog_instagram_post",
-        "_shared_catalog_instagram_post_payload",
-        "_batch_upsert_shared_catalog_instagram_posts",
-        "_build_instagram_scraper_with_auth_fallback",
-        "_build_shared_instagram_scraper",
-        "_shared_instagram_graphql_page_has_posts",
-        "_shared_instagram_graphql_candidate_scrapers",
-        "_shared_instagram_graphql_empty_page_meta",
-        "_fetch_shared_instagram_graphql_page",
-        "_shared_instagram_frontier_auth_validation",
-        "_shared_instagram_frontier_auth_state",
-        "_shared_instagram_frontier_auth_error_code",
-        "_shared_instagram_frontier_transport_preferences",
-        "_shared_instagram_posted_at_bounds",
-        "_shared_instagram_graphql_delay_seconds",
-        "_shared_instagram_account_lock_key",
-        "_shared_instagram_account_lock_max_attempts",
-        "_shared_instagram_account_lock_wait_seconds",
-        "_shared_instagram_account_execution",
-        "_shared_instagram_account_lock_heartbeat",
-        "_fetch_shared_instagram_graphql_posts_page",
-        "_discover_instagram_cursor_partitions",
-        "_scrape_shared_instagram_posts_partitioned",
-        "_scrape_shared_instagram_post_details_refresh",
-        "_scrape_shared_instagram_posts",
-    }
-)
 _LOCAL_ROOM_FUNCTIONS.update({_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES})
 __all__ = [
     "_shared_instagram_catalog_graphql_page_size",

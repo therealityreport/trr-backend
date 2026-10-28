@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+from contextlib import contextmanager
 
 import pytest
 
@@ -38,13 +39,80 @@ def _blocked_non_live_access(*_args: object, **_kwargs: object) -> None:
     )
 
 
+def _connect_to_registered_postgres(connect, registered, *args, **kwargs):
+    """Allow only a fixture-owned endpoint, with no libpq service/options override."""
+    from psycopg2 import ProgrammingError
+    from psycopg2.extensions import make_dsn, parse_dsn
+
+    if os.getenv("PGHOSTADDR") or os.getenv("PGSERVICE"):
+        return _blocked_non_live_access()
+    if len(args) > 1 or (args and "dsn" in kwargs):
+        return _blocked_non_live_access()
+    parameters = dict(kwargs)
+    dsn = args[0] if args else parameters.pop("dsn", None)
+    try:
+        parsed = parse_dsn(make_dsn(dsn, **parameters))
+    except (ProgrammingError, TypeError):
+        return _blocked_non_live_access()
+    if set(parsed) != {"host", "port", "dbname", "user"}:
+        return _blocked_non_live_access()
+    endpoint = tuple(parsed[key] for key in ("host", "port", "dbname", "user"))
+    if endpoint not in registered:
+        return _blocked_non_live_access()
+    return connect(*args, **kwargs)
+
+
+@pytest.fixture(scope="session")
+def _isolated_postgres_endpoints():
+    return set()
+
+
+@pytest.fixture(scope="session")
+def register_isolated_postgres(_isolated_postgres_endpoints):
+    """Register a temporary cluster only for its owning fixture's lifetime."""
+
+    @contextmanager
+    def register(*, host, port, dbname, user):
+        if host != "127.0.0.1" or not 0 < port < 65536 or not dbname or not user:
+            raise ValueError("An explicit loopback PostgreSQL endpoint is required")
+        endpoint = (host, str(port), dbname, user)
+        if endpoint in _isolated_postgres_endpoints:
+            raise ValueError("PostgreSQL endpoint is already registered")
+        _isolated_postgres_endpoints.add(endpoint)
+        try:
+            yield
+        finally:
+            _isolated_postgres_endpoints.remove(endpoint)
+
+    return register
+
+
 @pytest.fixture
 def pristine_environ() -> dict[str, str]:
     return _PRISTINE_ENVIRON
 
 
+# Non-live tests pin this fixture name instead of the real ingestion account,
+# whose name stays out of the repository.
+FIXTURE_INGESTION_USERNAME = "fixture_ingest_account"
+
+
 @pytest.fixture(autouse=True)
-def _isolate_non_live_tests(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+def _pin_fixture_ingestion_username(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.get_closest_marker("live") is not None:
+        return
+    import hashlib
+
+    monkeypatch.setattr(
+        "trr_backend.ingestion.credential_snapshot.AUTHORIZED_USERNAME_SHA256",
+        hashlib.sha256(FIXTURE_INGESTION_USERNAME.encode("utf-8")).hexdigest(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_non_live_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, _isolated_postgres_endpoints
+) -> None:
     """Keep the default suite independent of local credentials and services."""
     if request.node.get_closest_marker("live") is not None:
         for name in _DATABASE_CONNECTION_ENV_NAMES:
@@ -63,5 +131,10 @@ def _isolate_non_live_tests(request: pytest.FixtureRequest, monkeypatch: pytest.
     monkeypatch.setattr(socket, "create_connection", _blocked_non_live_access)
     monkeypatch.setattr(socket.socket, "connect", _blocked_non_live_access)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked_non_live_access)
-    monkeypatch.setattr(connection.psycopg2, "connect", _blocked_non_live_access)
+    connect = connection.psycopg2.connect
+    monkeypatch.setattr(
+        connection.psycopg2,
+        "connect",
+        lambda *args, **kwargs: _connect_to_registered_postgres(connect, _isolated_postgres_endpoints, *args, **kwargs),
+    )
     monkeypatch.setattr(pg, "ThreadedConnectionPool", _blocked_non_live_access)

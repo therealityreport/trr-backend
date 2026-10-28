@@ -30,6 +30,10 @@ class _FakeImage:
         self.operations.append(("pip_install_from_requirements", args, dict(kwargs)))
         return self
 
+    def env(self, *args, **kwargs):
+        self.operations.append(("env", args, dict(kwargs)))
+        return self
+
     def pip_install(self, *args, **kwargs):
         self.operations.append(("pip_install", args, dict(kwargs)))
         return self
@@ -512,6 +516,82 @@ def test_probe_instagram_public_history_scrubs_auth_proxy_and_decodo_env(
     assert os.environ["DECODO_USERNAME"] == "decodo-user"
 
 
+def test_authenticated_comment_probe_missing_credentials_sends_nothing(monkeypatch):
+    import json
+
+    from trr_backend.socials.instagram import authenticated_comment_probe
+
+    monkeypatch.delenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "SECRET")
+    monkeypatch.setattr(
+        authenticated_comment_probe,
+        "probe_authenticated_comment_ids",
+        lambda _: pytest.fail("Missing credentials must not send"),
+    )
+    result = modal_jobs.probe_instagram_authenticated_comment_ids.local()
+    assert result["stop_reason"] == "credential_snapshot_unavailable"
+    assert result["requests"] == 0
+    assert result["auth_state"] == "unavailable"
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_authenticated_comment_probe_consumes_only_pinned_environment(monkeypatch):
+    import json
+
+    from trr_backend.socials.instagram import authenticated_comment_probe
+
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "fixture_ingest_account")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", "123")
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_COOKIES_JSON",
+        json.dumps(
+            {
+                "sessionid": "SECRET",
+                "csrftoken": "CSRF",
+                "ds_user_id": "123",
+            }
+        ),
+    )
+
+    def probe(snapshot):
+        assert snapshot.username == "fixture_ingest_account" and snapshot.user_id == "123"
+        assert snapshot.source_kwargs()["raw_cookies"]["sessionid"] == "SECRET"
+        return authenticated_comment_probe.empty_report()
+
+    monkeypatch.setattr(authenticated_comment_probe, "probe_authenticated_comment_ids", probe)
+    result = modal_jobs.probe_instagram_authenticated_comment_ids.local()
+    assert result["auth_state"] == "unverified"
+    assert "SECRET" not in json.dumps(result)
+
+
+def test_probe_instagram_child_reply_access_is_anonymous_and_restores_environment(monkeypatch):
+    from trr_backend.socials.instagram import child_reply_probe
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "private-cookies")
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "fixture_ingest_account")
+    monkeypatch.setenv("DECODO_PASSWORD", "private-proxy")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+
+    def fake_probe(shortcode, parent):
+        assert (shortcode, parent) == ("DY1vXi-kRBb", "17966467277918174")
+        for name in (
+            "SOCIAL_INSTAGRAM_COOKIES_JSON",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME",
+            "DECODO_PASSWORD",
+            "HTTPS_PROXY",
+        ):
+            assert name not in os.environ
+        return {"requests": 3, "positive_reply_proof": False}
+
+    monkeypatch.setattr(child_reply_probe, "probe_child_reply_access", fake_probe)
+    result = modal_jobs.probe_instagram_child_reply_access.local("DY1vXi-kRBb", "17966467277918174")
+    assert result["auth_state"] == "public"
+    assert result["proxy_state"] == "none"
+    assert result["execution_backend"] == "modal"
+    assert os.environ["SOCIAL_INSTAGRAM_COOKIES_JSON"] == "private-cookies"
+    assert os.environ["DECODO_PASSWORD"] == "private-proxy"
+
+
 def test_probe_instagram_public_history_accepts_and_returns_resume_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -901,7 +981,8 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
         assert "schedule" not in reloaded.poll_due_show_season_media_watches._modal_function_options
         assert "schedule" not in reloaded.sync_nbcumv_official_images._modal_function_options
         assert "schedule" not in reloaded.purge_stale_social_worker_heartbeats._modal_function_options
-        assert reloaded.serve_backend_api._modal_function_options["min_containers"] == 0
+        assert reloaded.serve_backend_api._modal_function_options["min_containers"] == 1
+        assert reloaded.serve_backend_api._modal_function_options["region"] == "us"
         assert reloaded.run_admin_operation_v2._modal_function_options["min_containers"] == 0
     finally:
         monkeypatch.delitem(sys.modules, "modal", raising=False)
@@ -1247,14 +1328,19 @@ def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
     }
 
 
+@pytest.mark.parametrize("reddit_enabled", [False, True])
 def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     monkeypatch: pytest.MonkeyPatch,
+    reddit_enabled: bool,
 ) -> None:
     from trr_backend.db import pg
 
     close_calls: list[str] = []
     recorded: list[dict[str, Any]] = []
     media_poll_calls: list[bool] = []
+    reddit_wakes: list[bool] = []
+    monkeypatch.setenv("REDDIT_PIPELINE_V2_ENABLED", "1" if reddit_enabled else "0")
+    monkeypatch.setattr(modal_jobs.dispatch_reddit_capture_work, "spawn", lambda: reddit_wakes.append(True))
 
     def _fake_record_dispatcher_heartbeat(**kwargs):
         recorded.append(kwargs)
@@ -1282,6 +1368,7 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
 
     payload = modal_jobs.heartbeat_remote_executors.local()
     assert media_poll_calls == [True]
+    assert reddit_wakes == ([True] if reddit_enabled else [])
 
     assert payload == {
         "ok": True,
@@ -1376,12 +1463,34 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
     monkeypatch.setitem(sys.modules, "patchright.sync_api", patchright_sync_api)
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", scrapling_fetchers)
     monkeypatch.setattr(modal_jobs, "package_version", lambda package: f"test-{package}")
+    monkeypatch.delenv("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_DOC_IDS", raising=False)
+    monkeypatch.delenv("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME", raising=False)
 
     result = modal_jobs.probe_browser_image_runtime.get_raw_f()()
 
     assert result["healthy"] is True
     assert result["versions"]["chromium"] == "test-chromium"
+    assert result["versions"]["curl-cffi"] == "test-curl-cffi"
+    assert result["versions"]["apify-fingerprint-datapoints"] == "test-apify-fingerprint-datapoints"
+    assert result["instagram_comment_counts"] == {
+        "missing_is_unknown": True,
+        "null_is_unknown": True,
+        "zero_is_known": True,
+        "positive_is_known": True,
+    }
+    assert result["instagram_child_query"] == {
+        "friendly_name": "PolarisPostCommentsChildrenPaginationtQuery",
+        "doc_id": "36239935742272683",
+    }
     assert events == ["enter", "launch", "close", "exit"]
+
+
+def test_instagram_comment_count_runtime_probe_rejects_unknown_as_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import counts
+
+    monkeypatch.setattr(counts, "reported_reply_count", lambda comment: 0)
+    with pytest.raises(RuntimeError, match="instagram_reply_count_contract_failed"):
+        modal_jobs._instagram_comment_count_contract()
 
 
 def test_cast_screentime_modal_function_uses_vision_image() -> None:
@@ -1889,3 +1998,9 @@ def test_social_provider_probe_is_state_free_and_repeatable_in_fresh_process() -
     )
     assert completed.returncode == 0, completed.stderr
     assert "state-free-repeatable" in completed.stdout
+
+
+def test_reddit_rollout_environment_precedes_local_mounts() -> None:
+    image = modal_jobs._build_lean_image_base(runtime_env={"REDDIT_PIPELINE_V2_ENABLED": "0"}, image_factory=_FakeImage)
+    names = [name for name, _, _ in image.operations]
+    assert names.index("env") < names.index("add_local_python_source")

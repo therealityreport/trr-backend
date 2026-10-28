@@ -198,3 +198,57 @@ def test_scrape_api_preserves_transport_metadata(monkeypatch: pytest.MonkeyPatch
     assert scraper.last_retrieval_meta["proxy_source"] == "constructor"
     assert scraper.last_retrieval_meta["curl_cffi_impersonate"] == "chrome131"
     assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_user_detail"]["http_status"] == 200
+
+
+def _scraper_with_failing_requests_session(monkeypatch: pytest.MonkeyPatch) -> TikTokScraper:
+    """Build a scraper whose real requests client fails every attempt without sleeping."""
+    import requests
+
+    monkeypatch.delenv("SOCIAL_TIKTOK_HTTP_CLIENT", raising=False)
+    monkeypatch.delenv("SOCIAL_TIKTOK_PROXY_URLS", raising=False)
+    monkeypatch.delenv("SOCIAL_CRAWLEE_PROXY_URLS_TIKTOK", raising=False)
+    scraper = TikTokScraper()
+    client = scraper._ensure_http_client()  # real RequestsTikTokHttpClient
+    monkeypatch.setattr(client, "_sleep_before_retry", lambda _attempt: None)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise requests.exceptions.ConnectionError("proxy tunnel closed")
+
+    monkeypatch.setattr(client._session, "get", _boom)  # type: ignore[attr-defined]
+    monkeypatch.setattr(scraper, "_rate_limit", lambda *_a, **_k: None)
+    return scraper
+
+
+def test_wrapped_transport_failure_is_caught_by_fetch_posts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.tiktok.http_client import TikTokHttpRequestError
+
+    scraper = _scraper_with_failing_requests_session(monkeypatch)
+
+    result = scraper.fetch_posts("bravotv", "sec-1", 0, 0)
+
+    assert result is None
+    assert scraper._last_api_fail_reason == "request_error"
+    endpoint = scraper.last_retrieval_meta["endpoint_responses"]["fetch_posts"]
+    assert endpoint["failure_reason"] == "request_error"
+    # The wrapper must stay catchable both ways.
+    import requests
+
+    assert issubclass(TikTokHttpRequestError, requests.exceptions.RequestException)
+    assert issubclass(TikTokHttpRequestError, RuntimeError)
+
+
+def test_wrapped_transport_failure_is_caught_by_fetch_user_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = _scraper_with_failing_requests_session(monkeypatch)
+
+    assert scraper.fetch_user_detail("bravotv", 0) is None
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_user_detail"]["failure_reason"] == "request_error"
+
+
+def test_wrapped_transport_failure_records_comment_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = _scraper_with_failing_requests_session(monkeypatch)
+    scraper._direct_comment_api_enabled_override = True
+
+    comments = scraper.fetch_comments("123", username="bravotv", delay=0)
+
+    assert comments == []
+    assert scraper.last_comment_fetch_reason == "request_error"

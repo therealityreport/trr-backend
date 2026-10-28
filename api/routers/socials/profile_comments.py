@@ -184,6 +184,9 @@ async def post_social_account_comments_audit_cursor_retries_route(
     payload: SocialAccountCommentsAuditCursorRetryRequest,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -245,10 +248,10 @@ async def post_social_account_comments_scrape_route(
     user: InternalAdminUser,
     dry_run: bool = Query(default=False),
 ) -> dict[str, Any]:
-    from trr_backend.socials.pipelines.account_catalog.launch import (
-        INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
-        INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
-    )
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    if not (dry_run or payload.dry_run):
+        _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -277,6 +280,11 @@ async def post_social_account_comments_scrape_route(
             )
         except SocialIngestValidationError as exc:
             raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+
+    from trr_backend.socials.pipelines.account_catalog.launch import (
+        INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+        INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+    )
 
     execution_state = await run_in_threadpool(
         _resolve_social_account_comments_route_execution,
@@ -418,6 +426,9 @@ def post_social_account_comments_run_rebalance_route(
     run_id: UUID,
     _: InternalAdminUser,
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.pipelines.comments.instagram import rebalance_slow_instagram_comments_shards
 
     if platform.strip().lower() != "instagram":
@@ -450,6 +461,9 @@ def post_social_account_comments_run_resume_route(
     run_id: UUID,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -500,6 +514,9 @@ async def post_social_account_comments_run_repair_auth_route(
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import SocialIngestValidationError
     from trr_backend.socials.pipelines.comments.instagram import (
         execute_social_account_comments_run_auth_repair,
@@ -540,6 +557,9 @@ async def post_social_account_comments_run_public_recovery_route(
     payload: SocialAccountCommentsPublicRecoveryRequest,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -597,6 +617,9 @@ async def post_social_account_comments_run_authenticated_followup_route(
     payload: SocialAccountCommentsAuthenticatedFollowupRequest,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,
@@ -681,6 +704,9 @@ def post_social_account_comments_run_guarded_restart_route(
     user: InternalAdminUser,
     use_proof_defaults: bool = Query(default=False),
 ) -> dict[str, Any]:
+    from .catalog_backfill import _reject_legacy_instagram_launch
+
+    _reject_legacy_instagram_launch(platform)
     from trr_backend.socials.control_plane.runtime import (
         SocialIngestConflictError,
         SocialIngestValidationError,

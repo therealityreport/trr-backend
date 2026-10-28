@@ -26,7 +26,7 @@ anyio==4.15.1
     #   sse-starlette
     #   starlette
     #   watchfiles
-apify-fingerprint-datapoints==0.13.0
+apify-fingerprint-datapoints==0.15.0
     # via
     #   browserforge
     #   scrapling
@@ -76,6 +76,7 @@ charset-normalizer==3.4.7
 click==8.4.2
     # via
     #   browserforge
+    #   dbos
     #   modal
     #   scrapling
     #   uvicorn
@@ -83,19 +84,23 @@ colorama==0.4.6
     # via crawlee
 crawlee==1.7.3
     # via -r requirements.modal.browser.in
+croniter==6.2.4
+    # via dbos
 cryptography==50.0.2
     # via
     #   -r requirements.modal.lean.in
     #   google-auth
     #   pyjwt
-cssselect==1.4.0
+cssselect==1.5.0
     # via scrapling
 cssselect2==0.9.0
     # via cairosvg
-curl-cffi==0.15.0
+curl-cffi==0.16.3
     # via
     #   -r requirements.modal.lean.in
     #   scrapling
+dbos==3.3.0
+    # via -r requirements.modal.lean.in
 defusedxml==0.7.1
     # via cairosvg
 deprecation==2.1.0
@@ -164,6 +169,7 @@ greenlet==3.5.3
     # via
     #   patchright
     #   playwright
+    #   sqlalchemy
 grpcio==1.81.1
     # via
     #   google-api-core
@@ -249,14 +255,14 @@ packaging==26.2
     # via
     #   deprecation
     #   gunicorn
-patchright==1.61.2
+patchright==1.64.1
     # via scrapling
 pillow==12.3.0
     # via
     #   -r requirements.modal.lean.in
     #   cairosvg
     #   reportlab
-playwright==1.61.0
+playwright==1.64.0
     # via
     #   -r requirements.modal.browser.in
     #   scrapling
@@ -286,7 +292,13 @@ protobuf==6.33.6
     #   proto-plus
 psutil==7.2.2
     # via crawlee
-psycopg2-binary==2.9.12
+psycopg==3.3.6
+    # via
+    #   -r requirements.modal.lean.in
+    #   dbos
+psycopg-binary==3.3.6
+    # via psycopg
+psycopg2-binary==2.9.13
     # via -r requirements.modal.lean.in
 pyasn1==0.6.4
     # via
@@ -325,7 +337,10 @@ pyjwt==2.15.1
     #   firebase-admin
     #   supabase-auth
 python-dateutil==2.9.0.post0
-    # via botocore
+    # via
+    #   botocore
+    #   croniter
+    #   dbos
 python-dotenv==1.2.2
     # via
     #   -r requirements.modal.lean.in
@@ -334,7 +349,9 @@ python-dotenv==1.2.2
 python-multipart==0.0.32
     # via -r requirements.modal.lean.in
 pyyaml==6.0.3
-    # via uvicorn
+    # via
+    #   dbos
+    #   uvicorn
 realtime==2.31.0
     # via supabase
 redis==8.0.1
@@ -358,12 +375,11 @@ requests-oauthlib==2.0.0
     # via google-auth-oauthlib
 rich==14.3.4
     # via
-    #   curl-cffi
     #   modal
     #   typer
 s3transfer==0.19.0
     # via boto3
-scrapling==0.4.12
+scrapling==0.5
     # via -r requirements.modal.browser.in
 sentry-sdk==2.63.0
     # via -r requirements.modal.lean.in
@@ -379,6 +395,8 @@ soupsieve==2.10
     # via
     #   -r requirements.modal.lean.in
     #   beautifulsoup4
+sqlalchemy==2.1.4
+    # via dbos
 sse-starlette==3.4.5
     # via -r requirements.modal.lean.in
 starlette==1.3.1
@@ -429,11 +447,13 @@ typing-extensions==4.16.0
     #   google-genai
     #   grpcio
     #   modal
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   pyee
     #   realtime
     #   scrapling
+    #   sqlalchemy
     #   starlette
     #   synchronicity
     #   typing-inspection

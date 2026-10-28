@@ -1370,6 +1370,12 @@ def start_social_account_catalog_backfill(
     enable_cap4_canary: bool = False,
 ) -> dict[str, Any]:
     _sync_core_overrides()
+    from trr_backend.ingestion.composition import v2_owns_instagram_launches
+
+    if str(platform or "").strip().lower() == "instagram" and v2_owns_instagram_launches():
+        raise SocialIngestConflictError(
+            "INSTAGRAM_V2_OWNS_LAUNCHES", "Instagram runs start from the v2 Instagram scraper on this page."
+        )
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     source_scope = _normalize_catalog_source_scope(source_scope)
@@ -1688,6 +1694,12 @@ def begin_social_account_catalog_backfill_launch(
     enable_cap4_canary: bool = False,
 ) -> dict[str, Any]:
     _sync_core_overrides()
+    from trr_backend.ingestion.composition import v2_owns_instagram_launches
+
+    if str(platform or "").strip().lower() == "instagram" and v2_owns_instagram_launches():
+        raise SocialIngestConflictError(
+            "INSTAGRAM_V2_OWNS_LAUNCHES", "Instagram runs start from the v2 Instagram scraper on this page."
+        )
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):

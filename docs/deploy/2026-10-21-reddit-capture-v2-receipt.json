@@ -1,0 +1,247 @@
+{
+  "environment": "main",
+  "workspace": "admin-56995",
+  "app": "trr-backend-jobs",
+  "supabase_project": "vwxfvzutyufrkhfgoeaa",
+  "reader_version": "v92",
+  "rollback_version": "v91",
+  "canaries": [
+    {
+      "run": {
+        "id": "0d760c98-c8f0-4185-b50e-71b152ff302c",
+        "status": "completed",
+        "control_state": "active",
+        "total_rows": 3,
+        "matched_rows": 3,
+        "created_at": "2026-10-21 21:25:15.823699+00:00",
+        "completed_at": "2026-10-21 21:25:45.518425+00:00"
+      },
+      "contract": {
+        "contract_version": 2,
+        "control_state": "active",
+        "requested": 2,
+        "satisfied": 2,
+        "unresolved": 0,
+        "outcomes": {
+          "discovery": {
+            "requested": 2,
+            "satisfied": 2,
+            "unresolved": 0,
+            "states": {
+              "committed": 2
+            }
+          }
+        },
+        "coverage": {
+          "state": "complete",
+          "scope": "window",
+          "queries": [
+            {
+              "pages": 1,
+              "query": "listing:new",
+              "reason": "boundary_reached",
+              "complete": true,
+              "newest_observed": "2026-10-21T13:19:02Z",
+              "oldest_observed": "2026-09-17T10:52:10Z"
+            }
+          ],
+          "reasons": [],
+          "requested_end": "2026-10-21T21:25:15.442076+00:00",
+          "requested_start": "2026-10-20T21:25:15.442076+00:00",
+          "chronological_boundary_proven": true
+        },
+        "retry_at": null,
+        "requested_phases": [
+          "discovery"
+        ]
+      }
+    },
+    {
+      "run": {
+        "id": "5c247c57-3c2b-4786-859b-6ed9945697b2",
+        "status": "completed",
+        "control_state": "active",
+        "total_rows": 1,
+        "matched_rows": 1,
+        "created_at": "2026-10-21 21:25:53.524309+00:00",
+        "completed_at": "2026-10-21 21:26:29.667251+00:00"
+      },
+      "contract": {
+        "contract_version": 2,
+        "control_state": "active",
+        "requested": 4,
+        "satisfied": 4,
+        "unresolved": 0,
+        "outcomes": {
+          "comments": {
+            "requested": 1,
+            "satisfied": 1,
+            "unresolved": 0,
+            "states": {
+              "committed": 1
+            }
+          },
+          "media": {
+            "requested": 3,
+            "satisfied": 3,
+            "unresolved": 0,
+            "states": {
+              "committed": 3
+            }
+          }
+        },
+        "coverage": {
+          "state": "not_requested",
+          "reasons": [
+            "discovery_not_requested"
+          ]
+        },
+        "retry_at": null,
+        "requested_phases": [
+          "comments",
+          "media"
+        ]
+      }
+    }
+  ],
+  "capture_states": [
+    {
+      "phase": "comments",
+      "state": "committed",
+      "successful_at": "2026-10-21 21:26:10.533938+00:00",
+      "saved_count": "6",
+      "reported_count": "6",
+      "assets": null
+    },
+    {
+      "phase": "media",
+      "state": "committed",
+      "successful_at": "2026-10-21 21:26:25.614651+00:00",
+      "saved_count": null,
+      "reported_count": null,
+      "assets": "2"
+    }
+  ],
+  "assets": {
+    "associations": 2,
+    "assets": 2
+  },
+  "enabled_deployment": {
+    "version": "v94",
+    "time_deployed": "2026-10-21 17:26:57-04:00",
+    "client": "1.5.5",
+    "deployed_by": "admin-56995",
+    "commit": null,
+    "tag": "reddit-v2-enabled-22ae7a68"
+  },
+  "automatic_dispatch_canary": {
+    "run": {
+      "id": "d34a9379-bff5-4e13-b96c-a83564943378",
+      "status": "completed",
+      "contract_version": 2,
+      "total_rows": 1,
+      "error_message": null
+    },
+    "contract": {
+      "contract_version": 2,
+      "control_state": "active",
+      "requested": 2,
+      "satisfied": 2,
+      "unresolved": 0,
+      "outcomes": {
+        "comments": {
+          "requested": 1,
+          "satisfied": 1,
+          "unresolved": 0,
+          "states": {
+            "committed": 1
+          }
+        },
+        "media": {
+          "requested": 1,
+          "satisfied": 1,
+          "unresolved": 0,
+          "states": {
+            "committed": 1
+          }
+        }
+      },
+      "coverage": {
+        "state": "not_requested",
+        "reasons": [
+          "discovery_not_requested"
+        ]
+      },
+      "retry_at": null,
+      "requested_phases": [
+        "comments",
+        "media"
+      ]
+    },
+    "targets": [
+      {
+        "kind": "comments",
+        "state": "committed",
+        "result": {
+          "satisfied_by": "existing_capture"
+        }
+      },
+      {
+        "kind": "media",
+        "state": "committed",
+        "result": {
+          "satisfied_by": "existing_capture"
+        }
+      }
+    ]
+  },
+  "deterministic_analysis_canary": {
+    "job_id": "899338d4-bed1-4927-b1dd-bafe1f8e3973",
+    "state": "completed",
+    "error": null,
+    "summary": {
+      "coverage": {
+        "posts": 1,
+        "sample_limit": 1000,
+        "capture_state": "complete",
+        "sample_method": "post_time_depth_score_round_robin",
+        "saved_comments": 6,
+        "comments_sampled": 6,
+        "reported_comments": 6,
+        "comments_available": 6,
+        "reported_minus_saved": 0
+      },
+      "source_window": {
+        "end": "2026-10-21T21:25:15.442076+00:00",
+        "start": "2026-10-20T21:25:15.442076+00:00",
+        "period_keys": [
+          "reddit-v2-canary-20261021"
+        ],
+        "boundaries_known": true
+      },
+      "analysis_versions": {
+        "prompt": "2",
+        "schema": "1",
+        "topics": "1",
+        "analysis": "2",
+        "cast_aliases": "1"
+      },
+      "capture_timestamps": [
+        {
+          "phase": "comments",
+          "successful_at": "2026-10-21 21:26:10.533938+00:00",
+          "reddit_post_id": "1xbbzj3",
+          "source_revision": "ac38e53368eee0a42c85669d8d0686db9063f169d73b13a5208151ec7b912e02"
+        },
+        {
+          "phase": "media",
+          "successful_at": "2026-10-21 21:26:25.614651+00:00",
+          "reddit_post_id": "1xbbzj3",
+          "source_revision": null
+        }
+      ],
+      "uncertainty_policy": "Abstain when evidence, sarcasm or cast identity is ambiguous; retain mixed sentiment.",
+      "sentiment_interpretation": "not_computed"
+    }
+  }
+}

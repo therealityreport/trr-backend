@@ -33,7 +33,7 @@ from trr_backend.socials._scrapling_http_utils import (
     status_code as _status_code,
 )
 from trr_backend.socials.scrapling_transport import (
-    build_stealthy_fetcher,
+    build_async_stealthy_session,
     merge_response_cookies,
     resolve_scrapling_fetcher_options,
     safe_cookie_metadata,
@@ -120,11 +120,11 @@ class SocialBladeScraplingFetcher:
             allowed_keys=_SOCIALBLADE_SCRAPLING_OPTION_KEYS,
         )
         self._scrapling_fetcher_metadata = scrapling_fetcher_metadata(
-            "StealthyFetcher",
+            "AsyncStealthySession",
             self._scrapling_fetcher_options.metadata,
             safe_scrapling_proxy_metadata(),
         )
-        self._fetcher = build_stealthy_fetcher()
+        self._captured_responses: list[Any] = []
         self._http_client: httpx.AsyncClient | None = None
         self._request_count = 0
         self._warmup_cookie_delta: dict[str, str] = {}
@@ -192,7 +192,7 @@ class SocialBladeScraplingFetcher:
 
         if self._platform in _TRPC_CAPTURE_PLATFORMS:
             captured_payload = self._extract_captured_platform_payload(html, platform=self._platform)
-            captured_xhr = self._response_captured_xhr(response)
+            captured_xhr = self._captured_responses
             self._captured_xhr_count = len(captured_xhr)
             self._captured_xhr_paths = self._captured_xhr_safe_paths(captured_xhr)
             xhr_payload = self._extract_captured_platform_payload_from_xhr(captured_xhr, platform=self._platform)
@@ -374,8 +374,7 @@ class SocialBladeScraplingFetcher:
 
     async def _fetch_page(self, url: str) -> Any:
         self._request_count += 1
-        return await self._fetcher.async_fetch(
-            url,
+        async with build_async_stealthy_session(
             **self._scrapling_fetcher_options.kwargs,
             headless=self._headless,
             network_idle=False,
@@ -385,12 +384,16 @@ class SocialBladeScraplingFetcher:
             proxy=self._browser_proxy,
             extra_headers=_build_nav_headers(url),
             page_action=self._capture_platform_page_trpc if self._platform in _TRPC_CAPTURE_PLATFORMS else None,
-            capture_xhr=r"/api/trpc/",
+            record_requests=True,
+            max_recorded_requests=100,
             wait=2_000 if self._platform in _TRPC_CAPTURE_PLATFORMS else 0,
             timeout=self._timeout_ms,
             retries=1,
             retry_delay=1.0,
-        )
+        ) as session:
+            response = await session.fetch(url)
+            self._captured_responses = session.network.search(url_pattern=r"/api/trpc/", limit=None)
+            return response
 
     async def _capture_platform_page_trpc(self, page: Any) -> None:
         await page.evaluate(
@@ -888,14 +891,6 @@ class SocialBladeScraplingFetcher:
             SocialBladeScraplingFetcher._captured_payload_history_count(payload),
             SocialBladeScraplingFetcher._captured_payload_daily_total_count(payload),
         )
-
-    @staticmethod
-    def _response_captured_xhr(response: Any) -> list[Any]:
-        captured_xhr = getattr(response, "captured_xhr", []) or []
-        try:
-            return list(captured_xhr)
-        except TypeError:
-            return []
 
     @staticmethod
     def _captured_xhr_safe_paths(captured_xhr: list[Any]) -> list[str]:

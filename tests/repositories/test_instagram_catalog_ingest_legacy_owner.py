@@ -128,6 +128,12 @@ def test_fresh_import_orders_preserve_exact_identity_and_room_contracts(
         "local = catalog._LOCAL_ROOM_FUNCTIONS",
         "assert local",
         "assert set(local) == catalog._LOCAL_ROOM_NAMES",
+        "for name in local:",
+        "    assert name in catalog._CORE_ROOM_WRAPPERS, name",
+        "    assert catalog._room_callable(name, local[name]) is local[name], name",
+        "patched = lambda *args, **kwargs: 'patched'",
+        "repo._instagram_post_payload = patched",
+        "assert catalog._room_callable('_instagram_post_payload', local['_instagram_post_payload']) is patched",
         "sentinel = object()",
         "repo._r3_catalog_ingest_fresh_probe = sentinel",
         "assert catalog._core._r3_catalog_ingest_fresh_probe is sentinel",
@@ -152,3 +158,47 @@ def test_repository_patch_before_catalog_ingest_reload_stays_visible() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("patched", [False, True])
+def test_batch_upsert_selects_preservation_only_for_local_builder(monkeypatch, patched) -> None:
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    connection = object()
+    preservation_calls = []
+    builder_calls = []
+
+    def local_builder(_context, **kwargs):
+        builder_calls.append(kwargs)
+        return None
+
+    def patched_builder(_context, **kwargs):
+        builder_calls.append(kwargs)
+        return None
+
+    def preservation(shortcodes, **kwargs):
+        preservation_calls.append(shortcodes)
+        assert kwargs["conn"] is connection
+        return {"post-1": {"description": "preserved"}}
+
+    monkeypatch.setattr(catalog_ingest, "_instagram_post_payload", local_builder)
+    monkeypatch.setitem(catalog_ingest._LOCAL_ROOM_FUNCTIONS, "_instagram_post_payload", local_builder)
+    if patched:
+        monkeypatch.setattr(legacy_repo, "_instagram_post_payload", patched_builder, raising=False)
+    monkeypatch.setattr(
+        catalog_ingest._payload_sidecars, "payload_write_transaction", lambda *_a, **_k: nullcontext(connection)
+    )
+    monkeypatch.setattr(catalog_ingest._payload_sidecars, "fetch_post_preservation_rows", preservation)
+    assert (
+        catalog_ingest._batch_upsert_instagram_posts(
+            None, job_id=None, account="bravotv", posts=[SimpleNamespace(shortcode="post-1")], conn=connection
+        )
+        == []
+    )
+    assert preservation_calls == ([] if patched else [["post-1"]])
+    assert len(builder_calls) == 1
+    if patched:
+        assert "existing_row" not in builder_calls[0]
+    else:
+        assert builder_calls[0]["existing_row"] == {"description": "preserved"}

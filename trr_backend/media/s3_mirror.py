@@ -1223,8 +1223,11 @@ def mirror_url_to_s3(
     bucket: str | None = None,
     max_bytes: int = 50 * 1024 * 1024,
     tweet_url: str | None = None,
+    key_namespace: str | None = None,
 ) -> MirrorResult:
     source_url = str(url or "").strip()
+    if key_namespace not in (None, "reddit"):
+        raise ValueError("Unsupported media key namespace")
     if not _is_http_url(source_url):
         return MirrorResult(
             source_url=source_url,
@@ -1384,6 +1387,7 @@ def mirror_url_to_s3(
                     bucket=target_bucket,
                     max_bytes=max_bytes_limit,
                     tweet_url=None,  # prevent infinite recursion
+                    key_namespace=key_namespace,
                 )
                 if result.hosted_url and result.status in {"mirrored", "skipped"}:
                     return MirrorResult(
@@ -1472,6 +1476,8 @@ def mirror_url_to_s3(
         content_type = sniffed_video_content_type
         ext = infer_media_extension(source_url, content_type)
     key = build_shared_media_s3_key(sha256, ext)
+    if key_namespace:
+        key = f"{key_namespace}/{key}"
 
     try:
         head = _head_object(s3, target_bucket, key)

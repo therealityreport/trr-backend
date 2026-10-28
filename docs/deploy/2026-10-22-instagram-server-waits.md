@@ -1,0 +1,168 @@
+# Instagram server waits and January recovery — October 22, 2026
+
+Current operational release, verified through 18:50 UTC: Modal v122, tag `ig-operational-recovery-1ca33fe98701`, is deployed and verified in `admin-56995 / main / trr-backend-jobs`, and its matching Mac worker is installed and online. It contains bounded local-worker shutdown, removal of residual invented retry dates, and preservation of unseen comments during public count gaps. January saved-results acceptance remains open with the January owner. The frozen release preserves the newer v121 API warm-container floor and v120 TikTok repair. The dated v119 observations below remain historical evidence; they are not the current January frontier.
+
+Latest execution snapshot at 19:34:15 UTC (15:34 EDT): **75 listing pages, 900 native IDs and 1,060 counted requests**, with the next page active and no error or future retry deadline. Retained native dates reach July 14. The same run recovered automatically after the confirmed Mac reboot; January membership and downstream targets remain zero. A separate reviewed repair committed and verified 236 existing reply-parent links without changing content, media, metrics or capture clocks. January source completeness and selected-media acceptance remain open. **Full-history stays disabled.**
+
+Historical status at 11:13 UTC: the permanent removal of local Instagram penalty cooldowns was deployed and installed. Modal v119 and the matching Mac release used the reviewed anonymous ordered-profile adapter. The normal worker was online and the January successor had committed four listing pages and receipts, with 59 counted requests and a fifth page active. There was no blocked reason or retry deadline. January was not complete: traversal was still in October and January downstream targets had not been created. The earlier HTTP 401 and zero-page state below are preserved historical evidence.
+
+## Policy and source
+
+Backend commit `fa8c4f74c6fe7322d07aa9f0b7bd26d934dd5327` contains the scoped implementation and tests. Workspace policy commit `87e63c620fc4b5eeb03a08ec6f344b518a98bf53` documents server-only waits and removes the two obsolete public cooldown environment settings. Existing authenticated Relay integration and unrelated dirty work were preserved outside these commits.
+
+- Source gate and detail transport ignore legacy mixed-origin `cooldown_until` values. Only actual source Retry-After creates or extends `server_retry_after_until`; later failures cannot shorten an active server deadline.
+- Reply-access rejection retains failure counts, lanes, evidence, and finite attempts without a synthesized five-minute/exponential delay. Only a checkpoint marked `retry_source=server_retry_after` can defer replies.
+- Legacy posts/comments fetchers use separate server-only deadline files. Comments SQL pacing clamps old inflated reservations while retaining the actual server deadline and ordinary request spacing.
+- Selected-account checkpoint and exact identity blockers remain enforced. Instagram auth failure records create no timed penalty; other platforms retain their existing policy.
+- The local worker rechecks live scheduling state at most five seconds after a journaled wait. It does not rewrite immutable decisions or bypass future target/source deadlines.
+- Request accounting, authenticated rolling request caps, finite attempts, deadlines, ownership, placement, cancellation, and the full-history gate remain intact. The public rolling-window exemption was already present in v112 and was not introduced here. This report does not claim a separate fixed per-run public request-count cap.
+
+## Database
+
+Migration `20261022120000_instagram_server_retry_after.sql` was applied at 07:30:20 UTC and registered in `supabase_migrations.schema_migrations` for verified project `vwxfvzutyufrkhfgoeaa` (`trr-core`). SHA-256: `0137ed5058c1c1816d7c9b6dac832c52f538feba7e404d940dd31921db935ab6`.
+
+It adds nullable `server_retry_after_until` to `social.instagram_detail_request_lanes` and the existing `social.ig_comment_rate_pace`. Old mixed deadlines were not backfilled as server instructions. Both deployed columns were verified. There are no app direct-SQL ownership changes.
+
+## Runtime and API recovery
+
+The combined candidate preserved the latest TikTok and header/catalog releases. Modal v116 deployed the cooldown/GIF change, but its final API canary timed out. Live logs showed active long-lived status streams and the provider reported eight running inputs plus queued requests. The API had no input-concurrency decorator. The bounded repair adds `@modal.concurrent(max_inputs=16, target_inputs=8)` only to the ASGI API function, preserving the eight-container ceiling, worker concurrency, timeout, and database pool limits. This is not a claim that all stream-query latency is fixed.
+
+Modal v117 (`ig-no-local-cooldown-api-e6c04618e3a7`) passed the required `main` readiness command and API canary on its first attempt. The later v118 (`reddit-periods-674862fe`, deployed 07:42:43 UTC) preserved every v117 file outside its five disjoint reviewed Reddit period files. No repair was lost. All 38 function bindings and five cron schedules remained identical to the pre-rollout provider snapshot.
+
+| Verification | Result |
+| --- | --- |
+| Live backend modules | 59 source hashes matched; public default and full-history gate closed |
+| Normal GIF evidence | Exact signed native GIF URL survives selection; credentials and lookalike delivery hosts excluded; zero Instagram requests |
+| API repair module | Live `modal_jobs.py` SHA-256 `593d7b4950eb677c54afd29562b33fe3c2f7451523c2c7418519482f0e75f91f` |
+| `/health/live` | HTTP 200, 0.218 seconds |
+| `/health` | HTTP 200, DB connected, 0.277 seconds |
+| Unknown `/readyz` route | Expected HTTP 404, 0.396 seconds |
+| `/health/db-pressure` | HTTP 200, `pool_pressure_ok`, 0.170 seconds |
+| Mac installation | All 2,645 files matched the adopted v118 manifest; 41 virtual-environment entrypoints relocated |
+| Runnable copies | Current `ig-no-local-cooldown-api-e60990617c12`, with v112 `ig-public-lane-097e66e1-ab4f2feec7ba` retained as rollback; obsolete temporary copy moved to actual Trash |
+
+The frozen manifest, rather than a clean shared checkout revision, identifies the complete deployed source. Backend commit fa8c4f74 identifies only this task's owned changes. No TRR-APP build was needed: this change modifies backend source policy and runtime admission, with no app response-contract change.
+
+## Historical January execution through 07:48 UTC
+
+Existing run: `c5880efe-25cf-4aeb-999a-efc36a0b9701`, generation 5, immutable intent hash `12148e35aeae0182696be90e610584e95d0cf67532c24c4320c458bb6cb2afb7`. Scope remains January 1 inclusive through February 1 exclusive, 2026 UTC; anonymous public local execution; details/comments/media selected; one details worker, one comments worker; media followups false.
+
+At 07:45:07 UTC, one fenced reconciliation cleared only `listing/page:root.next_attempt_at` from `2026-10-22T12:16:13.002224+00:00` to null. All other target fields, run fields, counters, checkpoints, and immutable ordinal0 wait decision remained equal. The partition was already due. The old identity lane and failure history were left intact.
+
+The preserved investigation attributes that deadline to HTTP 401 and the old third-step twelve-hour local ladder. Raw response headers were not retained; this is not a claim that their absence was verified. There was no recorded explicit server deadline and the new server-only column remained null. Future explicit server instructions must still be obeyed.
+
+The execution owner independently verified preservation, installed the matching candidate, and ran exactly one production activity under the normal coordinator lease. That activity made two counted requests and returned unresolved `public_access_backoff` with allowlisted diagnostic HTTP 401, method POST, GraphQL endpoint. The owner stopped at the activity boundary. At 07:48:19 UTC:
+
+- Run state remains `running`, complete false, generation 5.
+- Listing has one unresolved target, attempts 2, requests 2, retry_at null.
+- There are zero discovery pages, comment pages, and receipts; later stages have not run.
+- Worker is offline with zero live target owners and zero uncertain dispatches.
+- Full-history gate remains closed.
+
+No January coverage or canonical completion is established by the catalog setup, the already verified original GIF repair, or deployment health. Source qualification and January result verification remain open. The same quiet heartbeat follows owner-controlled recovery; it does not blindly retry the rejected request or create a replacement controller.
+
+## Validation and private receipts
+
+Reused unchanged passing evidence: 127 focused core checks; 302 checks from the parent policy/fetcher batch; 233 integration checks. After old-policy assertions were updated, 35 affected integration cases passed; the affected admission SQL batch passed all 44 tests, including active and expired real server waits beside an inflated legacy reservation. The durable wait recovery regression passed two cases. The API concurrency/schedule batch passed three cases. Final scoped Ruff and diff checks passed. Independent reviews closed both original findings and found no remaining issue in the wait-recheck or API recovery batches.
+
+The 37 unrelated job-runner/auto-public test failures reproduced with the unchanged baseline fetcher. Their exact failing-node sets matched; this report does not describe that suite as passing. No broad suite was repeated against unchanged inputs.
+
+Private operational receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-no-local-cooldown-01a16023/`: `migration-applied.json`, `january-timer-reconciled.json`, `live-core.json`, `live-gif.json`, `release-api/deploy.log`, `release-api/api-closure.json`, `release-current/manifest.json`, `release-current/preservation.json`, and `release-current/live-modal-delta.json`. The matching adopted source is `/Users/thomashulihan/.codex/tmp/trr-reddit-periods-01a16033/source`.
+
+Worker-owner receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`: `integrated-control-before.json`, `first-january-activity-result.json`, and `after-first-january-activity.json`. The first activity result, raw provider rejection, and zero-page outcome remain failure evidence, not successful ingestion.
+
+## Ordered public rollout and verified continuation
+
+The recovery replaced the obsolete listing contract with an explicit new root. It did not reinterpret an old cursor or change the public-mode default. The new frozen family is `instagram_profile_ordered_public`, source contract 2 / adapter 1; details and comments retain their existing public families. This family requires an explicit bounded date window.
+
+Native grid cards establish membership. Separate retained native permalink evidence establishes dates and actual owners; the adapter does not add fabricated timestamps to grid responses. Partial hydration survives a retry without advancing the cursor. Cache reuse requires original retained evidence, matching identities, valid freshness and force policy, and original capture clocks. Out-of-window captures do not write canonical posts or downstream targets.
+
+The traversal is capped at 1,024 committed native pages. The accepted window boundary requires observed January membership followed by three fully dated, monotone pages entirely before January 1, excluding known pins. Missing pin facts remain unknown. Its evidence label is `ordered_window_crossing_heuristic_v1`; it is not certified chronology or provider exhaustion. An access boundary, missing proof, repeated cursor or page cap remains unresolved.
+
+### Source, review and deployment
+
+The maintained-source candidate is `ig-ordered-public-9a093967b23d`, with 2,656 files and file-map SHA-256 `9a093967b23d8597c5586336f429ab157d167ea1a348dac897b121258dc95230`. It records HEAD `d65d1f9f1e8f4b05549e6b4c2b68bd115d967d04`, owned patch `a198846217e039c83cc0bc1e76af883e865ce3238fda06363395d6f7e9dc7a47`, and the complete preserved dirty scope. The full manifest identifies the deployed combined source; a scoped local commit alone does not identify all previously accepted authentication and attachment work.
+
+The candidate preserves all 2,645 prior release paths, with 21 classified changes and 11 declared additions. Four newer maintained runtime files include six reviewed repairs: due sync retry, cookie domain boundaries, Threads session resolution off the event loop, Twitter search error propagation, comment-mirror conflict/savepoint handling, and per-anchor Twitter/YouTube transactions. Eighteen focused checks and Ruff passed. Reversing those six patches from private copies exactly reproduced the prior four runtime files. One read-only metadata query against verified `trr-core` confirmed the existing comment-mirror unique index is valid, ready, and matches the corrected expression and predicate. No schema or data mutation was needed for this adapter rollout.
+
+Independent review found one native-owner proof gap. The fix reads the actual unwrapped native detail node without a request-account fallback, rejects missing or mismatched required owner identities, and preserves actual collaborator owners. Fifteen affected checks passed, including wrapped and missing-owner cases and affected PostgreSQL/cache/worker paths. The fix-only review and narrow recovery follow-up found no remaining issue. Passing checks on unchanged inputs were reused.
+
+Modal **v119**, tag `ig-ordered-public-9a093967b23d`, deployed at 10:44:24 UTC to `admin-56995/main/trr-backend-jobs`, app `ap-DkLTRoSvqhbkGO7fHyHxrD`. The required deployment wrapper completed `verify_modal_readiness.py --json --env main` successfully and the health canary returned 200 on its first attempt. All 38 function bindings and five schedules match the prior provider snapshot; the accepted deployment flags are unchanged.
+
+Actual deployed API image `im-6BznD2aBD4LLE0uSdQSZV8` matched 68 expected module hashes and passed the new source-family, native date/owner, page-cap, server-wait and full-history guards. A fresh API container on the same image passed GIF selection, signed delivery URL retention, credential exclusion and lookalike-host checks. These runtime smokes made zero Instagram requests and zero database writes. Container start times, app membership, API-function health logs and actual image/source hashes bind this proof to v119; no locally built `Image.run` result is claimed as deployed proof.
+
+### Installed worker and successor
+
+The matching Mac release has all 2,656 source files verified and 41 virtual-environment entrypoints relocated. The normal launchd worker started at 11:05:02 UTC, PID 71400, with the exact release as its working directory. The macOS process image resolves to Homebrew `Python.app`; the installed script path, working directory and source hashes establish the release identity. No restart was made for the earlier absolute-argv false negative.
+
+The predecessor `c5880efe-25cf-4aeb-999a-efc36a0b9701` is cancelled at generation 6 and held with `superseded_public_ordered_contract`. Its original intent and non-lease target history remain preserved. The clean successor is `2aef72ed-110c-4af9-b2b3-4a45da170a32`, generation 1, intent hash `10746e1197ea8b5f7272a90c662a2d1ebfd6e36a8a01cda4be1c73be428b9fc4`. Only the source profile differs from the original January choices: network scope, January 1 inclusive to February 1 exclusive UTC, force false, details/comments/media selected, one detail and one comment worker, comment media follow-ups false, and attempt budgets 12/12/3.
+
+The first normal installed-worker activity committed a real listing page with 13 counted requests, one receipt, one discovery page and 12 native detail dates. It stopped at the planned boundary. A committed target retains its owner token as receipt provenance; `local_dispatch_status` treats an exact receipt or settled outcome as settled before dispatch. The normal daemon replayed the journal without refetching the root. No manual clearing or retry was needed.
+
+| Observed time | Verified result |
+| --- | --- |
+| 11:09:30 UTC | Root unchanged at one attempt / 13 requests; second page committed at one attempt / 14 requests; third page active at one attempt / 12 requests. All target blocked reasons and retry deadlines null. Two committed pages contain 24 native IDs; the newest committed page added 12 with zero overlap. |
+| 11:11 UTC | Three committed pages and 36 retained per-card dates were read through `Evidence.read` and the native parser. Dates span October 5 at 17:59:32 UTC through October 22 at 02:00:01 UTC. Total requests 47, with the fourth page active. |
+| 11:13:13 UTC | Worker online; four committed listing pages, discovery pages and receipts; 59 requests; fifth target active. No blocked or retry fields. Full-history gate closed. |
+
+The observer's earlier `errors` count grouped all unresolved targets, including healthy active work. It was not an error count: blocked reason, last error code and retry deadline were null. The private read-only observer now separates unresolved activity from settled receipt history; no business code or stored run state was changed for that correction.
+
+January membership has not yet been observed. Details, comments and media targets for January remain zero while listing traverses October. The coverage remains unsealed, `provider_exhausted=false`, and `chronology_certified=false`. These pages prove resumed production execution, not January completion.
+
+### Recovery and remaining verification
+
+The compatible recovery archive and complete manifest are verified. They preserve the four newer runtime repairs and retain the identical reviewed additive evidence sanitizer. Actual `Queries.evidence` and `Evidence.read` checks against synthetic stored SSR/API roots, pin facts and native detail dates passed. The parent must hold and drain the successor before applying recovery. Run rows, frozen intents, cursors and evidence remain preserved; new-family execution and semantic replay/apply stay disabled until the accepted candidate is restored. Raw v118 alone is historical recovery material, not a direct operational rollback.
+
+The obsolete v112 worker was checked for process, working-directory and plist references, then moved to actual Trash. The new installed release and prior e609 release are the only two runnable copies. The verified compatible recovery material remains available separately.
+
+The January owner remains the sole runtime controller while active. The existing quiet 15-minute heartbeat follows the exact successor, coordinates authorized diagnosis and recovery, and continues until actual January canonical posts, comments/replies and selected media are verified. It must not restart the predecessor, duplicate native requests, invent cooldown timers or enable full-history ingestion.
+
+Backend/API rollout verification passed. TRR-APP build: not applicable; the internal source family does not change the app API projection. No direct-SQL ownership changed. No browser was used for this rollout verification.
+
+Current release receipts: `/Users/thomashulihan/.codex/tmp/trr-instagram-ordered-01a16023/release/manifest.json`, `deployment-receipt.json`, `preservation.json`, and `recovery-manifest.json`. Source review, focused check logs, index metadata proof and recovery inspection proof are in the parent task directory. Current runtime receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`: `january-ordered-successor.json`, `january-ordered-daemon-start.json`, `after-daemon-start.json`, `daemon-continuation-proof.json`, `verified-date-traversal.json`, `latest-runtime-progress.json`, and `integrated-rollout-status.json`.
+
+## Additional operational repair and v122 rollout
+
+The preserved 16:12 UTC native sample places the old worker's main thread in a synchronous business PostgreSQL call (`psycopg2` / `PQexec` / `PQgetResult` / `poll`). It does not identify the exact SQL statement or the original connection failure. The lease uses a separate `psycopg` connection. Its watchdog can set the abort flag while a foreground business query remains blocked. The earlier one-time worker restart recovered that incident without resetting the run or cursor.
+
+The candidate adds an independent local-worker guard before lease entry and keeps it armed through lease and pool cleanup. An actual abort starts a 15-second graceful window; a worker still stuck after that window exits with code 125 so launchd can recover it. Existing synchronous activity abort polling and private process-group reaping remain the primary child cleanup. This is a shutdown bound, not a source cooldown. It does not claim to repair the original network cause or bound a separate business-connection hang while the lease stays healthy.
+
+Operational deadline, missing-policy, generic activity, incomplete-observation, profile, avatar, and legacy-detail failures now retain their error code without inventing a future retry date. A lost probe can wait only until an actual competing probe's future expiry. Media retry parsing accepts actual source delay seconds or a valid future HTTP date, treats zero as immediate, and creates no fallback wait for absent, invalid, or expired values. A valid source delay beyond the timestamp range remains closed at the maximum UTC timestamp. Explicit typed server deadlines and authentication blocks remain intact.
+
+Public native comment exhaustion can retain a positive expected-versus-observed count gap. That observation now preserves unseen saved comments instead of marking them missing. Observed comments still upsert, and the receipt retains `public_native_exhaustion`, expected and observed totals, and the exact count gap. Only zero-gap settlement may reconcile missing rows, under the existing full-observation, topology and original scan-cutoff guards. A scoped receipt with a positive gap does not prove complete January comment coverage.
+
+Focused checks passed:
+
+- Five source-free subprocess cases exercise the actual local-worker entrypoint with fake lease/store dependencies: stuck control work, active private activity reaped before forced exit, blocked pool cleanup, healthy activity longer than 15 seconds, and graceful SIGTERM. Forced-exit cases assert the 15-second bound with a two-second tolerance; normal cleanup disarms the guard only after the pool closes.
+- Forty pure-policy and disposable-PostgreSQL cases verify real retry propagation, no fabricated future dates, finite attempt exhaustion, positive-gap preservation of complete saved parent/reply/media/history rows, and unchanged zero-gap and scan-cutoff behavior.
+- The targeted existing restart-replay check confirms that a committed target is not dispatched again. Ruff passed for the eight production paths and four affected test files.
+
+Request counts, authenticated request admission and the public exemption, genuine source Retry-After, competing probe and owner expirations, source spacing, finite attempts, cancellation, checkpoints and full-history fences remain unchanged. The diagnostic fixed-validation tranche budget and its existing hint are outside this candidate. No schema, environment or app API contract changed. TRR-APP build: not applicable to this operational backend change.
+
+Source baseline, task patch, preservation hashes and check logs are under `/Users/thomashulihan/.codex/tmp/trr-instagram-operational-recovery-01a16023/`. Independent review accepted all 13 paths with no actionable findings and no repair pass. Scoped commit `8bd871e13a315b08cb93f18a4a3fe3299e4cdbae` contains the task changes; the complete deployed source also preserves the accepted pre-existing maintained changes. Its 2,660-file map digest is `1ca33fe987010e72a21f90f806ac612922a24093ed88131ba92a7909ca9a62a0`. The freeze includes the later API floor commit `95b5556b` and TikTok delivery report commit `2fd12f4e`.
+
+The supported deployment ran once with explicit `main` and the required `admin-56995` profile/workspace. Provider history records v122 at 18:43:22 UTC. The required readiness command and API canary passed with HTTP 200 on the first attempt. Full provider metadata before and after remained identical across 38 functions and five schedules, including IDs, URLs, timeouts, concurrency and autoscaling. The API keeps its one-container minimum and eight-container maximum. Existing deployment ownership flags (`always_on=1`, `runtime_scheduler=0`) and the observed container secret projection (`always_on=0`, `runtime_scheduler=1`) were recorded separately and preserved; no secrets were changed.
+
+An actual new app container, `ta-01M5JESM9VCNWV38D1YQ0Y4MXR`, image `im-6BznD2aBD4LLE0uSdQSZV8`, passed 72 exact backend module hashes, including all seven changed cloud modules, TikTok and the prior repairs. Fourteen ordered/public/full-history checks, ten operational retry checks, and six GIF checks passed inside that container with zero Instagram requests and zero database connections or writes. The eighth production path, `scripts/ingestion/local_worker.py`, is intentionally outside the unchanged cloud image package; the separate Mac startup proof verifies its exact hash `2e690ec88b9d281a61483ccb57c7fd9b3971dcd7fa13e1c6cae8026a0c7f078d`. Cloud and Mac runtime proof does not establish January completion.
+
+The January owner stopped and drained the old worker, then installed the matching 2,660-file release and relocated 41 virtual-environment entrypoints. One launchd bootstrap started PID 19332 at 18:49:42 UTC. The process working directory, worker argument, new script hash and plist binding matched the new release. The 18:49:58 readback was online at the same successor, generation 1 and immutable intent hash, with 65 committed listing receipts, 913 counted requests, the same cursor hash, no retry deadline and zero uncertain dispatches. The 18:50:56 continuity proof preserved all 64 earlier committed target rows and receipts, all 768 earlier native members and ten retained date references from the previously partial page. The root remained at one attempt and 13 requests. A prior target's valid owner expiry was honored by ordinary replay; no owner or cursor was manually cleared. Continued execution is verified in the post-reboot record below; January downstream acceptance remains open.
+
+The compatible recovery archive preserves the full v121 source and warm-container setting, adding only the previously reviewed ordered-profile factory fence. Its complete file map and archive hash were verified. The three factories reject ordered execution and retained evidence remains readable. Recovery requires holding and draining the ordered run first, then keeping it held and read-only until the fixed candidate is restored. The old positive-gap comment behavior must not execute during recovery.
+
+Current cloud receipts are in `release/manifest.json`, `deployment-receipt.json`, `deployed-smokes.json`, `provider-preservation.json`, `recovery-manifest.json`, and `recovery-smoke.json` under the operational-recovery task directory. Mac receipts are under the settlement task's `headless-public/`: `operational-install/local-install.json`, `operational-worker-start.json`, `operational-worker-online-progress.json`, `operational-runtime-binding.json`, and `operational-continuity-proof.json`. This report's rollout closeout is later documentation and is not part of the frozen source map. The January owner remains the sole local runtime and data controller; the quiet follow-up remains active and full-history stays disabled.
+
+## Post-reboot continuation and saved reply-parent repair
+
+The human confirmed a computer restart, and kernel boot time is 18:59:02 UTC (14:59:02 EDT). Launchd automatically started PID 812 from the accepted release. The PID change does not establish an abort-guard failure. Normal replay honored the real preboot reservation, acquired the next token and resumed retained hydration. Page 66 committed at 19:09:11 UTC; the next page started normally. Post-reboot proof preserves the 64 prior complete targets and receipts, 768 earlier native IDs and the root's one attempt / 13 requests. The recovered page retains two date proofs captured before reboot. No manual owner clearing, attempt reset, extra restart or source change was needed. A `sending` dispatch with the exact current token, a started child and a valid lease is ordinary synchronous work, not an orphan by itself.
+
+At 19:34:15 UTC, the worker had committed 75 pages and retained 900 unique native IDs, with 1,060 requests. The latest 36 native date proofs were checked through retained evidence and the actual parser, with no missing proof; they span July 14 at 19:09:36 UTC through July 19 at 13:07:18 UTC. January membership is still false, downstream January targets are zero and coverage is unsealed. This verifies traversal beyond 65 pages without an invented cooldown. It does not establish January completion.
+
+The separate saved-data repair addressed 236 active January-associated replies with a native parent ID and an existing active parent in the same post. The reviewed operator changes only `parent_comment_id`. It rejects deleted children or parents and any purported top-level parent with a nonblank native parent ID. Real repeatable-read read-only plans froze all 236 complete row mappings and hashes, 111 parent rows, six associated posts, rollup rows and database trigger/function/rule contracts. Independent review found two guard omissions, both fixed in one pass. Six affected fixture checks and Ruff passed; unchanged passing checks were reused. The final plan preserved every original frozen row and hash exactly.
+
+Accepted operator SHA-256: `66ab8965e9744f5f255132c1da08c610336c0d7a93792bffab9272e5b55cfae5`. Accepted plan SHA-256: `2a13e839e4cd6c55e8e33ad8d13a030834750a5518af5393e09ab8e2681a5de9`. The parent applied exactly 236 links in verified `trr-core` at 19:33:35 UTC, after durable recovery intent was written. A separate read-only connection reconciled the committed after-state at 19:33:44 UTC. All protected comment fields, parent rows, posts, rollups and contracts remained unchanged, including source fields and capture clocks. No source request, schema change, runtime-source change or additional deployment was part of this repair.
+
+The classified global readback at 19:34:50 UTC reports 82,509 active saved comments, 8,300 linked replies, zero unlinked reply flags, zero dangling or cross-post parents, zero conflicting nonempty native-parent fields and zero active children linked to missing parents. Another 436 pre-existing native parent fields are empty. These are separate source-provenance gaps, not conflicting mappings; they were not fabricated or filled. The earlier strict comparison and its failed expectation remain preserved as evidence. Structural parent repair is closed; complete fresh comment retrieval is not claimed.
+
+Receipts are under `/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`: `post-reboot-continuity.json`, `post-reboot-worker.json`, `native-frontier-1935.json`, `legacy-parent-links-plan-v2.json`, `legacy-parent-links-plan-v2-comparison.json`, `legacy-parent-links-review-acceptance.json`, `legacy-parent-links-apply-receipt.json`, `legacy-parent-links-postcommit-reconcile.json`, and `legacy-parent-links-global-postcommit-classified.json`. Durable data recovery intent is `legacy-parent-links-recovery.json`. Data rollback requires exact unchanged after-state hashes and the same active, unheld generation-1 run; it is not an unrestricted future undo. Compatible source recovery separately requires hold and drain, with ordered execution held until the fixed candidate is restored.
+
+Remaining gates are actual January membership and its accepted older-page boundary, saved canonical posts, source-backed comments and replies, selected media verification, sealed complete stages and no unresolved required work or uncertain dispatch at completion. Existing media availability and this structural repair do not close those source gates. The January owner remains the sole live controller while active. The existing quiet 15-minute follow-up continues toward those results and keeps full-history disabled after success as well. This documentation closeout does not change the frozen v122 source or require repeated source tests, builds or deployment.

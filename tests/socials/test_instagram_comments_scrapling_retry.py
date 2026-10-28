@@ -1091,6 +1091,7 @@ def test_fetch_api_with_browser_strips_accept_encoding() -> None:
             "x-ig-app-id": "936619743392459",
         }
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(
         return_value=httpx.Response(
             200,
@@ -2313,8 +2314,8 @@ def test_fetch_rebuilds_http_client_after_429_before_retry() -> None:
     fetcher._rebuild_http_client.assert_awaited_once()
 
 
-def test_fetch_records_shared_cooldown_after_429() -> None:
-    """A 429 should slow sibling local workers, not only the current coroutine."""
+def test_fetch_429_without_server_header_creates_no_local_cooldown() -> None:
+    """A rejection without Retry-After must not create a local penalty timer."""
     fetcher = _build_fetcher()
     responses = [
         _mock_httpx_response(status_code=429),
@@ -2335,13 +2336,10 @@ def test_fetch_records_shared_cooldown_after_429() -> None:
             )
 
     assert result["failed"] is False
-    cooldown_mock.assert_called_once_with(
-        key=fetcher._global_rate_limit_key,
-        delay_seconds=pytest.approx(15.0, abs=0.01),
-    )
+    cooldown_mock.assert_not_called()
 
 
-def test_fetch_429_shared_cooldown_uses_env_floor_and_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_429_server_wait_ignores_obsolete_env_floor_and_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_429_COOLDOWN_MIN_SEC", "3")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENT_429_COOLDOWN_MULTIPLIER", "4")
     fetcher = _build_fetcher()
@@ -2366,7 +2364,7 @@ def test_fetch_429_shared_cooldown_uses_env_floor_and_multiplier(monkeypatch: py
     assert result["failed"] is False
     cooldown_mock.assert_called_once_with(
         key=fetcher._global_rate_limit_key,
-        delay_seconds=pytest.approx(8.0, abs=0.01),
+        delay_seconds=pytest.approx(2.0, abs=0.01),
     )
 
 
@@ -2422,6 +2420,7 @@ def test_fetch_api_with_browser_returns_browser_response() -> None:
         headers={"set-cookie": "csrftoken=fresh-csrf-token"},
     )
     response.cookies = {"csrftoken": "fresh-csrf-token", "sessionid": "fresh-session"}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
     fetcher._rebuild_http_client = AsyncMock()
 
@@ -2457,6 +2456,7 @@ def test_fetch_api_with_browser_evaluates_fetch_after_navigation_failure() -> No
         text=(f'<html><body><pre id="trr-browser-api-result">{html.escape(json.dumps(payload))}</pre></body></html>'),
     )
     container_response.cookies = {"csrftoken": "fresh-csrf-token"}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(
         side_effect=[
             RuntimeError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE"),
@@ -3388,9 +3388,10 @@ def test_advisory_api_pacing_uses_session_control_pool_and_waits_after_checkout(
             self.sql = sql
 
         def fetchone(self) -> dict[str, float]:
-            if "cooldown_until - now()" in self.sql:
+            if "server_retry_after_until - now()" in self.sql:
                 return {"cooldown_seconds": 3.0}
-            assert "coalesce(p.cooldown_until, now())" in self.sql
+            assert "coalesce(p.server_retry_after_until, now())" in self.sql
+            assert "cooldown_until = null" in self.sql
             return {"wait_seconds": 2.0}
 
     @contextmanager
@@ -3428,7 +3429,7 @@ def test_advisory_api_pacing_uses_session_control_pool_and_waits_after_checkout(
         ("instagram-comments-rate-limit-pace", "session_control"),
         ("instagram-comments-rate-limit-cooldown-read", "session_control"),
     ]
-    assert sleep_calls == [2.0, 3.0]
+    assert sleep_calls == pytest.approx([2.0, 3.0], abs=0.01)
 
 
 def assert_not_in_connection(state: dict[str, bool]) -> None:
@@ -3465,7 +3466,7 @@ def test_record_global_api_cooldown_extends_db_deadline_and_keeps_file_fallback(
         lambda: str(tmp_path),
     )
     monkeypatch.setattr(
-        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.time",
         lambda: 100.0,
     )
 
@@ -3474,9 +3475,9 @@ def test_record_global_api_cooldown_extends_db_deadline_and_keeps_file_fallback(
     assert calls == [("instagram-comments-rate-limit-cooldown", "session_control")]
     assert len(executed) == 1
     assert "greatest(" in executed[0][0]
-    assert "excluded.cooldown_until" in executed[0][0]
+    assert "excluded.server_retry_after_until" in executed[0][0]
     assert executed[0][1] == ("proxy-isolated-key", 5.0)
-    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "proxy-isolated-key.cooldown"
+    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "proxy-isolated-key.server-retry-after"
     assert float(cooldown_file.read_text(encoding="utf-8")) == 105.0
 
 
@@ -3497,13 +3498,13 @@ def test_record_global_api_cooldown_falls_back_to_file_when_db_is_unavailable(
         lambda: str(tmp_path),
     )
     monkeypatch.setattr(
-        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic",
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.time.time",
         lambda: 200.0,
     )
 
     _record_global_api_cooldown(key="db-fallback", delay_seconds=7.0)
 
-    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "db-fallback.cooldown"
+    cooldown_file = tmp_path / "trr-instagram-comments-rate" / "db-fallback.server-retry-after"
     assert float(cooldown_file.read_text(encoding="utf-8")) == 207.0
 
 
@@ -4076,10 +4077,12 @@ def test_job_runner_uses_shard_proxy_session_only_when_enabled(monkeypatch: pyte
     )
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -4538,10 +4541,14 @@ def test_job_runner_completion_health_gap_requeues_canary_shortcodes(
             for shortcode in canaries
         ],
     )
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_update_job_config", lambda job_id, **kwargs: config_updates.append(dict(kwargs)))
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
@@ -4843,16 +4850,18 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
     finish_calls: list[dict[str, Any]] = []
 
     class _FakeRepo:
+        # Sibling aborts are a compare-and-set on status and claim (Plan 055).
         @staticmethod
-        def _finish_job(job_id: str, **kwargs: Any) -> None:
+        def _transition_job_state(job_id: str, **kwargs: Any) -> bool:
             finish_calls.append({"job_id": job_id, **kwargs})
+            return True
 
     monkeypatch.setattr(
         jr.pg,
         "fetch_all",
         lambda *_args, **_kwargs: [
-            {"id": "sibling-1", "items_found": 0},
-            {"id": "sibling-2", "items_found": 3},
+            {"id": "sibling-1", "status": "queued", "items_found": 0, "config": {"claim_token": None}},
+            {"id": "sibling-2", "status": "retrying", "items_found": 3, "config": {"claim_token": "tok-2"}},
         ],
     )
     # Blast-radius threshold: 1 other shard already failed run-fatally + this one = 2,
@@ -4879,6 +4888,8 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
     assert {call["last_error_code"] for call in finish_calls} == {"instagram_comments_auth_failed"}
     assert finish_calls[0]["metadata"]["aborted_by_sibling_job_id"] == "22222222-2222-2222-2222-222222222222"
     assert finish_calls[0]["metadata"]["account"] == "thetraitorsus"
+    assert [call["expected_status"] for call in finish_calls] == ["queued", "retrying"]
+    assert [call["expected_claim_token"] for call in finish_calls] == [None, "tok-2"]
 
 
 def test_job_runner_defers_sibling_abort_below_blast_radius_threshold(
@@ -4970,14 +4981,16 @@ def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pyt
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -5054,14 +5067,16 @@ def test_job_runner_fails_immediately_on_target_browser_session_invalidation(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
 
     job = {
@@ -5160,10 +5175,14 @@ def test_job_runner_stops_post_auth_failures_at_circuit_limit(monkeypatch: pytes
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_update_job_config", lambda *a, **k: None)
 
@@ -5270,8 +5289,13 @@ def test_comments_job_runner_stops_before_targets_when_warmup_has_no_cookies(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -5376,10 +5400,14 @@ def test_comments_job_runner_continues_after_endpoint_probe_auth_blocked(
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -5473,15 +5501,19 @@ def test_comments_job_runner_skips_duplicate_public_replay_after_auth_block(
         },
     )
 
-    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any]) -> None:
+    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any], **_claim: Any) -> None:
         captured_config_updates.append(dict(config_updates))
 
     monkeypatch.setattr(repo, "_instagram_filter_incomplete_comment_targets", lambda _account, targets: list(targets))
     monkeypatch.setattr(repo, "_update_job_config", fake_update_job_config)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
 
     job = {
@@ -5588,10 +5620,14 @@ def test_comments_job_runner_blocks_browser_session_invalidation_before_rendered
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(jr.pg, "fetch_all", lambda *_args, **_kwargs: [])
 
@@ -5698,10 +5734,14 @@ def test_comments_job_runner_continues_collaborator_fetch_after_endpoint_html_ch
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 129})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {"SHORT1": dict(target_metadata)})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -5808,10 +5848,14 @@ def test_comments_job_runner_continues_direct_fetch_after_endpoint_html_challeng
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 1})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {"SHORT1": dict(target_metadata)})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -5902,9 +5946,13 @@ def test_comments_job_runner_config_schema_only_skips_endpoint_probe(
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6016,10 +6064,14 @@ def test_comments_job_runner_preserves_prior_retry_progress_when_endpoint_probe_
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6120,10 +6172,14 @@ def test_comments_job_runner_continues_after_endpoint_probe_transport_block(
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
     monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda _attempt_count: 1)
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
@@ -6184,8 +6240,13 @@ def test_comments_job_runner_retries_raw_warmup_transport_error(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
 
     job = {
@@ -6305,14 +6366,18 @@ def test_job_runner_partial_progress_persists_before_error(monkeypatch: pytest.M
 
     from trr_backend.repositories import social_season_analytics as repo
 
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(
         repo,
         "_emit_job_progress",
         lambda **_kwargs: None,
     )
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6415,14 +6480,18 @@ def test_job_runner_continues_after_first_retryable_post_fetch_failure(monkeypat
 
     from trr_backend.repositories import social_season_analytics as repo
 
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(
         repo,
         "_emit_job_progress",
         lambda **kwargs: progress_activities.append(kwargs.get("activity")),
     )
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6532,9 +6601,13 @@ def test_job_runner_surfaces_coauthor_status_only_failures(monkeypatch: pytest.M
         lambda **_kwargs: {"DU_oEbbgZfJ": dict(target_metadata)},
     )
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6609,13 +6682,17 @@ def test_job_runner_retries_single_incomplete_target_in_large_shard(monkeypatch:
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: fake_fetcher)
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
 
-    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any]) -> None:
+    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any], **_claim: Any) -> None:
         captured_config_updates.append(dict(config_updates))
 
     monkeypatch.setattr(repo, "_update_job_config", fake_update_job_config)
@@ -6698,9 +6775,11 @@ def test_job_runner_passes_top_level_resume_cursor_from_prior_metadata(
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6807,9 +6886,11 @@ def test_job_runner_passes_coauthor_target_metadata_to_fetcher(monkeypatch: pyte
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 149})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {"SHORT1": dict(target_metadata)})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -6906,9 +6987,11 @@ def test_job_runner_threads_single_session_strategy_and_persists_once_per_shortc
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *args, **kwargs: finish_calls.append(dict(kwargs)))
+    monkeypatch.setattr(repo, "_finish_job", lambda *args, **kwargs: finish_calls.append(dict(kwargs)) or True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7020,9 +7103,11 @@ def test_job_runner_passes_reply_resume_cursors_from_prior_metadata(
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7149,9 +7234,11 @@ def test_job_runner_passes_top_level_resume_cursor_from_audit_payload(
     monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: audit_metadata)
     monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7261,9 +7348,11 @@ def test_job_runner_passes_reply_resume_cursor_from_audit_payload(
     monkeypatch.setattr(jr, "_load_instagram_comments_audit_cursor_resume_metadata", lambda **_kwargs: audit_metadata)
     monkeypatch.setattr(jr, "_insert_instagram_post_comments_audit", lambda **_kwargs: None)
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7488,9 +7577,11 @@ def test_job_runner_uses_reply_only_retry_for_persisted_missing_reply_parents(
         lambda **_kwargs: [persisted_parent],
     )
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7583,14 +7674,16 @@ def test_job_runner_reports_actual_comments_posts_checked(monkeypatch: pytest.Mo
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 10})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(
         repo,
         "_emit_job_progress",
         lambda **kwargs: progress_activities.append(kwargs.get("activity")),
     )
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7705,14 +7798,18 @@ def test_job_runner_retry_skips_already_complete_targets(monkeypatch: pytest.Mon
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 10})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(
         repo,
         "_emit_job_progress",
         lambda **kwargs: progress_activities.append(kwargs.get("activity")),
     )
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7795,10 +7892,14 @@ def test_job_runner_incomplete_fill_skips_targets_completed_by_prior_attempt(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7880,10 +7981,14 @@ def test_job_runner_retrying_job_prefilters_complete_targets_without_retry_flag(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -7962,10 +8067,12 @@ def test_job_runner_marks_uncapped_success_complete(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8039,10 +8146,12 @@ def test_job_runner_keeps_capped_success_incomplete_when_local_cap_is_hit(monkey
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8154,13 +8263,15 @@ def test_job_runner_retries_only_retryable_incomplete_posts(monkeypatch: pytest.
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda *_args, **_kwargs: 0)
 
-    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any]) -> dict[str, Any]:
+    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any], **_claim: Any) -> dict[str, Any]:
         config_update_calls.append(dict(config_updates))
         return {}
 
@@ -8168,7 +8279,7 @@ def test_job_runner_retries_only_retryable_incomplete_posts(monkeypatch: pytest.
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8303,15 +8414,17 @@ def test_job_runner_accepts_retryable_fetch_when_stored_comment_coverage_is_comp
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_update_job_config", lambda *a, **k: config_update_calls.append(dict(k)))
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8427,9 +8540,11 @@ def test_job_runner_marks_persisted_reply_topology_gap_retryable(
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 10})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(
         repo,
@@ -8439,7 +8554,7 @@ def test_job_runner_marks_persisted_reply_topology_gap_retryable(
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8549,9 +8664,11 @@ def test_job_runner_reconciles_reply_only_auth_blocked_gap_despite_reply_topolog
     monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {"SHORT1": 1419})
     monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
     monkeypatch.setattr(jr, "_classify_unavailable_instagram_comment_gap", lambda **_kwargs: 212)
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(
         repo,
@@ -8561,7 +8678,7 @@ def test_job_runner_reconciles_reply_only_auth_blocked_gap_despite_reply_topolog
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8666,9 +8783,11 @@ def test_job_runner_keeps_high_coverage_terminal_pagination_gap_incomplete(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(
         repo,
@@ -8678,7 +8797,7 @@ def test_job_runner_keeps_high_coverage_terminal_pagination_gap_incomplete(
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8795,9 +8914,11 @@ def test_job_runner_keeps_one_comment_relay_recovery_gap_incomplete(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(
         repo,
@@ -8807,7 +8928,7 @@ def test_job_runner_keeps_one_comment_relay_recovery_gap_incomplete(
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -8922,9 +9043,11 @@ def test_job_runner_retries_saved_public_partial_with_remaining_gap(
         "_enqueue_auto_public_recovery_targets",
         lambda **_kwargs: pytest.fail("saved partial coverage must not enqueue another job"),
     )
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(
         repo,
@@ -8934,7 +9057,7 @@ def test_job_runner_retries_saved_public_partial_with_remaining_gap(
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -9005,7 +9128,8 @@ def test_auto_public_recovery_appends_explicit_targets_without_audit_cursor(
             "account_handle": "bravotv",
             "target_source_ids": ["SHORT1"],
             "batch_size": 1,
-            "dispatch_immediately": True,
+            # Children are created inside the source claim and dispatched after commit (Plan 055).
+            "dispatch_immediately": False,
             "initiated_by": "comments-public-auto-recovery",
             "exclude_active_job_id": "22222222-2222-2222-2222-222222222222",
         }
@@ -9074,7 +9198,7 @@ def test_job_runner_stops_after_first_genuine_http_429(
     fake_session.auth_session.metadata = {"source": "test"}
     fake_session.browser_account_id = "testaccount"
 
-    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any]) -> dict[str, Any]:
+    def fake_update_job_config(_job_id: str, *, config_updates: dict[str, Any], **_claim: Any) -> dict[str, Any]:
         config_update_calls.append(dict(config_updates))
         return {}
 
@@ -9082,16 +9206,18 @@ def test_job_runner_stops_after_first_genuine_http_429(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(repo, "_update_job_config", fake_update_job_config)
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -9179,16 +9305,20 @@ def test_job_runner_completes_one_pass_incomplete_fill_with_unresolved_targets(
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(
         repo,
         "_update_job_config",
         lambda _job_id, config_updates: config_update_calls.append(config_updates),
     )
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
     job = {
@@ -9238,8 +9368,9 @@ def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: 
 
     finish_calls: list[dict[str, Any]] = []
 
-    def fake_finish_job(job_id: str, *, status: str, metadata: dict[str, Any], **_kwargs: Any) -> None:
+    def fake_finish_job(job_id: str, *, status: str, metadata: dict[str, Any], **_kwargs: Any) -> bool:
         finish_calls.append({"job_id": job_id, "status": status, "metadata": metadata})
+        return True
 
     def fake_persist(**_kwargs: Any) -> PersistedInstagramComments:
         return PersistedInstagramComments(
@@ -9283,10 +9414,12 @@ def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: 
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finish_job", fake_finish_job)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -9397,10 +9530,14 @@ def test_job_runner_reports_parent_child_fetch_and_write_metrics(monkeypatch: py
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(
+        repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True
+    )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -9489,14 +9626,16 @@ def test_job_runner_persists_partial_success_when_auth_failed_but_comments_prese
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
     monkeypatch.setattr(
         repo,
         "_finish_job",
-        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}) or True,
     )
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 
@@ -9575,10 +9714,12 @@ def test_job_runner_reuses_one_db_connection_for_all_post_persists(monkeypatch: 
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(shared_conn))
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
 
     job = {
@@ -9652,10 +9793,12 @@ def test_job_runner_commits_each_post_persist(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(shared_conn))
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
 
     job = {
@@ -9728,10 +9871,12 @@ def test_job_runner_returns_degraded_summary_when_final_job_read_hits_db_saturat
     monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
-    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: True)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
-    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: True)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job_followups", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
 

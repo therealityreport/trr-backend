@@ -42,6 +42,7 @@ class AdminRedditPostDetailV2(_StrictModel):
     media: list[dict[str, Any]] = Field(default_factory=list)
     media_summary: dict[str, Any]
     assigned_threads: list[dict[str, Any]] = Field(default_factory=list)
+    capture_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class AdminRedditPostDetailResponseV2(_StrictModel):

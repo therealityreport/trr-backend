@@ -78,6 +78,7 @@ charset-normalizer==3.4.7
     #   requests
 click==8.4.2
     # via
+    #   dbos
     #   flask
     #   modal
     #   uvicorn
@@ -85,6 +86,8 @@ coloredlogs==15.0.1
     # via onnxruntime
 contourpy==1.3.3
     # via matplotlib
+croniter==6.2.4
+    # via dbos
 cryptography==50.0.2
     # via
     #   -r requirements.modal.lean.in
@@ -92,12 +95,14 @@ cryptography==50.0.2
     #   pyjwt
 cssselect2==0.9.0
     # via cairosvg
-curl-cffi==0.15.0
+curl-cffi==0.16.3
     # via -r requirements.modal.lean.in
 cycler==0.12.1
     # via matplotlib
 cython==3.2.6
     # via insightface
+dbos==3.3.0
+    # via -r requirements.modal.lean.in
 deepface==0.0.100
     # via -r requirements.modal.vision.in
 defusedxml==0.7.1
@@ -192,6 +197,8 @@ googleapis-common-protos==1.75.0
     # via
     #   google-api-core
     #   grpcio-status
+greenlet==3.5.6
+    # via sqlalchemy
 grpcio==1.81.1
     # via
     #   google-api-core
@@ -435,7 +442,13 @@ protobuf==6.33.6
     #   tensorflow
 psutil==7.2.2
     # via ultralytics
-psycopg2-binary==2.9.12
+psycopg==3.3.6
+    # via
+    #   -r requirements.modal.lean.in
+    #   dbos
+psycopg-binary==3.3.6
+    # via psycopg
+psycopg2-binary==2.9.13
     # via -r requirements.modal.lean.in
 py-cpuinfo==9.0.0
     # via ultralytics
@@ -474,6 +487,8 @@ pysocks==1.7.1
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   croniter
+    #   dbos
     #   matplotlib
     #   pandas
 python-dotenv==1.2.2
@@ -486,6 +501,7 @@ python-multipart==0.0.32
 pyyaml==6.0.3
     # via
     #   albumentations
+    #   dbos
     #   ultralytics
     #   uvicorn
 realtime==2.31.0
@@ -514,7 +530,6 @@ retina-face==0.0.18
     # via deepface
 rich==14.3.4
     # via
-    #   curl-cffi
     #   keras
     #   modal
     #   typer
@@ -557,6 +572,8 @@ soupsieve==2.10
     # via
     #   -r requirements.modal.lean.in
     #   beautifulsoup4
+sqlalchemy==2.1.4
+    # via dbos
 sse-starlette==3.4.5
     # via -r requirements.modal.lean.in
 starlette==1.3.1
@@ -644,9 +661,11 @@ typing-extensions==4.16.0
     #   modal
     #   onnx
     #   optree
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   realtime
+    #   sqlalchemy
     #   starlette
     #   synchronicity
     #   tensorflow

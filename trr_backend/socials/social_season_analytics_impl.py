@@ -38,7 +38,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from threading import Lock, Thread, current_thread, main_thread
 from types import SimpleNamespace
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -108,6 +108,10 @@ from trr_backend.socials.pipelines.shared_job_executor import configure_shared_c
 from trr_backend.socials.pipelines.threads_cookie_loader import configure_threads_cookie_loader
 from trr_backend.socials.pipelines.tiktok_cookie_loader import configure_tiktok_cookie_loader
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+from trr_backend.socials.tiktok.constants import (  # noqa: F401 - worker lane kept in the repository namespace
+    TIKTOK_POSTS_SCRAPLING_STAGE,
+    TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
+)
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
@@ -304,7 +308,6 @@ INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
 INSTAGRAM_POSTS_SCRAPLING_STAGE = "posts_scrapling"
 INSTAGRAM_PROFILE_SNAPSHOT_STAGE = "instagram_profile_snapshot"
 INSTAGRAM_PROFILE_FOLLOWING_STAGE = "instagram_profile_following"
-TIKTOK_POSTS_SCRAPLING_STAGE = "tiktok_posts_scrapling"
 THREADS_POSTS_SCRAPLING_STAGE = "threads_posts_scrapling"
 SHARED_ACCOUNT_POSTS_STAGE = "shared_account_posts"
 SHARED_ACCOUNT_DISCOVERY_STAGE = "shared_account_discovery"
@@ -332,7 +335,6 @@ SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE = "shared_account_catalog_backfill"
 TRUSTED_LOCAL_WORKER_LANE = "trusted_local"
 INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE = "instagram_comments_scrapling"
 INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE = "instagram_posts_scrapling"
-TIKTOK_POSTS_SCRAPLING_WORKER_LANE = "tiktok_posts_scrapling"
 INSTAGRAM_REMOTE_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_remote_executor_blocked"
 INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_local_executor_blocked"
 SHARED_ACCOUNT_FRONTIER_LEASE_UNAVAILABLE_ERROR_CODE = "shared_account_frontier_lease_unavailable"
@@ -1252,20 +1254,10 @@ def _shared_account_recovery_status_from_job_status(status: str | None, *, block
     return "idle"
 
 
-def _tiktok_discovery_empty_body_transport_failure(discovery_meta: Mapping[str, Any] | None) -> bool:
-    metadata = _metadata_dict(discovery_meta)
-    error_code = str(metadata.get("error_code") or "").strip().lower()
-    if error_code == "tiktok_discovery_sec_uid_missing":
-        return _normalize_non_negative_int(metadata.get("posts_checked")) <= 0
-    if error_code and error_code != "tiktok_discovery_empty_first_page":
-        return False
-    fetch_posts = _metadata_dict(_metadata_dict(metadata.get("endpoint_responses")).get("fetch_posts"))
-    failure_reason = str(fetch_posts.get("failure_reason") or "").strip().lower()
-    if failure_reason not in {"non_json_response", "empty_response"}:
-        return False
-    if _normalize_non_negative_int(fetch_posts.get("content_length")) > 0:
-        return False
-    return _normalize_non_negative_int(metadata.get("posts_checked")) <= 0
+def _tiktok_discovery_empty_body_transport_failure(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.alerts import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_discovery_empty_body_transport_failure"](*args, **kwargs)
 
 
 def _shared_account_recovery_next_stage(stage: str | None, reason: str | None) -> str | None:
@@ -2302,8 +2294,10 @@ def _job_posts_auth_cooldown_sql_exclusion(table_alias: str = "j") -> str:
                 from social.account_auth_cooldown ac
                 where ac.platform = lower(coalesce({table_alias}.platform, ''))
                   and ac.account_handle = {account_expr}
-                  and ac.cooldown_until is not null
-                  and ac.cooldown_until > now()
+                  and (
+                    (ac.platform = 'instagram' and ac.blocker_kind = 'checkpoint')
+                    or (ac.platform <> 'instagram' and ac.cooldown_until > now())
+                  )
               )
             )
     """
@@ -3065,62 +3059,16 @@ _TIKTOK_SINGLE_PATH_TOPOLOGY_DEFAULT: dict[str, Any] = {
 }
 
 
-def _tiktok_recent_failure_looks_ytdlp_related(row: Mapping[str, Any]) -> bool:
-    if str(row.get("platform") or "").strip().lower() != "tiktok":
-        return False
-    joined_fields = " ".join(
-        str(row.get(field) or "").strip().lower()
-        for field in ("job_type", "status", "last_error_code", "last_error_class", "error_message")
-    )
-    return "ytdlp" in joined_fields.replace("-", "")
+def _tiktok_recent_failure_looks_ytdlp_related(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.alerts import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_recent_failure_looks_ytdlp_related"](*args, **kwargs)
 
 
-def _build_tiktok_single_path_alerts(queue_payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    alerts: list[dict[str, Any]] = []
-    topology = dict(_TIKTOK_SINGLE_PATH_TOPOLOGY_DEFAULT)
-    primary_live_path = str(topology.get("primary_live_path") or "").strip().lower() or "ytdlp"
-    browser_intercept_proven_live = bool(topology.get("browser_intercept_proven_live"))
+def _build_tiktok_single_path_alerts(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.alerts import _LOCAL_ROOM_FUNCTIONS
 
-    if primary_live_path == "ytdlp" and not browser_intercept_proven_live:
-        _append_alert(
-            alerts,
-            code="tiktok_single_path_risk",
-            severity="warning",
-            message=(
-                "TikTok posts currently rely on yt-dlp as the only proven live path. "
-                "Browser intercept is not yet proven live, so this is a single-path topology."
-            ),
-            primary_live_path="yt-dlp",
-            browser_intercept_proven_live=browser_intercept_proven_live,
-            topology=topology,
-        )
-
-    recent_failures = [
-        row
-        for row in list(queue_payload.get("recent_failures") or [])
-        if isinstance(row, dict) and _tiktok_recent_failure_looks_ytdlp_related(row)
-    ]
-    if recent_failures:
-        _append_alert(
-            alerts,
-            code="tiktok_single_path_degraded",
-            severity="critical",
-            message=(
-                "Recent TikTok queue failures include yt-dlp-related rows, so the primary TikTok path "
-                "should be treated as degraded until recovery clears."
-            ),
-            recent_failure_count=len(recent_failures),
-            recent_failure_codes=[
-                str(row.get("last_error_code") or "").strip() or str(row.get("error_message") or "").strip()
-                for row in recent_failures
-                if str(row.get("last_error_code") or "").strip() or str(row.get("error_message") or "").strip()
-            ][:5],
-            primary_live_path="yt-dlp",
-            browser_intercept_proven_live=browser_intercept_proven_live,
-            topology=topology,
-        )
-
-    return alerts
+    return _LOCAL_ROOM_FUNCTIONS["_build_tiktok_single_path_alerts"](*args, **kwargs)
 
 
 def _build_queue_status_alerts(
@@ -6901,8 +6849,8 @@ def _normalize_platform_name(value: Any) -> str:
 
 def _shared_account_posts_stage_for_platform(platform: Any) -> str:
     normalized_platform = _normalize_platform_name(platform)
-    if normalized_platform == "tiktok":
-        return TIKTOK_POSTS_SCRAPLING_STAGE
+    # Catalog jobs must reach the shared executor and its resumable listing.
+    # The explicit TikTok posts-only launcher owns the dedicated Scrapling lane.
     if normalized_platform == "threads":
         return THREADS_POSTS_SCRAPLING_STAGE
     return SHARED_ACCOUNT_POSTS_STAGE
@@ -7262,50 +7210,34 @@ def _platform_comments_has_column(platform: str, column: str, *, conn: Any | Non
         return True
 
 
-def _tiktok_comments_has_column(column: str, *, conn: Any | None = None) -> bool:
-    return _platform_comments_has_column("tiktok", column, conn=conn)
+def _tiktok_comments_has_column(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.filters import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_comments_has_column"](*args, **kwargs)
 
 
-def _tiktok_raw_saves_expr(alias: str) -> str:
-    return (
-        f"case when coalesce({alias}.raw_data ->> 'saves', '') ~ '^-?[0-9]+$' "
-        f"then greatest((({alias}.raw_data ->> 'saves')::int), 0) else 0 end"
-    )
+def _tiktok_raw_saves_expr(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.filters import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_raw_saves_expr"](*args, **kwargs)
 
 
-def _tiktok_saves_expr(alias: str) -> str:
-    raw_expr = _tiktok_raw_saves_expr(alias)
-    if _platform_posts_has_column("tiktok", "saves"):
-        return f"coalesce({alias}.saves, {raw_expr}, 0)"
-    return f"coalesce({raw_expr}, 0)"
+def _tiktok_saves_expr(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.filters import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_saves_expr"](*args, **kwargs)
 
 
-def _tiktok_canonical_url_expr(alias: str) -> str:
-    url_candidates = [f"nullif({alias}.raw_data ->> 'url', '')"]
-    if _platform_posts_has_column("tiktok", "url"):
-        url_candidates.append(f"nullif({alias}.url, '')")
-    url_candidates.append(
-        f"case when coalesce({alias}.video_id, '') <> '' "
-        f"then 'https://www.tiktok.com/@_/video/' || {alias}.video_id else null end"
-    )
-    return f"coalesce({', '.join(url_candidates)})"
+def _tiktok_canonical_url_expr(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.filters import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_canonical_url_expr"](*args, **kwargs)
 
 
-def _resolve_tiktok_canonical_url(*, source_id: str, row_json: Mapping[str, Any], account: str | None = None) -> str:
-    raw_data = _metadata_dict(row_json.get("raw_data"))
-    candidates = [
-        raw_data.get("url"),
-        row_json.get("url"),
-        (f"https://www.tiktok.com/@_/video/{source_id}" if str(source_id or "").strip() else None),
-    ]
-    username = str(row_json.get("username") or account or "").strip().lstrip("@")
-    if username and str(source_id or "").strip():
-        candidates.append(f"https://www.tiktok.com/@{username}/video/{source_id}")
-    for candidate in candidates:
-        normalized = str(candidate or "").strip()
-        if normalized:
-            return normalized
-    return ""
+def _resolve_tiktok_canonical_url(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.filters import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_resolve_tiktok_canonical_url"](*args, **kwargs)
 
 
 def _youtube_is_short_expr(alias: str) -> str:
@@ -8626,12 +8558,10 @@ def _sync_twitter_cookie_json_env_source(cookies: Mapping[str, Any]) -> dict[str
     )
 
 
-def _sync_tiktok_cookie_json_env_source(cookies: Mapping[str, Any]) -> dict[str, Any]:
-    return _sync_cookie_json_env_source(
-        cookies=cookies,
-        env_keys=("SOCIAL_TIKTOK_COOKIES_JSON", "TIKTOK_COOKIES_JSON"),
-        default_env_key="SOCIAL_TIKTOK_COOKIES_JSON",
-    )
+def _sync_tiktok_cookie_json_env_source(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_sync_tiktok_cookie_json_env_source"](*args, **kwargs)
 
 
 def _platform_env_json_refresh_autosync_supported(platform: str) -> bool:
@@ -9176,122 +9106,52 @@ def _load_twitter_auth() -> tuple[dict[str, str], str | None]:
     return _ensure_twitter_cookies_fresh(cookies), bearer_token
 
 
-def _default_tiktok_cookie_file_path() -> Path:
-    return _default_platform_cookie_file_path("tiktok")
+def _default_tiktok_cookie_file_path(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_default_tiktok_cookie_file_path"](*args, **kwargs)
 
 
-def _load_tiktok_cookies_from_sources() -> dict[str, str]:
-    """
-    Resolve TikTok cookies for season ingest.
+def _load_tiktok_cookies_from_sources(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
 
-    Resolution:
-    1) SOCIAL_TIKTOK_COOKIES_JSON / TIKTOK_COOKIES_JSON (inline JSON)
-    2) SOCIAL_TIKTOK_COOKIES_FILE / TIKTOK_COOKIES_FILE (path to JSON file)
-    """
-    return _load_cookie_map_from_json_or_file(
-        label="TikTok",
-        raw_json_env_keys=("SOCIAL_TIKTOK_COOKIES_JSON", "TIKTOK_COOKIES_JSON"),
-        file_env_keys=("SOCIAL_TIKTOK_COOKIES_FILE", "TIKTOK_COOKIES_FILE"),
-        default_path=_default_tiktok_cookie_file_path(),
-        required_cookie_names_any=("sessionid", "sessionid_ss", "sid_tt"),
-    )
+    return _LOCAL_ROOM_FUNCTIONS["_load_tiktok_cookies_from_sources"](*args, **kwargs)
 
 
-def _validate_tiktok_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
-    global _tiktok_cookie_validation_cache
-    _tiktok_cookie_validation_cache, is_valid, reason = _validate_browser_cookie_health_cached(
-        platform_label="tiktok",
-        cookies=cookies,
-        cache_entry=_tiktok_cookie_validation_cache,
-        validation_url="https://www.tiktok.com/messages?lang=en",
-        cookie_domains=(".tiktok.com", "www.tiktok.com"),
-        required_cookie_names_any=("sessionid", "sessionid_ss", "sid_tt"),
-        invalid_url_markers=("/login",),
-        invalid_body_patterns=(r"\bLog in\b", r"\bSign up\b", r"Maximum number of attempts reached"),
-    )
-    return is_valid, reason
+def _validate_tiktok_cookie_health(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_validate_tiktok_cookie_health"](*args, **kwargs)
 
 
-def _store_refreshed_tiktok_cookies(cookies: Mapping[str, Any]) -> dict[str, Any]:
-    global _tiktok_cookie_validation_cache, _tiktok_cookie_runtime_override
-    refreshed = {str(key): str(value) for key, value in cookies.items() if str(key).strip() and value is not None}
-    if not refreshed:
-        return {"synced": False, "reason": "empty_cookie_payload"}
-    _tiktok_cookie_runtime_override = dict(refreshed)
-    _tiktok_cookie_validation_cache = None
-    return _sync_tiktok_cookie_json_env_source(refreshed)
+def _store_refreshed_tiktok_cookies(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_store_refreshed_tiktok_cookies"](*args, **kwargs)
 
 
-def _refresh_tiktok_cookies(stale_reason: str | None = None) -> dict[str, str]:
-    username, password = _platform_auth_credentials("SOCIAL_AUTH_TIKTOK_USERNAME", "SOCIAL_AUTH_TIKTOK_PASSWORD")
-    if not username or not password:
-        return {}
-    from trr_backend.socials.tiktok.cookie_refresh import refresh_tiktok_cookies
+def _refresh_tiktok_cookies(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
 
-    try:
-        refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
-            username=username,
-            password=password,
-            cookie_file=str(
-                _platform_cookie_refresh_target_path(
-                    _default_tiktok_cookie_file_path(),
-                    "SOCIAL_TIKTOK_COOKIES_FILE",
-                    "TIKTOK_COOKIES_FILE",
-                )
-            ),
-            headless=(os.getenv("SOCIAL_TIKTOK_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
-            not in {"0", "false", "off", "no"},
-            timeout_seconds=_resolve_positive_int_env(
-                "SOCIAL_TIKTOK_COOKIE_REFRESH_TIMEOUT_SECONDS",
-                SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS_DEFAULT,
-                minimum=30,
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("TikTok cookie refresh failed%s: %s", f" ({stale_reason})" if stale_reason else "", exc)
-        return {}
-    if refreshed:
-        sync_result = _store_refreshed_tiktok_cookies(refreshed)
-        if sync_result.get("error"):
-            logger.warning("TikTok cookie refresh could not sync env JSON source: %s", sync_result.get("error"))
-    return refreshed
+    return _LOCAL_ROOM_FUNCTIONS["_refresh_tiktok_cookies"](*args, **kwargs)
 
 
-def _ensure_tiktok_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
-    global _tiktok_cookie_runtime_override
-    if _tiktok_cookie_runtime_override:
-        return dict(_tiktok_cookie_runtime_override)
-    if not _platform_cookie_auto_refresh_enabled(
-        "SOCIAL_TIKTOK_COOKIE_AUTO_REFRESH",
-        "SOCIAL_AUTH_TIKTOK_USERNAME",
-        "SOCIAL_AUTH_TIKTOK_PASSWORD",
-    ):
-        return cookies
-    is_valid, reason = _validate_tiktok_cookie_health(cookies)
-    if is_valid:
-        return cookies
-    with _tiktok_cookie_refresh_lock:
-        latest = _tiktok_cookie_runtime_override or _load_tiktok_cookies_from_sources()
-        latest_valid, _ = _validate_tiktok_cookie_health(dict(latest))
-        if latest_valid:
-            _tiktok_cookie_runtime_override = dict(latest)
-            return dict(latest)
-        refreshed = _refresh_tiktok_cookies(reason)
-        if refreshed:
-            refreshed_valid, refreshed_reason = _validate_tiktok_cookie_health(refreshed)
-            if refreshed_valid:
-                return refreshed
-            logger.warning("TikTok cookies refreshed but validation still failed (%s)", refreshed_reason or "unknown")
-        return cookies
+def _ensure_tiktok_cookies_fresh(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_ensure_tiktok_cookies_fresh"](*args, **kwargs)
 
 
-def _load_tiktok_cookies() -> dict[str, str]:
-    cookies = _load_tiktok_cookies_from_sources()
-    return _ensure_tiktok_cookies_fresh(cookies)
+def _load_tiktok_cookies(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_load_tiktok_cookies"](*args, **kwargs)
 
 
-def _load_tiktok_cookies_adapter() -> dict[str, str]:
-    return _load_tiktok_cookies()
+def _load_tiktok_cookies_adapter(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_load_tiktok_cookies_adapter"](*args, **kwargs)
 
 
 configure_tiktok_cookie_loader(_load_tiktok_cookies_adapter)
@@ -9920,32 +9780,10 @@ def refresh_platform_cookies_interactive(
     }
 
 
-def _do_interactive_refresh_tiktok(
-    username: str,
-    password: str,
-    headless: bool,
-    timeout_seconds: int,
-) -> dict[str, str]:
-    from trr_backend.socials.tiktok.cookie_refresh import refresh_tiktok_cookies
+def _do_interactive_refresh_tiktok(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.cookies import _LOCAL_ROOM_FUNCTIONS
 
-    refreshed = cast(_CookieRefreshCallable, refresh_tiktok_cookies)(
-        username=username,
-        password=password,
-        cookie_file=str(
-            _platform_cookie_refresh_target_path(
-                _default_tiktok_cookie_file_path(),
-                "SOCIAL_TIKTOK_COOKIES_FILE",
-                "TIKTOK_COOKIES_FILE",
-            )
-        ),
-        headless=headless,
-        timeout_seconds=timeout_seconds,
-    )
-    if refreshed:
-        sync_result = _store_refreshed_tiktok_cookies(refreshed)
-        if sync_result.get("error"):
-            logger.warning("TikTok cookie refresh could not sync env JSON source: %s", sync_result.get("error"))
-    return refreshed
+    return _LOCAL_ROOM_FUNCTIONS["_do_interactive_refresh_tiktok"](*args, **kwargs)
 
 
 def _do_interactive_refresh_twitter(
@@ -12504,9 +12342,12 @@ def _job_claim_write_scope(job_id: str, *, claim_token: str | None = None, worke
     )
 
 
-def _with_claimed_job_context(executor: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+_ClaimedJobResultT = TypeVar("_ClaimedJobResultT")
+
+
+def _with_claimed_job_context(executor: Callable[..., _ClaimedJobResultT]) -> Callable[..., _ClaimedJobResultT]:
     @wraps(executor)
-    def execute(job: Mapping[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
+    def execute(job: Mapping[str, Any], *, worker_id: str | None = None) -> _ClaimedJobResultT:
         config = _metadata_dict(job.get("config"))
         binding = _job_claim_context.set((str(job.get("id") or ""), config.get("claim_token"), job.get("worker_id")))
         try:
@@ -14115,9 +13956,9 @@ def _sql_json_text_non_negative_int(expr: str) -> str:
     return f"coalesce(nullif(regexp_replace(coalesce({expr}, ''), '[^0-9]', '', 'g'), '')::bigint, 0)"
 
 
-def _instagram_reported_comments_sql(alias: str = "p") -> str:
+def _instagram_reported_comments_sql(alias: str = "p", *, raw_data_sql: str | None = None) -> str:
     safe_alias = str(alias or "p").strip() or "p"
-    raw = f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
+    raw = raw_data_sql or f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
     raw_candidates = [
         f"{raw} ->> 'comments_count'",
         f"{raw} ->> 'comments'",
@@ -14141,9 +13982,10 @@ def _instagram_external_facebook_comments_sql(
     alias: str = "p",
     *,
     fb_comment_count_expr: str | None = None,
+    raw_data_sql: str | None = None,
 ) -> str:
     safe_alias = str(alias or "p").strip() or "p"
-    raw = f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
+    raw = raw_data_sql or f"coalesce({safe_alias}.raw_data, '{{}}'::jsonb)"
     raw_candidates = [
         fb_comment_count_expr if fb_comment_count_expr is not None else f"{safe_alias}.fb_comment_count::text",
         f"{raw} -> 'facebook_crosspost' ->> 'comments_count'",
@@ -15751,31 +15593,52 @@ def _instagram_account_jsonb_array_match_sql(*, alias: str, path_sql: str, accou
         """
 
 
-def _instagram_account_match_sql(*, alias: str = "p") -> str:
+def _instagram_account_match_sql(
+    *,
+    alias: str = "p",
+    native_columns: frozenset[str] | None = None,
+    raw_data_sql: str | None = None,
+    short_circuit_direct: bool = False,
+) -> str:
     """Match an Instagram row to an account through ownership or coauthor data.
 
     This intentionally ignores profile_tags. Tagged-post ownership is a separate
     mode, while profile/comment targeting needs owner and collaborator identity.
     """
 
-    row_json = f"to_jsonb({alias})"
+    def field_sql(name: str, *, text: bool = False) -> str:
+        if native_columns is None:
+            return f"to_jsonb({alias}) {'->>' if text else '->'} '{name}'"
+        if name not in native_columns:
+            return "null::text" if text else "null::jsonb"
+        return f"{alias}.{name}"
+
+    # Known summary table shapes can avoid serializing large unrelated row fields.
+    # Other callers retain the schema-tolerant whole-row JSON lookup.
+    raw_data = raw_data_sql or field_sql("raw_data")
     account_ref = "_ig_account_match.account_handle"
     direct_candidates = [
-        f"{row_json} ->> 'source_account'",
-        f"{row_json} ->> 'owner_username'",
-        f"{row_json} ->> 'username'",
-        f"{row_json} -> 'raw_data' ->> 'source_account'",
-        f"{row_json} -> 'raw_data' ->> 'owner_username'",
-        f"{row_json} -> 'raw_data' ->> 'username'",
+        field_sql("source_account", text=True),
+        field_sql("owner_username", text=True),
+        field_sql("username", text=True),
+        f"{raw_data} ->> 'source_account'",
+        f"{raw_data} ->> 'owner_username'",
+        f"{raw_data} ->> 'username'",
     ]
-    direct_array = ",\n                ".join(
+    direct_identities = [
         "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in direct_candidates
-    )
+    ]
+    direct_array = ",\n                ".join(direct_identities)
+    direct_match_sql = f"{account_ref} = any(array_remove(array[{direct_array}], null))"
+    if short_circuit_direct:
+        # Catalog rows usually match their native owner. OR can stop before
+        # loading raw JSON, while ANY must build every identity first.
+        direct_match_sql = "(" + " or ".join(f"{account_ref} = {identity}" for identity in direct_identities) + ")"
     collaborator_paths = [
-        f"{row_json} -> 'collaborators'",
-        f"{row_json} -> 'collaborators_detail'",
-        f"{row_json} -> 'raw_data' -> 'collaborators'",
-        f"{row_json} -> 'raw_data' -> 'collaborators_detail'",
+        field_sql("collaborators"),
+        field_sql("collaborators_detail"),
+        f"{raw_data} -> 'collaborators'",
+        f"{raw_data} -> 'collaborators_detail'",
     ]
     collaborator_match_sql = "\n              or ".join(
         _instagram_account_jsonb_array_match_sql(
@@ -15789,20 +15652,13 @@ def _instagram_account_match_sql(*, alias: str = "p") -> str:
         exists (
           select 1
           from (select %s::text as account_handle) _ig_account_match
-          where {account_ref} = any(
-            array_remove(
-              array[
-                {direct_array}
-              ],
-              null
-            )
-          )
+          where {direct_match_sql}
           or {collaborator_match_sql}
         )
         """
 
 
-def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
+def _instagram_owner_account_match_sql(*, alias: str = "p", native_columns: set[str] | None = None) -> str:
     """Match only direct Instagram owner fields.
 
     Collaborator-aware paths should pair this with the indexed collaborator
@@ -15819,6 +15675,15 @@ def _instagram_owner_account_match_sql(*, alias: str = "p") -> str:
         f"{row_json} -> 'raw_data' ->> 'owner_username'",
         f"{row_json} -> 'raw_data' ->> 'username'",
     ]
+    if native_columns is not None:
+        direct_candidates = [
+            f"{alias}.{column}::text" if column in native_columns else "null::text"
+            for column in ("source_account", "owner_username", "username")
+        ]
+        if "raw_data" in native_columns:
+            direct_candidates.extend(
+                f"{alias}.raw_data ->> '{column}'" for column in ("source_account", "owner_username", "username")
+            )
     direct_array = ",\n                ".join(
         "nullif(ltrim(lower(trim(coalesce(" + expr + ", ''))), '@'), '')" for expr in direct_candidates
     )
@@ -16165,264 +16030,46 @@ def _build_handle_details_from_tokens(platform: str, handles: list[str]) -> list
     return details
 
 
-def _normalize_tiktok_sound_id(value: Any) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    if raw.isdigit():
-        return raw
-    if "tiktok.com/music/" in raw:
-        match = re.search(r"-([0-9]{8,})", raw)
-        if match:
-            return str(match.group(1))
-    match = re.search(r"\b([0-9]{8,})\b", raw)
-    if match:
-        return str(match.group(1))
-    return None
+def _normalize_tiktok_sound_id(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.sounds import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_normalize_tiktok_sound_id"](*args, **kwargs)
 
 
-def _normalize_tiktok_sound_ids(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        sound_id = _normalize_tiktok_sound_id(value)
-        if not sound_id or sound_id in seen:
-            continue
-        seen.add(sound_id)
-        normalized.append(sound_id)
-    return normalized
+def _normalize_tiktok_sound_ids(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.sounds import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_normalize_tiktok_sound_ids"](*args, **kwargs)
 
 
-def _extract_tiktok_sound_fields(raw_data: dict[str, Any], post: Any) -> dict[str, Any]:
-    music = _as_string_mapping(raw_data.get("music"))
-    music_meta = _as_string_mapping(raw_data.get("musicMeta"))
-    sound_id = _normalize_tiktok_sound_id(
-        music.get("id")
-        or music.get("musicId")
-        or music.get("mid")
-        or music_meta.get("musicId")
-        or music_meta.get("id")
-        or raw_data.get("music_id")
-        or raw_data.get("sound_id")
-    )
-    sound_title = (
-        str(
-            music.get("title")
-            or music.get("song")
-            or music_meta.get("musicName")
-            or music_meta.get("title")
-            or getattr(post, "music_title", "")
-            or ""
-        ).strip()
-        or None
-    )
-    sound_author = (
-        str(
-            music.get("authorName")
-            or music.get("author_name")
-            or music_meta.get("musicAuthor")
-            or music_meta.get("authorName")
-            or getattr(post, "music_author", "")
-            or ""
-        ).strip()
-        or None
-    )
-    usage_count = _normalize_non_negative_int(
-        music.get("videoCount")
-        or music.get("video_count")
-        or music_meta.get("videoCount")
-        or music_meta.get("video_count")
-        or raw_data.get("music_usage_count")
-        or raw_data.get("sound_usage_count")
-    )
-    return {
-        "sound_id": sound_id,
-        "sound_title": sound_title,
-        "sound_author": sound_author,
-        "sound_usage_count": usage_count,
-    }
+def _extract_tiktok_sound_fields(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.sounds import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_extract_tiktok_sound_fields"](*args, **kwargs)
 
 
-def _build_tiktok_sound_url(sound_ref: str) -> str:
-    normalized = str(sound_ref or "").strip()
-    if normalized.startswith("http://") or normalized.startswith("https://"):
-        return normalized
-    return f"https://www.tiktok.com/music/-{normalized}"
+def _build_tiktok_sound_url(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.sounds import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_build_tiktok_sound_url"](*args, **kwargs)
 
 
-def _extract_tiktok_sound_snapshot_from_html(html: str) -> dict[str, Any]:
-    text = str(html or "")
-    if not text:
-        return {}
+def _extract_tiktok_sound_snapshot_from_html(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.sounds import _LOCAL_ROOM_FUNCTIONS
 
-    title: str | None = None
-    artist_name: str | None = None
-    usage_count = 0
-
-    title_match = re.search(r'"musicName"\s*:\s*"([^"]+)"', text)
-    if title_match:
-        title = str(title_match.group(1) or "").strip() or None
-    artist_match = re.search(r'"authorName"\s*:\s*"([^"]+)"', text)
-    if artist_match:
-        artist_name = str(artist_match.group(1) or "").strip() or None
-
-    for pattern in (r'"videoCount"\s*:\s*([0-9]+)', r'"video_count"\s*:\s*([0-9]+)', r'"usage_count"\s*:\s*([0-9]+)'):
-        match = re.search(pattern, text)
-        if match:
-            usage_count = max(usage_count, int(match.group(1)))
-
-    post_matches = re.findall(r"(?:https?://www\\.tiktok\\.com)?/@([A-Za-z0-9._-]{1,64})/video/([0-9]{8,32})", text)
-    posts: list[dict[str, Any]] = []
-    seen_video_ids: set[str] = set()
-    for author, video_id in post_matches:
-        source_id = str(video_id or "").strip()
-        if not source_id or source_id in seen_video_ids:
-            continue
-        seen_video_ids.add(source_id)
-        posts.append(
-            {
-                "platform_post_id": source_id,
-                "creator_handle": str(author or "").strip() or None,
-            }
-        )
-
-    return {
-        "title": title,
-        "artist_name": artist_name,
-        "usage_count": usage_count,
-        "posts": posts,
-    }
+    return _LOCAL_ROOM_FUNCTIONS["_extract_tiktok_sound_snapshot_from_html"](*args, **kwargs)
 
 
-def _fetch_tiktok_sound_snapshot(sound_ref: str) -> dict[str, Any]:
-    sound_url = _build_tiktok_sound_url(sound_ref)
-    try:
-        response = requests.get(
-            sound_url,
-            timeout=(8, 25),
-            headers={
-                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "accept-language": "en-US,en;q=0.9",
-                "user-agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            },
-        )
-    except Exception:  # noqa: BLE001
-        return {
-            "source_url": sound_url,
-            "title": None,
-            "artist_name": None,
-            "usage_count": 0,
-            "posts": [],
-        }
+def _fetch_tiktok_sound_snapshot(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.sounds import _LOCAL_ROOM_FUNCTIONS
 
-    if not response.ok:
-        return {
-            "source_url": sound_url,
-            "title": None,
-            "artist_name": None,
-            "usage_count": 0,
-            "posts": [],
-        }
-    parsed = _extract_tiktok_sound_snapshot_from_html(response.text)
-    parsed["source_url"] = sound_url
-    return parsed
+    return _LOCAL_ROOM_FUNCTIONS["_fetch_tiktok_sound_snapshot"](*args, **kwargs)
 
 
-def _persist_tiktok_sound_snapshot(*, sound_id: str, snapshot: dict[str, Any], conn: Any | None = None) -> None:
-    if not _relation_exists("social.tiktok_sounds") or not _relation_exists("social.tiktok_sound_posts"):
-        return
-    with pg.db_cursor(conn=conn) as cur:
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            insert into social.tiktok_sounds (
-              sound_id,
-              title,
-              artist_name,
-              usage_count,
-              source_url,
-              last_seen_at,
-              updated_at
-            )
-            values (%s, %s, %s, %s, %s, now(), now())
-            on conflict (sound_id) do update
-            set
-              title = coalesce(excluded.title, social.tiktok_sounds.title),
-              artist_name = coalesce(excluded.artist_name, social.tiktok_sounds.artist_name),
-              usage_count = greatest(coalesce(excluded.usage_count, 0), coalesce(social.tiktok_sounds.usage_count, 0)),
-              source_url = coalesce(excluded.source_url, social.tiktok_sounds.source_url),
-              last_seen_at = now(),
-              updated_at = now()
-            returning sound_id
-            """,
-            [
-                sound_id,
-                snapshot.get("title"),
-                snapshot.get("artist_name"),
-                max(0, int(snapshot.get("usage_count") or 0)),
-                snapshot.get("source_url"),
-            ],
-        )
-        for post in snapshot.get("posts") or []:
-            platform_post_id = str((post or {}).get("platform_post_id") or "").strip()
-            if not platform_post_id:
-                continue
-            pg.fetch_one_with_cursor(
-                cur,
-                """
-                insert into social.tiktok_sound_posts (
-                  sound_id,
-                  platform_post_id,
-                  creator_handle,
-                  posted_at,
-                  views,
-                  likes,
-                  comments,
-                  shares,
-                  thumbnail_url,
-                  caption,
-                  raw_data,
-                  updated_at
-                )
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
-                on conflict (sound_id, platform_post_id) do update
-                set
-                  creator_handle = coalesce(excluded.creator_handle, social.tiktok_sound_posts.creator_handle),
-                  posted_at = coalesce(excluded.posted_at, social.tiktok_sound_posts.posted_at),
-                  views = greatest(coalesce(excluded.views, 0), coalesce(social.tiktok_sound_posts.views, 0)),
-                  likes = greatest(coalesce(excluded.likes, 0), coalesce(social.tiktok_sound_posts.likes, 0)),
-                  comments = greatest(coalesce(excluded.comments, 0), coalesce(social.tiktok_sound_posts.comments, 0)),
-                  shares = greatest(coalesce(excluded.shares, 0), coalesce(social.tiktok_sound_posts.shares, 0)),
-                  thumbnail_url = coalesce(excluded.thumbnail_url, social.tiktok_sound_posts.thumbnail_url),
-                  caption = coalesce(excluded.caption, social.tiktok_sound_posts.caption),
-                  raw_data = case
-                    when social.tiktok_sound_posts.raw_data is null or social.tiktok_sound_posts.raw_data = '{}'::jsonb
-                      then excluded.raw_data
-                    else social.tiktok_sound_posts.raw_data
-                  end,
-                  updated_at = now()
-                returning id::text
-                """,
-                [
-                    sound_id,
-                    platform_post_id,
-                    (post or {}).get("creator_handle"),
-                    _coerce_dt((post or {}).get("posted_at")),
-                    max(0, int((post or {}).get("views") or 0)),
-                    max(0, int((post or {}).get("likes") or 0)),
-                    max(0, int((post or {}).get("comments") or 0)),
-                    max(0, int((post or {}).get("shares") or 0)),
-                    (post or {}).get("thumbnail_url"),
-                    (post or {}).get("caption"),
-                    json.dumps(dict(post or {})),
-                ],
-            )
+def _persist_tiktok_sound_snapshot(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_persist_tiktok_sound_snapshot"](*args, **kwargs)
 
 
 def _extract_shortcode_from_permalink(value: str | None) -> str:
@@ -16797,9 +16444,12 @@ def _resolve_tiktok_media_for_video_id(
 ) -> dict[str, Any]:
     from trr_backend.socials.tiktok import resolve_tiktok_media
 
+    # Consume available canonical cookies without triggering login or refresh.
+    cookies = dict(_tiktok_cookie_runtime_override or _load_tiktok_cookies_from_sources()) if allow_ytdlp else {}
     resolution = resolve_tiktok_media(
         video_id,
         canonical_url=canonical_url,
+        cookies=cookies,
         allow_ytdlp=allow_ytdlp,
         validate_download_url=validate_download_url,
     )
@@ -17561,26 +17211,45 @@ def _find_social_media_reuse_asset_by_sha256(
             ):
                 continue
             posted_at_key = PLATFORM_POSTED_AT_COLUMN.get(candidate_platform) or "posted_at"
+            # Filter native columns so existing show/season indexes remain usable.
+            # Whole-row JSON conversion here also detoasted large raw payloads
+            # for every scanned row, even though reuse needs only the manifest.
+            scope_filters: list[str] = []
+            scope_params: list[str] = []
+            for column, value in (("season_id", season_id), ("show_id", show_id)):
+                if value and _platform_posts_has_column(candidate_platform, column):
+                    scope_filters.append(f"p.{column} = %s")
+                    scope_params.append(value)
+            if not scope_filters:
+                continue
+            timestamp_columns = [
+                column
+                for column in dict.fromkeys((posted_at_key, "posted_at", "published_at", "created_at"))
+                if _platform_posts_has_column(candidate_platform, column)
+            ]
+            timestamp_expressions = [f"p.{column}" for column in timestamp_columns]
+            if len(timestamp_expressions) > 1:
+                order_expression = f"coalesce({', '.join(timestamp_expressions)})"
+            elif timestamp_expressions:
+                order_expression = timestamp_expressions[0]
+            else:
+                order_expression = "p.id"
+            source_columns = [
+                column
+                for column in dict.fromkeys((PLATFORM_SOURCE_ID_COLUMN.get(candidate_platform), "source_id"))
+                if column and _platform_posts_has_column(candidate_platform, column)
+            ]
+            projection = ", ".join(["p.id::text as id", "p.asset_manifest", *(f"p.{c}" for c in source_columns)])
+            scope_expression = " or ".join(scope_filters)
             rows = pg.fetch_all(
                 f"""
-                select
-                  p.id::text as id,
-                  to_jsonb(p) as post_payload
+                select {projection}
                 from social.{table} p
-                where (
-                    (%s <> '' and coalesce(to_jsonb(p) ->> 'season_id', '') = %s)
-                    or (%s <> '' and coalesce(to_jsonb(p) ->> 'show_id', '') = %s)
-                  )
-                order by coalesce(
-                  to_jsonb(p) ->> %s,
-                  to_jsonb(p) ->> 'posted_at',
-                  to_jsonb(p) ->> 'published_at',
-                  to_jsonb(p) ->> 'created_at',
-                  ''
-                ) desc
+                where ({scope_expression})
+                order by {order_expression} desc nulls last
                 limit 200
                 """,
-                [season_id, season_id, show_id, show_id, posted_at_key],
+                scope_params,
             )
         except Exception:  # noqa: BLE001
             continue
@@ -20220,38 +19889,10 @@ def _mark_missing_comments_for_anchor(
     return len(rows)
 
 
-def _load_tiktok_comment_coverage_for_post(
-    post_db_id: str,
-    *,
-    conn: Any | None = None,
-) -> dict[str, int]:
-    normalized_post_id = str(post_db_id or "").strip()
-    if not normalized_post_id:
-        return {"active_comments": 0, "missing_comments": 0, "total_comments": 0}
-    lifecycle_supported = _comment_lifecycle_supported("tiktok_comments", conn=conn)
-    active_condition = "coalesce(is_missing, false) = false" if lifecycle_supported else "true"
-    missing_condition = "coalesce(is_missing, false) = true" if lifecycle_supported else "false"
-    with pg.db_cursor(conn=conn, label="tiktok-comment-coverage") as cur:
-        row = (
-            pg.fetch_one_with_cursor(
-                cur,
-                f"""
-            select
-              count(*) filter (where {active_condition})::int as active_comments,
-              count(*) filter (where {missing_condition})::int as missing_comments,
-              count(*)::int as total_comments
-            from social.tiktok_comments
-            where post_id = %s
-            """,
-                [normalized_post_id],
-            )
-            or {}
-        )
-    return {
-        "active_comments": _normalize_non_negative_int(row.get("active_comments")),
-        "missing_comments": _normalize_non_negative_int(row.get("missing_comments")),
-        "total_comments": _normalize_non_negative_int(row.get("total_comments")),
-    }
+def _load_tiktok_comment_coverage_for_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.coverage import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_load_tiktok_comment_coverage_for_post"](*args, **kwargs)
 
 
 def _reconcile_post_comment_count(
@@ -23451,8 +23092,10 @@ def _platform_comment_media_needs_mirror(platform: str, comment_row: dict[str, A
     return True
 
 
-def _tiktok_comment_needs_media_mirror(comment_row: dict[str, Any]) -> bool:
-    return _platform_comment_media_needs_mirror("tiktok", comment_row)
+def _tiktok_comment_needs_media_mirror(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.media_mirror import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_comment_needs_media_mirror"](*args, **kwargs)
 
 
 def _twitter_comment_needs_media_mirror(comment_row: dict[str, Any]) -> bool:
@@ -24201,135 +23844,16 @@ def _enqueue_platform_comment_media_mirror_job(
     return mirror_job_id
 
 
-def _update_tiktok_comment_media_mirror_fields(
-    *,
-    comment_id: str,
-    hosted_media_urls: list[str] | object = FIELD_UNSET,
-    media_mirror_status: str | None | object = FIELD_UNSET,
-    media_mirror_error: str | None | object = FIELD_UNSET,
-    media_mirror_attempt_count: int | object = FIELD_UNSET,
-    media_mirror_last_attempt_at: datetime | None | object = FIELD_UNSET,
-    media_mirror_last_job_id: str | None | object = FIELD_UNSET,
-    conn: Any | None = None,
-) -> None:
-    assignments: list[str] = []
-    params: list[Any] = []
+def _update_tiktok_comment_media_mirror_fields(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.media_mirror import _LOCAL_ROOM_FUNCTIONS
 
-    def _add(column: str, value: Any, *, as_jsonb: bool = False) -> None:
-        if as_jsonb:
-            assignments.append(f"{column} = %s::jsonb")
-            params.append(json.dumps(value))
-            return
-        assignments.append(f"{column} = %s")
-        params.append(value)
-
-    if hosted_media_urls is not FIELD_UNSET and _tiktok_comments_has_column("hosted_media_urls", conn=conn):
-        _add("hosted_media_urls", list(cast(Iterable[Any], hosted_media_urls or [])), as_jsonb=True)
-    if media_mirror_status is not FIELD_UNSET and _tiktok_comments_has_column("media_mirror_status", conn=conn):
-        _add("media_mirror_status", media_mirror_status)
-    if media_mirror_error is not FIELD_UNSET and _tiktok_comments_has_column("media_mirror_error", conn=conn):
-        _add("media_mirror_error", media_mirror_error)
-    if media_mirror_attempt_count is not FIELD_UNSET and _tiktok_comments_has_column(
-        "media_mirror_attempt_count", conn=conn
-    ):
-        _add("media_mirror_attempt_count", max(0, int(cast(Any, media_mirror_attempt_count))))
-    if media_mirror_last_attempt_at is not FIELD_UNSET and _tiktok_comments_has_column(
-        "media_mirror_last_attempt_at", conn=conn
-    ):
-        _add("media_mirror_last_attempt_at", media_mirror_last_attempt_at)
-    if media_mirror_last_job_id is not FIELD_UNSET and _tiktok_comments_has_column(
-        "media_mirror_last_job_id", conn=conn
-    ):
-        _add("media_mirror_last_job_id", media_mirror_last_job_id)
-
-    if not assignments:
-        return
-
-    params.append(comment_id)
-    with pg.db_cursor(conn=conn) as cur:
-        pg.fetch_one_with_cursor(
-            cur,
-            f"update social.tiktok_comments set {', '.join(assignments)} where comment_id = %s returning id::text",
-            params,
-        )
+    return _LOCAL_ROOM_FUNCTIONS["_update_tiktok_comment_media_mirror_fields"](*args, **kwargs)
 
 
-def _enqueue_tiktok_comment_media_mirror_job(
-    context: SeasonContext,
-    *,
-    run_id: str | None,
-    source_scope: str,
-    account: str,
-    comment_row: dict[str, Any],
-    parent_job_id: str | None,
-    conn: Any | None = None,
-) -> str | None:
-    if not _tiktok_comments_has_column("media_urls", conn=conn):
-        return None
+def _enqueue_tiktok_comment_media_mirror_job(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.media_mirror import _LOCAL_ROOM_FUNCTIONS
 
-    comment_id = str(comment_row.get("comment_id") or "").strip()
-    comment_db_id = str(comment_row.get("id") or "").strip()
-    post_id = str(comment_row.get("post_id") or "").strip()
-    if not comment_id or not post_id:
-        return None
-    if not _tiktok_comment_needs_media_mirror(comment_row):
-        return None
-
-    with pg.db_cursor(conn=conn) as cur:
-        existing = pg.fetch_one_with_cursor(
-            cur,
-            """
-            select id::text as id
-            from social.scrape_jobs
-            where platform = 'tiktok'
-              and status in ('queued', 'pending', 'retrying', 'running')
-              and coalesce(config->>'stage', metadata->>'stage', job_type) = %s
-              and config->>'comment_id' = %s
-              and (%s::uuid is null or run_id = %s::uuid)
-            order by created_at desc
-            limit 1
-            """,
-            [COMMENT_MEDIA_MIRROR_STAGE, comment_id, run_id, run_id],
-        )
-    if existing and existing.get("id"):
-        return str(existing["id"])
-
-    mirror_job_status = "queued" if is_queue_enabled() else "pending"
-    config = {
-        "run_id": run_id,
-        "season_id": context.season_id,
-        "show_id": context.show_id,
-        "platform": "tiktok",
-        "source_scope": source_scope,
-        "stage": COMMENT_MEDIA_MIRROR_STAGE,
-        "job_type": TIKTOK_COMMENT_MEDIA_MIRROR_JOB_TYPE,
-        "account": account,
-        "comment_id": comment_id,
-        "comment_db_id": comment_db_id,
-        "post_id": post_id,
-        "parent_job_id": parent_job_id,
-    }
-    mirror_job_id = _create_job(
-        context,
-        run_id=run_id,
-        platform="tiktok",
-        source_scope=source_scope,
-        job_type=TIKTOK_COMMENT_MEDIA_MIRROR_JOB_TYPE,
-        stage=COMMENT_MEDIA_MIRROR_STAGE,
-        config=config,
-        initiated_by=None,
-        status=mirror_job_status,
-        priority=275,
-        conn=conn,
-    )
-    _update_tiktok_comment_media_mirror_fields(
-        comment_id=comment_id,
-        media_mirror_status="pending",
-        media_mirror_error=None,
-        media_mirror_last_job_id=mirror_job_id,
-        conn=conn,
-    )
-    return mirror_job_id
+    return _LOCAL_ROOM_FUNCTIONS["_enqueue_tiktok_comment_media_mirror_job"](*args, **kwargs)
 
 
 def _enqueue_facebook_comment_media_mirror_job(
@@ -26815,303 +26339,28 @@ def _extract_keyword_tokens_from_text(text: str | None, keywords: list[str]) -> 
     return _normalize_unique_terms(matched)
 
 
-def _compute_tiktok_post_quality(
-    *,
-    description: str | None,
-    thumbnail_url: str | None,
-    hashtags: list[str],
-    mentions: list[str],
-    media_urls: list[str],
-    duration_seconds: int | None,
-) -> tuple[float, list[str], list[str]]:
-    score = 100.0
-    missing_fields: list[str] = []
-    flags: list[str] = []
-    if not str(description or "").strip():
-        score -= 25.0
-        missing_fields.append("description")
-    if not str(thumbnail_url or "").strip():
-        score -= 20.0
-        missing_fields.append("thumbnail_url")
-    if not media_urls:
-        score -= 20.0
-        missing_fields.append("media_urls")
-    if not hashtags:
-        score -= 10.0
-        flags.append("no_hashtags")
-    if not mentions:
-        flags.append("no_mentions")
-    if not duration_seconds or int(duration_seconds) <= 0:
-        score -= 5.0
-        flags.append("duration_missing")
-    return max(0.0, round(score, 2)), missing_fields, flags
+def _compute_tiktok_post_quality(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_compute_tiktok_post_quality"](*args, **kwargs)
 
 
-def _compute_tiktok_velocity_metrics(*, views: int, posted_at: datetime | None) -> tuple[float, float, float]:
-    if not posted_at:
-        base = float(max(0, int(views or 0)))
-        return base, base, base
-    elapsed_hours = max(1.0, (_now_utc() - posted_at).total_seconds() / 3600.0)
-    view_count = float(max(0, int(views or 0)))
-    velocity_1h = round(view_count / min(elapsed_hours, 1.0), 3)
-    velocity_24h = round(view_count / min(elapsed_hours, 24.0), 3)
-    velocity_7d = round(view_count / min(elapsed_hours, 24.0 * 7.0), 3)
-    return velocity_1h, velocity_24h, velocity_7d
+def _compute_tiktok_velocity_metrics(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_compute_tiktok_velocity_metrics"](*args, **kwargs)
 
 
-def _persist_tiktok_post_enrichment(
-    *,
-    context: SeasonContext,
-    run_id: str | None,
-    post_row: dict[str, Any],
-    description: str | None,
-    hashtags: list[str],
-    mentions: list[str],
-    keywords: list[str],
-    cast_mentions: list[dict[str, Any]],
-    quality_score: float,
-    quality_missing_fields: list[str],
-    quality_flags: list[str],
-    velocity_1h: float,
-    velocity_24h: float,
-    velocity_7d: float,
-    conn: Any | None = None,
-) -> None:
-    if not _relation_exists("social.tiktok_post_tokens"):
-        return
-    post_id = str(post_row.get("id") or "").strip()
-    if not post_id:
-        return
-    keyword_tokens = _extract_keyword_tokens_from_text(description, keywords)
-    token_rows: list[tuple[str, str, str]] = []
-    for token in hashtags:
-        normalized = str(token or "").strip().lstrip("#").lower()
-        if normalized:
-            token_rows.append((f"#{normalized}", "hashtag", normalized))
-    for token in mentions:
-        normalized = str(token or "").strip().lstrip("@").lower()
-        if normalized:
-            token_rows.append((f"@{normalized}", "mention", normalized))
-    for token in keyword_tokens:
-        normalized = str(token or "").strip().lower()
-        if normalized:
-            token_rows.append((normalized, "keyword", normalized))
-    deduped_token_rows: list[tuple[str, str, str]] = []
-    seen_tokens: set[tuple[str, str]] = set()
-    for token, token_type, normalized in token_rows:
-        key = (token_type, normalized)
-        if key in seen_tokens:
-            continue
-        seen_tokens.add(key)
-        deduped_token_rows.append((token, token_type, normalized))
+def _persist_tiktok_post_enrichment(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.persistence import _LOCAL_ROOM_FUNCTIONS
 
-    with pg.db_cursor(conn=conn) as cur:
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            delete from social.tiktok_post_tokens
-            where post_id = %s::uuid
-            """,
-            [post_id],
-        )
-        for token, token_type, normalized in deduped_token_rows:
-            pg.fetch_one_with_cursor(
-                cur,
-                """
-                insert into social.tiktok_post_tokens (post_id, token, token_type, normalized_token)
-                values (%s::uuid, %s, %s, %s)
-                on conflict (post_id, token_type, normalized_token) do update
-                set token = excluded.token
-                returning id::text
-                """,
-                [post_id, token, token_type, normalized],
-            )
-
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            delete from social.tiktok_post_cast_members
-            where post_id = %s::uuid and source = 'auto'
-            """,
-            [post_id],
-        )
-        for mention in cast_mentions:
-            person_id = str(mention.get("person_id") or "").strip() or None
-            pg.fetch_one_with_cursor(
-                cur,
-                """
-                insert into social.tiktok_post_cast_members (
-                  post_id,
-                  cast_member_id,
-                  cast_member_name,
-                  confidence,
-                  source,
-                  run_id
-                )
-                values (
-                  %s::uuid,
-                  %s::uuid,
-                  %s,
-                  %s,
-                  'auto',
-                  %s::uuid
-                )
-                on conflict (post_id, cast_member_id, source) do update
-                set
-                  cast_member_name = excluded.cast_member_name,
-                  confidence = excluded.confidence,
-                  run_id = excluded.run_id,
-                  updated_at = now()
-                returning id::text
-                """,
-                [post_id, person_id, mention.get("name"), float(mention.get("confidence") or 0.85), run_id],
-            )
-
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            insert into social.tiktok_post_quality (
-              post_id,
-              quality_score,
-              missing_fields,
-              confidence_flags,
-              updated_at
-            )
-            values (%s::uuid, %s, %s::jsonb, %s::jsonb, now())
-            on conflict (post_id) do update
-            set
-              quality_score = excluded.quality_score,
-              missing_fields = excluded.missing_fields,
-              confidence_flags = excluded.confidence_flags,
-              updated_at = now()
-            returning post_id::text
-            """,
-            [post_id, quality_score, json.dumps(quality_missing_fields), json.dumps(quality_flags)],
-        )
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            insert into social.tiktok_post_velocity (
-              post_id,
-              velocity_1h,
-              velocity_24h,
-              velocity_7d,
-              snapshot_at,
-              updated_at
-            )
-            values (%s::uuid, %s, %s, %s, now(), now())
-            on conflict (post_id) do update
-            set
-              velocity_1h = excluded.velocity_1h,
-              velocity_24h = excluded.velocity_24h,
-              velocity_7d = excluded.velocity_7d,
-              snapshot_at = now(),
-              updated_at = now()
-            returning post_id::text
-            """,
-            [post_id, velocity_1h, velocity_24h, velocity_7d],
-        )
-        post_updates: dict[str, Any] = {}
-        if _platform_posts_has_column("tiktok", "quality_score"):
-            post_updates["quality_score"] = quality_score
-        if _platform_posts_has_column("tiktok", "quality_flags"):
-            post_updates["quality_flags"] = quality_flags
-        if _platform_posts_has_column("tiktok", "velocity_1h"):
-            post_updates["velocity_1h"] = velocity_1h
-        if _platform_posts_has_column("tiktok", "velocity_24h"):
-            post_updates["velocity_24h"] = velocity_24h
-        if _platform_posts_has_column("tiktok", "velocity_7d"):
-            post_updates["velocity_7d"] = velocity_7d
-        if _platform_posts_has_column("tiktok", "cast_member_mentions"):
-            post_updates["cast_member_mentions"] = [
-                str(item.get("name") or "") for item in cast_mentions if str(item.get("name") or "")
-            ]
-        if post_updates:
-            assignments: list[str] = []
-            params: list[Any] = []
-            for key, value in post_updates.items():
-                if key in {"quality_flags", "cast_member_mentions"}:
-                    assignments.append(f"{key} = %s::jsonb")
-                    params.append(json.dumps(value))
-                else:
-                    assignments.append(f"{key} = %s")
-                    params.append(value)
-            with pg.db_cursor(conn=conn) as update_cur:
-                pg.fetch_one_with_cursor(
-                    update_cur,
-                    f"""
-                    update social.tiktok_posts
-                    set {", ".join(assignments)}
-                    where id = %s::uuid
-                    returning id::text
-                    """,
-                    [*params, post_id],
-                )
+    return _LOCAL_ROOM_FUNCTIONS["_persist_tiktok_post_enrichment"](*args, **kwargs)
 
 
-def _persist_tiktok_comment_enrichment(
-    *,
-    post_id: str,
-    cast_names: list[str],
-    conn: Any | None = None,
-) -> None:
-    if not _relation_exists("social.tiktok_post_comment_enrichment"):
-        return
-    comment_rows = pg.fetch_all(
-        """
-        select coalesce(text, '') as text
-        from social.tiktok_comments
-        where post_id = %s::uuid
-          and coalesce(is_missing, false) = false
-        """,
-        [post_id],
-    )
-    positive = 0
-    neutral = 0
-    negative = 0
-    toxicity = 0
-    cast_mentions_count = 0
-    cast_lower = [str(name or "").strip().lower() for name in cast_names if str(name or "").strip()]
-    for row in comment_rows:
-        text = str((row or {}).get("text") or "")
-        label, _score = sentiment_for_text(text)
-        if label == "positive":
-            positive += 1
-        elif label == "negative":
-            negative += 1
-        else:
-            neutral += 1
-        lowered = text.lower()
-        if any(marker in lowered for marker in TOXICITY_MARKERS):
-            toxicity += 1
-        if cast_lower and any(name in lowered for name in cast_lower):
-            cast_mentions_count += 1
-    with pg.db_cursor(conn=conn) as cur:
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            insert into social.tiktok_post_comment_enrichment (
-              post_id,
-              positive_count,
-              neutral_count,
-              negative_count,
-              toxicity_count,
-              cast_mentions_count,
-              updated_at
-            )
-            values (%s::uuid, %s, %s, %s, %s, %s, now())
-            on conflict (post_id) do update
-            set
-              positive_count = excluded.positive_count,
-              neutral_count = excluded.neutral_count,
-              negative_count = excluded.negative_count,
-              toxicity_count = excluded.toxicity_count,
-              cast_mentions_count = excluded.cast_mentions_count,
-              updated_at = now()
-            returning post_id::text
-            """,
-            [post_id, positive, neutral, negative, toxicity, cast_mentions_count],
-        )
+def _persist_tiktok_comment_enrichment(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_persist_tiktok_comment_enrichment"](*args, **kwargs)
 
 
 def _load_ingest_checkpoint(*, platform: str, creator_id: str) -> dict[str, Any] | None:
@@ -27169,938 +26418,28 @@ def _save_ingest_checkpoint(
         )
 
 
-def _record_tiktok_anomaly_event(
-    *,
-    season_id: str,
-    post_id: str,
-    account: str,
-    event_type: str,
-    event_value: float,
-    baseline_value: float,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    if not _relation_exists("social.tiktok_anomaly_events"):
-        return
-    severity = "warn"
-    if baseline_value > 0 and event_value >= (3.0 * baseline_value):
-        severity = "critical"
-    with pg.db_cursor() as cur:
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            insert into social.tiktok_anomaly_events (
-              season_id,
-              post_id,
-              account,
-              event_type,
-              severity,
-              event_value,
-              baseline_value,
-              metadata
-            )
-            values (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s::jsonb)
-            returning id::text
-            """,
-            [
-                season_id,
-                post_id,
-                account,
-                event_type,
-                severity,
-                event_value,
-                baseline_value,
-                json.dumps(dict(metadata or {})),
-            ],
-        )
+def _record_tiktok_anomaly_event(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_record_tiktok_anomaly_event"](*args, **kwargs)
 
 
-def _upsert_tiktok_post(
-    context: SeasonContext | None, *, job_id: str | None, account: str, post: Any, conn: Any | None = None
-) -> dict[str, Any] | None:
-    posted_at = _parse_tiktok_time(getattr(post, "create_time", None))
-    raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
-    if not isinstance(raw_data, dict):
-        raw_data = {}
-    media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
-    thumbnail_url = str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
-    description = str(getattr(post, "description", "") or "")
-    hashtags = _as_text_list(
-        [
-            *_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
-            *_parse_hashtags(description),
-        ],
-        strip_prefix="#",
-    )
-    mentions = _as_text_list(
-        [
-            *_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
-            *_parse_mentions(description),
-        ],
-        prefix="@",
-        strip_prefix="@",
-    )
-    sound_fields = _extract_tiktok_sound_fields(raw_data, post)
-    payload = {
-        "video_id": getattr(post, "video_id", ""),
-        "aweme_id": getattr(post, "video_id", ""),
-        "username": getattr(post, "username", account),
-        "user_id": None,
-        "nickname": getattr(post, "author_nickname", None),
-        "description": getattr(post, "description", None),
-        "hashtags": hashtags,
-        "music_info": {
-            "title": getattr(post, "music_title", None),
-            "author": getattr(post, "music_author", None),
-        },
-        "likes": int(getattr(post, "likes", 0) or 0),
-        "comments_count": int(getattr(post, "comments", 0) or 0),
-        "shares": int(getattr(post, "shares", 0) or 0),
-        "views": int(getattr(post, "views", 0) or 0),
-        "duration_seconds": int(getattr(post, "duration", 0) or 0),
-        "thumbnail_url": thumbnail_url,
-        "posted_at": posted_at,
-        "scraped_at": _now_utc(),
-        "raw_data": raw_data,
-        "source_account": account,
-    }
-    _apply_assignment_payload(payload, context)
-    if job_id:
-        payload["job_id"] = job_id
-    if _platform_posts_has_column("tiktok", "saves", conn=conn):
-        payload["saves"] = int(getattr(post, "saves", 0) or 0)
-    if _platform_posts_has_column("tiktok", "mentions", conn=conn):
-        payload["mentions"] = mentions
-    if _platform_posts_has_column("tiktok", "media_urls", conn=conn):
-        payload["media_urls"] = media_urls
-    if _platform_posts_has_column("tiktok", "sound_id", conn=conn):
-        payload["sound_id"] = sound_fields.get("sound_id")
-    if _platform_posts_has_column("tiktok", "sound_title", conn=conn):
-        payload["sound_title"] = sound_fields.get("sound_title")
-    if _platform_posts_has_column("tiktok", "sound_author", conn=conn):
-        payload["sound_author"] = sound_fields.get("sound_author")
-    if _platform_posts_has_column("tiktok", "sound_usage_count", conn=conn):
-        payload["sound_usage_count"] = _normalize_non_negative_int(sound_fields.get("sound_usage_count"))
-    if _platform_posts_has_column("tiktok", "user_avatar_url", conn=conn):
-        payload["user_avatar_url"] = str(getattr(post, "user_avatar_url", "") or "").strip() or None
-    return _pg_upsert("tiktok_posts", payload, conflict_col="video_id", conn=conn)
+def _upsert_tiktok_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_upsert_tiktok_post"](*args, **kwargs)
 
 
-def _upsert_tiktok_comment_tree(
-    context: SeasonContext | None,
-    *,
-    job_id: str | None,
-    run_id: str | None,
-    account: str,
-    post_id: str,
-    comment: Any,
-    parent_comment_db_id: str | None = None,
-    source_scope: str = "network",
-    observed_comment_ids: set[str] | None = None,
-    persist_stats: dict[str, int] | None = None,
-    conn: Any | None = None,
-) -> int:
-    if persist_stats is not None:
-        persist_stats["comments_fetched"] = int(persist_stats.get("comments_fetched") or 0) + 1
+def _upsert_tiktok_comment_tree(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.persistence import _LOCAL_ROOM_FUNCTIONS
 
-    created_at = _parse_tiktok_time(getattr(comment, "created_at", None))
-    comment_external_id = str(getattr(comment, "comment_id", "") or "")
-    if observed_comment_ids is not None and comment_external_id:
-        observed_comment_ids.add(comment_external_id)
-    if not comment_external_id.strip():
-        if persist_stats is not None:
-            persist_stats["comments_skipped_missing_id"] = (
-                int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
-            )
-        total = 0
-        for reply in getattr(comment, "replies", []) or []:
-            total += _upsert_tiktok_comment_tree(
-                context,
-                job_id=job_id,
-                run_id=run_id,
-                account=account,
-                post_id=post_id,
-                comment=reply,
-                parent_comment_db_id=parent_comment_db_id,
-                observed_comment_ids=observed_comment_ids,
-                persist_stats=persist_stats,
-                source_scope=source_scope,
-                conn=conn,
-            )
-        return total
-    media_urls = [str(url).strip() for url in (getattr(comment, "media_urls", []) or []) if str(url).strip()]
-    payload = {
-        "comment_id": comment_external_id,
-        "post_id": post_id,
-        "parent_comment_id": parent_comment_db_id,
-        "username": getattr(comment, "username", ""),
-        "user_id": getattr(comment, "user_id", None),
-        "nickname": getattr(comment, "nickname", None),
-        "text": getattr(comment, "text", ""),
-        "likes": int(getattr(comment, "likes", 0) or 0),
-        "is_reply": bool(getattr(comment, "is_reply", False)),
-        "reply_count": int(getattr(comment, "reply_count", 0) or 0),
-        "created_at": created_at,
-        "scraped_at": _now_utc(),
-        "raw_data": comment.to_dict() if hasattr(comment, "to_dict") else {},
-        "source_account": account,
-    }
-    if context is not None:
-        payload["season_id"] = context.season_id
-    if _tiktok_comments_has_column("comment_language", conn=conn):
-        payload["comment_language"] = str(getattr(comment, "comment_language", "") or "").strip() or None
-    if _tiktok_comments_has_column("is_author_liked", conn=conn):
-        is_author_liked = getattr(comment, "is_author_liked", None)
-        payload["is_author_liked"] = bool(is_author_liked) if isinstance(is_author_liked, (bool, int)) else None
-    if _tiktok_comments_has_column("aweme_id", conn=conn):
-        payload["aweme_id"] = str(getattr(comment, "aweme_id", "") or "").strip() or None
-    if _tiktok_comments_has_column("parent_source_comment_id", conn=conn):
-        payload["parent_source_comment_id"] = (
-            str(getattr(comment, "parent_source_comment_id", "") or "").strip() or None
-        )
-    if _tiktok_comments_has_column("user_url", conn=conn):
-        payload["user_url"] = str(getattr(comment, "user_url", "") or "").strip() or None
-    if _tiktok_comments_has_column("user_bio", conn=conn):
-        payload["user_bio"] = str(getattr(comment, "user_bio", "") or "").strip() or None
-    if _tiktok_comments_has_column("user_avatar_url", conn=conn):
-        payload["user_avatar_url"] = str(getattr(comment, "user_avatar_url", "") or "").strip() or None
-    if _tiktok_comments_has_column("user_region", conn=conn):
-        payload["user_region"] = str(getattr(comment, "user_region", "") or "").strip() or None
-    if _tiktok_comments_has_column("user_language", conn=conn):
-        payload["user_language"] = str(getattr(comment, "user_language", "") or "").strip() or None
-    if _tiktok_comments_has_column("media_urls", conn=conn):
-        payload["media_urls"] = media_urls
-    if media_urls and _tiktok_comments_has_column("media_mirror_status", conn=conn):
-        payload["media_mirror_status"] = "pending"
-    if media_urls and _tiktok_comments_has_column("media_mirror_error", conn=conn):
-        payload["media_mirror_error"] = None
-    if job_id:
-        payload["job_id"] = job_id
-    if _comment_lifecycle_supported("tiktok_comments", conn=conn):
-        payload["is_missing"] = False
-        payload["missing_at"] = None
-        payload["last_seen_at"] = _now_utc()
-        if run_id is not None:
-            payload["last_seen_run_id"] = run_id
-    row = _pg_upsert("tiktok_comments", payload, conflict_col="comment_id", conn=conn)
-    comment_db_id = (row or {}).get("id")
-    if persist_stats is not None and row:
-        persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
-    if row and media_urls and context is not None:
-        try:
-            mirror_job_id = _enqueue_tiktok_comment_media_mirror_job(
-                context,
-                run_id=run_id,
-                account=account,
-                comment_row=row,
-                parent_job_id=job_id,
-                source_scope=source_scope,
-                conn=conn,
-            )
-            if mirror_job_id and persist_stats is not None:
-                persist_stats["comment_media_mirror_jobs_enqueued"] = (
-                    int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
-                )
-        except Exception:  # noqa: BLE001
-            if persist_stats is not None:
-                persist_stats["comment_media_mirror_job_enqueue_errors"] = (
-                    int(persist_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                )
-
-    total = 1 if row else 0
-    for reply in getattr(comment, "replies", []) or []:
-        total += _upsert_tiktok_comment_tree(
-            context,
-            job_id=job_id,
-            run_id=run_id,
-            account=account,
-            post_id=post_id,
-            comment=reply,
-            parent_comment_db_id=comment_db_id,
-            observed_comment_ids=observed_comment_ids,
-            persist_stats=persist_stats,
-            source_scope=source_scope,
-            conn=conn,
-        )
-    return total
+    return _LOCAL_ROOM_FUNCTIONS["_upsert_tiktok_comment_tree"](*args, **kwargs)
 
 
-def _ingest_tiktok(
-    context: SeasonContext,
-    *,
-    run_id: str | None,
-    account: str,
-    hashtags: list[str],
-    keywords: list[str],
-    opts: IngestOptions,
-    job_id: str,
-    stage: str = "posts",
-    job_config: dict[str, Any] | None = None,
-) -> tuple[int, int, dict[str, Any]]:
-    from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
+def _ingest_tiktok(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.posts.ingest import _LOCAL_ROOM_FUNCTIONS
 
-    tiktok_cookies = _load_tiktok_cookies()
-    direct_comment_api_override = (
-        bool((job_config or {}).get("tiktok_direct_comment_api_override"))
-        if _tiktok_catalog_comment_override_enabled()
-        else False
-    )
-    scraper = TikTokScraper(
-        cookies=tiktok_cookies,
-        direct_comment_api_enabled_override=direct_comment_api_override if direct_comment_api_override else None,
-    )
-
-    retrieval_meta: dict[str, Any] = {
-        "tiktok_direct_comment_api_override": direct_comment_api_override,
-        "tiktok_direct_comment_api_override_enabled": _tiktok_catalog_comment_override_enabled(),
-    }
-    normalized_creator_id = _normalize_account_handle(account) or str(account or "").strip().lower()
-    requested_sound_ids = _normalize_tiktok_sound_ids(opts.sound_ids or [])
-    discovered_sound_ids: set[str] = set()
-    sound_pages_attempted = 0
-    sound_pages_succeeded = 0
-    sound_posts_ingested = 0
-    latest_posted_at_seen: datetime | None = None
-    checkpoint_cursor: str | None = None
-    checkpoint_last_posted_at: datetime | None = None
-    skipped_checkpoint = 0
-    cast_people = _load_show_cast_people(context.show_id)
-    cast_names = [str(item.get("name") or "").strip() for item in cast_people if str(item.get("name") or "").strip()]
-    if stage == "posts" and opts.sync_strategy == "incremental" and normalized_creator_id:
-        checkpoint = _load_ingest_checkpoint(platform="tiktok", creator_id=normalized_creator_id) or {}
-        checkpoint_cursor = str(checkpoint.get("cursor") or "").strip() or None
-        checkpoint_last_posted_at = _coerce_dt(checkpoint.get("last_posted_at"))
-        retrieval_meta["checkpoint"] = {
-            "platform": "tiktok",
-            "creator_id": normalized_creator_id,
-            "cursor": checkpoint_cursor,
-            "last_posted_at": _iso(checkpoint_last_posted_at),
-        }
-    matched_post_count = 0
-    scraped_post_count = 0
-    scraped_comment_count = 0
-    comment_errors = 0
-    comment_fail_reasons: set[str] = set()
-    comment_refresh_reasons: Counter[str] = Counter()
-    missing_marked = 0
-    incomplete_comment_fetches = 0
-    comments_mark_missing_skipped = 0
-    mirror_jobs_enqueued = 0
-    mirror_job_enqueue_errors = 0
-    comment_stats = _new_comment_persist_stats()
-    skipped_keyword = 0
-    total_scraped = 0
-    progress_state = _new_job_progress_state()
-    activity: dict[str, Any] = {
-        "phase": f"{stage}_start",
-        "pages_scanned": 0,
-        "posts_checked": 0,
-        "matched_posts": 0,
-    }
-
-    def _flush_progress(*, force: bool = False) -> None:
-        _emit_job_progress(
-            job_id=job_id,
-            stage=stage,
-            platform="tiktok",
-            account=account,
-            scraped_posts=scraped_post_count,
-            scraped_comments=scraped_comment_count,
-            posts_upserted=matched_post_count,
-            comments_upserted=int(comment_stats.get("comments_upserted") or 0),
-            activity=activity,
-            progress_state=progress_state,
-            force=force,
-        )
-
-    _flush_progress(force=True)
-
-    if stage == "posts" and opts.ingest_mode == "details_refresh":
-        return _run_existing_post_details_refresh(
-            context,
-            platform="tiktok",
-            run_id=run_id,
-            account=account,
-            opts=opts,
-            job_id=job_id,
-            activity=activity,
-            flush_progress=_flush_progress,
-        )
-
-    if stage == "comments":
-        target_source_ids = _target_source_ids_for_platform(opts, "tiktok")
-        existing_posts = _load_existing_posts(
-            "tiktok",
-            context,
-            account,
-            opts.date_start,
-            opts.date_end,
-            source_ids=target_source_ids,
-        )
-        logger.info("[tiktok] Comments stage: %d existing posts from DB for account=%s", len(existing_posts), account)
-        retrieval_meta["source"] = "db"
-        snapshots = _load_comment_lifecycle_snapshots(
-            [str(r["id"]) for r in existing_posts if r.get("id")],
-            platform="tiktok",
-        )
-        skipped_synced = 0
-        with pg.db_connection() as comments_conn:
-            for post_index, row in enumerate(existing_posts, start=1):
-                video_id = str(row.get("video_id") or "")
-                post_db_id = str(row.get("id") or "")
-                if not video_id:
-                    continue
-                expected = int(row.get("comments_count") or 0)
-                decision = _decide_comment_refresh(
-                    sync_strategy=opts.sync_strategy,
-                    expected_count=expected,
-                    snapshot=snapshots.get(post_db_id),
-                    post_published_at=_coerce_dt(row.get("posted_at")),
-                    refresh_policy=opts.comment_refresh_policy,
-                )
-                comment_refresh_reasons[decision.reason] += 1
-                if not decision.should_refresh:
-                    skipped_synced += 1
-                    continue
-                scraped_post_count += 1
-                activity["phase"] = "comments_fetch"
-                activity["posts_checked"] = scraped_post_count
-                activity["matched_posts"] = matched_post_count
-                if scraped_post_count % 10 == 0:
-                    _touch_job_heartbeat(job_id)
-                _flush_progress()
-                fetch_failed = False
-                comments: list[Any] = []
-                fail_reason = ""
-                observed_comment_ids: set[str] = set()
-                local_comment_stats = _new_comment_persist_stats()
-                try:
-                    comments = scraper.fetch_comments(
-                        video_id,
-                        username=account,
-                        max_comments=opts.max_comments_per_post,
-                        fetch_replies=opts.fetch_replies,
-                        delay=0.5,
-                        max_replies_per_comment=_effective_reply_limit(opts),
-                    )
-                    _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                    fail_reason = str(
-                        getattr(scraper, "last_comment_fetch_reason", "")
-                        or getattr(scraper, "_last_api_fail_reason", "")
-                        or ""
-                    )
-                    if fail_reason:
-                        comment_fail_reasons.add(fail_reason)
-                        if not comments:
-                            comment_errors += 1
-                except Exception:
-                    fetch_failed = True
-                    comment_errors += 1
-                    logger.exception(
-                        "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
-                        post_db_id,
-                        video_id,
-                    )
-
-                if not fetch_failed:
-                    try:
-                        with _SavepointScope(conn=comments_conn, prefix="tiktok_comments_stage", index=post_index):
-                            for comment in comments:
-                                _upsert_tiktok_comment_tree(
-                                    context,
-                                    job_id=job_id,
-                                    run_id=run_id,
-                                    account=account,
-                                    post_id=post_db_id,
-                                    comment=comment,
-                                    source_scope=opts.source_scope,
-                                    observed_comment_ids=observed_comment_ids,
-                                    persist_stats=local_comment_stats,
-                                    conn=comments_conn,
-                                )
-
-                            is_complete = _is_comment_fetch_complete(
-                                fetch_failed=False,
-                                fail_reason=fail_reason,
-                                auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                fetched_count=len(comments),
-                                max_comments_per_post=opts.max_comments_per_post,
-                            )
-                            if is_complete:
-                                missing_marked += _mark_missing_comments_for_anchor(
-                                    platform="tiktok",
-                                    anchor_id=post_db_id,
-                                    observed_comment_ids=observed_comment_ids,
-                                    conn=comments_conn,
-                                )
-                                _reconcile_post_comment_count(
-                                    platform="tiktok",
-                                    post_db_id=post_db_id,
-                                    conn=comments_conn,
-                                )
-                            else:
-                                incomplete_comment_fetches += 1
-                                comments_mark_missing_skipped += 1
-                    except Exception:
-                        fetch_failed = True
-                        comment_errors += 1
-                        logger.exception(
-                            "[tiktok] Failed to persist comments for post %s (video_id=%s)",
-                            post_db_id,
-                            video_id,
-                        )
-
-                if fetch_failed:
-                    incomplete_comment_fetches += 1
-                    comments_mark_missing_skipped += 1
-                    continue
-
-                matched_post_count += 1
-                activity["matched_posts"] = matched_post_count
-                _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-                _flush_progress()
-        if skipped_synced:
-            logger.info("[tiktok] Skipped %d posts whose comments are already synced", skipped_synced)
-    else:
-        effective_date_start = opts.date_start
-        if checkpoint_last_posted_at is not None and (
-            effective_date_start is None or checkpoint_last_posted_at > effective_date_start
-        ):
-            # Only use the checkpoint if it falls within the requested date range.
-            # If the checkpoint is beyond opts.date_end (e.g. a newer week was synced
-            # previously), honour the explicit date_start so we actually scrape posts
-            # in the requested window instead of returning nothing.
-            if opts.date_end is None or checkpoint_last_posted_at <= opts.date_end:
-                effective_date_start = checkpoint_last_posted_at
-            else:
-                logger.info(
-                    "[tiktok] Ignoring checkpoint (last_posted_at=%s) because it is "
-                    "beyond the requested date_end=%s; using date_start=%s",
-                    checkpoint_last_posted_at,
-                    opts.date_end,
-                    opts.date_start,
-                )
-        config = TikTokScrapeConfig(
-            username=account,
-            hashtags=hashtags,
-            date_start=effective_date_start,
-            date_end=opts.date_end,
-            delay_seconds=_resolve_platform_delay_seconds(
-                platform="tiktok",
-                attempt_count=int((job_config or {}).get("_attempt_count") or 1),
-                last_error_code=(job_config or {}).get("_last_error_code"),
-                default=0.35,
-            ),
-            max_pages=None,
-            scrape_mode="ytdlp",
-            show_id=cast(Any, context.show_id),
-            season_number=context.season_number,
-        )
-        logger.info("[tiktok] Scraping account=%s date_range=%s..%s", account, effective_date_start, opts.date_end)
-        post_limit = opts.max_posts_per_target if opts.max_posts_per_target > 0 else None
-
-        def _on_scrape_progress(payload: dict[str, Any]) -> None:
-            nonlocal scraped_post_count
-            activity["phase"] = str(payload.get("phase") or "scrape_posts")
-            activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
-            activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
-            if payload.get("matched_posts") is not None:
-                activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
-            scraped_post_count = max(scraped_post_count, _normalize_non_negative_int(payload.get("posts_checked")))
-            _flush_progress()
-
-        posts = scraper.scrape(config, progress_cb=_on_scrape_progress)
-        retrieval_meta.update(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
-
-        existing_post_lookup: dict[str, dict[str, Any]] = {}
-        snapshots: dict[str, CommentLifecycleSnapshot] = {}
-        if opts.sync_strategy == "incremental" and opts.max_comments_per_post > 0:
-            existing_rows = _load_existing_posts("tiktok", context, account, opts.date_start, opts.date_end)
-            existing_post_lookup = _build_existing_post_lookup("tiktok", existing_rows)
-            snapshots = _load_comment_lifecycle_snapshots(
-                [str(row.get("id")) for row in existing_post_lookup.values() if row.get("id")],
-                platform="tiktok",
-            )
-
-        skipped_synced = 0
-        with pg.db_connection() as post_comments_conn:
-            for post_index, post in enumerate(posts, start=1):
-                total_scraped += 1
-                scraped_post_count = max(scraped_post_count, total_scraped)
-                activity["phase"] = "posts_filter"
-                activity["posts_checked"] = scraped_post_count
-                post_created_at = _parse_tiktok_time(getattr(post, "create_time", None))
-                if (
-                    checkpoint_last_posted_at
-                    and post_created_at
-                    and post_created_at <= checkpoint_last_posted_at
-                    and (opts.date_end is None or checkpoint_last_posted_at <= opts.date_end)
-                ):
-                    skipped_checkpoint += 1
-                    _flush_progress()
-                    continue
-                description = str(getattr(post, "description", "") or "")
-                filter_text = _build_post_filter_text(
-                    primary_text=description,
-                    hashtags=_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
-                    mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
-                )
-                if not _text_contains_any_term(text=filter_text, hashtags=hashtags, keywords=keywords):
-                    skipped_keyword += 1
-                    _flush_progress()
-                    continue
-                if post_limit and matched_post_count >= post_limit:
-                    break
-
-                existing_row = existing_post_lookup.get(str(getattr(post, "video_id", "") or ""))
-                if existing_row and opts.max_comments_per_post > 0:
-                    expected_comment_count = _expected_comment_count_for_platform(
-                        "tiktok",
-                        {"comments_count": int(getattr(post, "comments", 0) or 0)},
-                    )
-                    decision = _decide_comment_refresh(
-                        sync_strategy=opts.sync_strategy,
-                        expected_count=expected_comment_count,
-                        snapshot=snapshots.get(str(existing_row.get("id") or "")),
-                        post_published_at=_coerce_dt(existing_row.get("posted_at")),
-                        refresh_policy=opts.comment_refresh_policy,
-                    )
-                    comment_refresh_reasons[decision.reason] += 1
-                    if not decision.should_refresh:
-                        skipped_synced += 1
-                        activity["phase"] = "posts_skip_up_to_date"
-                        _flush_progress()
-                        continue
-
-                upserted: dict[str, Any] | None = None
-                try:
-                    with pg.db_connection() as conn:
-                        upserted = _upsert_tiktok_post(context, job_id=job_id, account=account, post=post, conn=conn)
-                        if upserted:
-                            hashtag_terms = _as_text_list(getattr(post, "hashtags", []), strip_prefix="#")
-                            mention_terms = _as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@")
-                            cast_mentions = _extract_cast_mentions_from_text(
-                                _build_post_filter_text(
-                                    primary_text=description,
-                                    hashtags=hashtag_terms,
-                                    mentions=mention_terms,
-                                ),
-                                cast_people,
-                            )
-                            quality_score, missing_fields, quality_flags = _compute_tiktok_post_quality(
-                                description=description,
-                                thumbnail_url=str(getattr(post, "thumbnail_url", "") or "").strip() or None,
-                                hashtags=hashtag_terms,
-                                mentions=mention_terms,
-                                media_urls=[
-                                    str(url).strip()
-                                    for url in (getattr(post, "media_urls", []) or [])
-                                    if str(url).strip()
-                                ],
-                                duration_seconds=_normalize_non_negative_int(getattr(post, "duration", 0)),
-                            )
-                            velocity_1h, velocity_24h, velocity_7d = _compute_tiktok_velocity_metrics(
-                                views=_normalize_non_negative_int(getattr(post, "views", 0)),
-                                posted_at=post_created_at,
-                            )
-                            _persist_tiktok_post_enrichment(
-                                context=context,
-                                run_id=run_id,
-                                post_row=upserted,
-                                description=description,
-                                hashtags=hashtag_terms,
-                                mentions=mention_terms,
-                                keywords=keywords,
-                                cast_mentions=cast_mentions,
-                                quality_score=quality_score,
-                                quality_missing_fields=missing_fields,
-                                quality_flags=quality_flags,
-                                velocity_1h=velocity_1h,
-                                velocity_24h=velocity_24h,
-                                velocity_7d=velocity_7d,
-                                conn=conn,
-                            )
-
-                            raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
-                            if not isinstance(raw_data, dict):
-                                raw_data = {}
-                            sound_fields = _extract_tiktok_sound_fields(raw_data, post)
-                            sound_id = str(sound_fields.get("sound_id") or "").strip()
-                            if sound_id:
-                                discovered_sound_ids.add(sound_id)
-                                _persist_tiktok_sound_snapshot(
-                                    sound_id=sound_id,
-                                    snapshot={
-                                        "title": sound_fields.get("sound_title"),
-                                        "artist_name": sound_fields.get("sound_author"),
-                                        "usage_count": _normalize_non_negative_int(
-                                            sound_fields.get("sound_usage_count")
-                                        ),
-                                        "source_url": _build_tiktok_sound_url(sound_id),
-                                        "posts": [
-                                            {
-                                                "platform_post_id": str(getattr(post, "video_id", "") or "").strip(),
-                                                "creator_handle": str(getattr(post, "username", "") or "").strip()
-                                                or None,
-                                                "posted_at": _iso(post_created_at),
-                                                "views": _normalize_non_negative_int(getattr(post, "views", 0)),
-                                                "likes": _normalize_non_negative_int(getattr(post, "likes", 0)),
-                                                "comments": _normalize_non_negative_int(getattr(post, "comments", 0)),
-                                                "shares": _normalize_non_negative_int(getattr(post, "shares", 0)),
-                                                "thumbnail_url": str(getattr(post, "thumbnail_url", "") or "").strip()
-                                                or None,
-                                                "caption": description,
-                                            }
-                                        ],
-                                    },
-                                    conn=conn,
-                                )
-                except Exception:
-                    comment_errors += 1
-                    logger.exception(
-                        "[tiktok] Failed to upsert post for video_id=%s",
-                        getattr(post, "video_id", "?"),
-                    )
-                    _flush_progress()
-                    continue
-
-                if not upserted:
-                    _flush_progress()
-                    continue
-                matched_post_count += 1
-                if post_created_at and (latest_posted_at_seen is None or post_created_at > latest_posted_at_seen):
-                    latest_posted_at_seen = post_created_at
-                activity["phase"] = "posts_upsert"
-                activity["matched_posts"] = matched_post_count
-                _flush_progress()
-
-                if stage == "posts":
-                    try:
-                        mirror_job_id = _enqueue_platform_media_mirror_job(
-                            context,
-                            platform="tiktok",
-                            run_id=run_id,
-                            source_scope=opts.source_scope,
-                            account=account,
-                            post_row=upserted,
-                            week_index=None,
-                            parent_job_id=job_id,
-                            conn=None,
-                        )
-                        if mirror_job_id:
-                            mirror_jobs_enqueued += 1
-                    except Exception:  # noqa: BLE001
-                        mirror_job_enqueue_errors += 1
-                        logger.exception(
-                            "[tiktok] Failed to enqueue media mirror job for post=%s video_id=%s",
-                            str(upserted.get("id") or ""),
-                            str(getattr(post, "video_id", "") or ""),
-                        )
-
-                if opts.max_comments_per_post > 0:
-                    comments: list[Any] = []
-                    fail_reason = ""
-                    fetch_failed = False
-                    observed_comment_ids: set[str] = set()
-                    local_comment_stats = _new_comment_persist_stats()
-                    try:
-                        comments = scraper.fetch_comments(
-                            getattr(post, "video_id", ""),
-                            username=account,
-                            max_comments=opts.max_comments_per_post,
-                            fetch_replies=opts.fetch_replies,
-                            delay=0.5,
-                            max_replies_per_comment=_effective_reply_limit(opts),
-                        )
-                        _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
-                        fail_reason = str(
-                            getattr(scraper, "last_comment_fetch_reason", "")
-                            or getattr(scraper, "_last_api_fail_reason", "")
-                            or ""
-                        )
-                        if fail_reason:
-                            comment_fail_reasons.add(fail_reason)
-                            if not comments:
-                                comment_errors += 1
-                    except Exception:
-                        fetch_failed = True
-                        comment_errors += 1
-                        logger.exception(
-                            "[tiktok] Failed to fetch comments for post %s (video_id=%s)",
-                            upserted.get("id"),
-                            getattr(post, "video_id", "?"),
-                        )
-                        incomplete_comment_fetches += 1
-                        comments_mark_missing_skipped += 1
-
-                    if not fetch_failed:
-                        try:
-                            with _SavepointScope(
-                                conn=post_comments_conn,
-                                prefix="tiktok_post_comments",
-                                index=post_index,
-                            ):
-                                for comment in comments:
-                                    _upsert_tiktok_comment_tree(
-                                        context,
-                                        job_id=job_id,
-                                        run_id=run_id,
-                                        account=account,
-                                        post_id=str(upserted["id"]),
-                                        comment=comment,
-                                        source_scope=opts.source_scope,
-                                        observed_comment_ids=observed_comment_ids,
-                                        persist_stats=local_comment_stats,
-                                        conn=post_comments_conn,
-                                    )
-
-                                is_complete = _is_comment_fetch_complete(
-                                    fetch_failed=False,
-                                    fail_reason=fail_reason,
-                                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                                    fetched_count=len(comments),
-                                    max_comments_per_post=opts.max_comments_per_post,
-                                )
-                                if is_complete:
-                                    missing_marked += _mark_missing_comments_for_anchor(
-                                        platform="tiktok",
-                                        anchor_id=str(upserted["id"]),
-                                        observed_comment_ids=observed_comment_ids,
-                                        conn=post_comments_conn,
-                                    )
-                                    _reconcile_post_comment_count(
-                                        platform="tiktok",
-                                        post_db_id=str(upserted["id"]),
-                                        conn=post_comments_conn,
-                                    )
-                                else:
-                                    incomplete_comment_fetches += 1
-                                    comments_mark_missing_skipped += 1
-                        except Exception:
-                            fetch_failed = True
-                            comment_errors += 1
-                            logger.exception(
-                                "[tiktok] Failed to persist comments for post %s (video_id=%s)",
-                                upserted.get("id"),
-                                getattr(post, "video_id", "?"),
-                            )
-                            incomplete_comment_fetches += 1
-                            comments_mark_missing_skipped += 1
-
-                    if not fetch_failed:
-                        _merge_comment_persist_stats(comment_stats, local_comment_stats)
-                        scraped_comment_count = int(comment_stats.get("comments_fetched") or 0)
-                        try:
-                            _persist_tiktok_comment_enrichment(
-                                post_id=str(upserted["id"]),
-                                cast_names=cast_names,
-                            )
-                        except Exception:
-                            logger.debug(
-                                "[tiktok] Failed to persist comment enrichment for post %s",
-                                str(upserted.get("id") or ""),
-                                exc_info=True,
-                            )
-                        activity["phase"] = "comments_fetch"
-                        _flush_progress()
-
-        if stage == "posts":
-            sound_ids_to_fetch: list[str] = []
-            seen_sound_ids: set[str] = set()
-            for candidate in [*requested_sound_ids, *sorted(discovered_sound_ids)]:
-                normalized_sound_id = _normalize_tiktok_sound_id(candidate)
-                if not normalized_sound_id or normalized_sound_id in seen_sound_ids:
-                    continue
-                seen_sound_ids.add(normalized_sound_id)
-                sound_ids_to_fetch.append(normalized_sound_id)
-
-            for sound_id in sound_ids_to_fetch:
-                sound_pages_attempted += 1
-                try:
-                    snapshot = _fetch_tiktok_sound_snapshot(sound_id)
-                    _persist_tiktok_sound_snapshot(sound_id=sound_id, snapshot=snapshot)
-                    sound_pages_succeeded += 1
-                    sound_posts_ingested += len(snapshot.get("posts") or [])
-                except Exception:
-                    logger.debug("[tiktok] Failed to fetch/persist sound snapshot sound_id=%s", sound_id, exc_info=True)
-
-            if normalized_creator_id and (latest_posted_at_seen or checkpoint_cursor):
-                _save_ingest_checkpoint(
-                    platform="tiktok",
-                    creator_id=normalized_creator_id,
-                    cursor=checkpoint_cursor,
-                    last_posted_at=latest_posted_at_seen or checkpoint_last_posted_at,
-                    metadata={
-                        "stage": stage,
-                        "account": account,
-                        "job_id": job_id,
-                        "run_id": run_id,
-                        "sound_ids_requested": requested_sound_ids,
-                        "sound_ids_discovered": sorted(discovered_sound_ids),
-                    },
-                )
-
-    activity["phase"] = f"{stage}_end"
-    activity["matched_posts"] = matched_post_count
-    _flush_progress(force=True)
-
-    if skipped_synced:
-        logger.info("[tiktok] Skipped %d posts already up-to-date", skipped_synced)
-    if comment_errors:
-        retrieval_meta["comment_errors"] = comment_errors
-    if comment_fail_reasons:
-        retrieval_meta["comment_fail_reasons"] = sorted(comment_fail_reasons)
-    if comment_refresh_reasons:
-        retrieval_meta["comment_refresh_decisions"] = dict(comment_refresh_reasons)
-    if missing_marked:
-        retrieval_meta["comments_marked_missing"] = missing_marked
-    if incomplete_comment_fetches:
-        retrieval_meta["incomplete_comment_fetches"] = incomplete_comment_fetches
-    if comments_mark_missing_skipped:
-        retrieval_meta["comments_mark_missing_skipped"] = comments_mark_missing_skipped
-    if mirror_jobs_enqueued:
-        retrieval_meta["media_mirror_jobs_enqueued"] = mirror_jobs_enqueued
-    if mirror_job_enqueue_errors:
-        retrieval_meta["media_mirror_job_enqueue_errors"] = mirror_job_enqueue_errors
-    retrieval_meta["comment_stats"] = _comment_stats_payload(comment_stats)
-    if skipped_checkpoint:
-        retrieval_meta["checkpoint_skipped_posts"] = skipped_checkpoint
-    if requested_sound_ids:
-        retrieval_meta["sound_ids_requested"] = requested_sound_ids
-    if discovered_sound_ids:
-        retrieval_meta["sound_ids_discovered"] = sorted(discovered_sound_ids)
-    if sound_pages_attempted:
-        retrieval_meta["sound_pages_attempted"] = sound_pages_attempted
-    if sound_pages_succeeded:
-        retrieval_meta["sound_pages_succeeded"] = sound_pages_succeeded
-    if sound_posts_ingested:
-        retrieval_meta["sound_posts_ingested"] = sound_posts_ingested
-    if latest_posted_at_seen:
-        retrieval_meta["latest_posted_at_seen"] = _iso(latest_posted_at_seen)
-    if stage == "posts":
-        retrieval_meta["posts_filter_counters"] = {
-            "candidate_posts_found": total_scraped,
-            "matched_posts": matched_post_count,
-            "filtered_out_show_terms": skipped_keyword,
-            "filtered_out_up_to_date": skipped_synced,
-            "filtered_out_checkpoint": skipped_checkpoint,
-            "filtered_out_total": skipped_keyword + skipped_synced + skipped_checkpoint,
-        }
-    retrieval_meta["scrape_counters"] = {"posts": scraped_post_count, "comments": scraped_comment_count}
-    retrieval_meta["persist_counters"] = {
-        "posts_upserted": matched_post_count,
-        "comments_upserted": int(comment_stats.get("comments_upserted") or 0),
-    }
-    retrieval_meta["activity"] = _build_progress_activity_payload(activity, now=_now_utc())
-    logger.info(
-        "[tiktok] Done: scraped=%d matched=%d skipped_keyword=%d comments=%d comment_errors=%d",
-        total_scraped,
-        matched_post_count,
-        skipped_keyword,
-        scraped_comment_count,
-        comment_errors,
-    )
-    return scraped_post_count, scraped_comment_count, retrieval_meta
+    return _LOCAL_ROOM_FUNCTIONS["_ingest_tiktok"](*args, **kwargs)
 
 
 def _upsert_youtube_video(
@@ -32368,168 +30707,10 @@ def _run_platform_media_mirror_stage(
     return 1, mirrored_assets, metadata
 
 
-def _run_tiktok_comment_media_mirror_stage(
-    *,
-    context: SeasonContext,
-    job_id: str,
-    config: dict[str, Any],
-) -> tuple[int, int, dict[str, Any]]:
-    if not _tiktok_comments_has_column("media_urls"):
-        return (
-            0,
-            0,
-            {
-                "activity": {"phase": "comment_media_mirror_end", "last_progress_at": _iso(_now_utc())},
-                "comment_media_mirror": {
-                    "status": "skipped",
-                    "error": "tiktok_comment_media_columns_missing",
-                },
-            },
-        )
+def _run_tiktok_comment_media_mirror_stage(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.media_mirror import _LOCAL_ROOM_FUNCTIONS
 
-    comment_id = str(config.get("comment_id") or "").strip()
-    comment_db_id = str(config.get("comment_db_id") or "").strip()
-    if not comment_id and not comment_db_id:
-        raise ValueError("comment_media_mirror_missing_comment_id")
-
-    comment_row = pg.fetch_one(
-        """
-        select
-          c.id::text as id,
-          c.comment_id,
-          c.post_id::text as post_id,
-          coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb) as media_urls,
-          coalesce(to_jsonb(c) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
-          coalesce(to_jsonb(c) ->> 'media_mirror_status', '') as media_mirror_status,
-          coalesce(to_jsonb(c) ->> 'media_mirror_error', '') as media_mirror_error,
-          p.video_id as video_id,
-          p.posted_at
-        from social.tiktok_comments c
-        left join social.tiktok_posts p on p.id = c.post_id
-        where c.season_id = %s
-          and (
-            (%s <> '' and c.comment_id = %s)
-            or (%s <> '' and c.id = nullif(%s, '')::uuid)
-          )
-        order by c.created_at desc nulls last
-        limit 1
-        """,
-        [context.season_id, comment_id, comment_id, comment_db_id, comment_db_id],
-    )
-    if not comment_row:
-        raise ValueError("comment_media_mirror_comment_not_found")
-
-    if not _tiktok_comment_needs_media_mirror(comment_row):
-        return (
-            1,
-            0,
-            {
-                "activity": {"phase": "comment_media_mirror_end", "last_progress_at": _iso(_now_utc())},
-                "comment_media_mirror": {
-                    "status": "up_to_date",
-                    "comment_id": str(comment_row.get("comment_id") or ""),
-                    "source_count": len(_as_text_list(comment_row.get("media_urls"))),
-                    "mirrored_count": len(_as_text_list(comment_row.get("hosted_media_urls"))),
-                },
-            },
-        )
-
-    source_media_urls = _normalize_unique_terms(_as_text_list(comment_row.get("media_urls")))
-    if not source_media_urls:
-        _update_tiktok_comment_media_mirror_fields(
-            comment_id=str(comment_row.get("comment_id") or ""),
-            media_mirror_status="failed",
-            media_mirror_error="tiktok_comment_media_not_found",
-            media_mirror_last_attempt_at=_now_utc(),
-            media_mirror_last_job_id=job_id,
-        )
-        return (
-            1,
-            0,
-            {
-                "activity": {"phase": "comment_media_mirror_end", "last_progress_at": _iso(_now_utc())},
-                "comment_media_mirror": {
-                    "status": "failed",
-                    "error": "tiktok_comment_media_not_found",
-                    "comment_id": str(comment_row.get("comment_id") or ""),
-                    "source_count": 0,
-                    "mirrored_count": 0,
-                },
-            },
-        )
-
-    attempt_count = max(1, _normalize_non_negative_int(config.get("_attempt_count")))
-    now_utc = _now_utc()
-    _update_tiktok_comment_media_mirror_fields(
-        comment_id=str(comment_row.get("comment_id") or ""),
-        media_mirror_status="pending",
-        media_mirror_last_attempt_at=now_utc,
-        media_mirror_attempt_count=attempt_count,
-        media_mirror_last_job_id=job_id,
-    )
-
-    week_index_raw = config.get("week_index")
-    week_index: int | None = None
-    if week_index_raw is not None and str(week_index_raw).strip():
-        try:
-            week_index = int(week_index_raw)
-        except (TypeError, ValueError):
-            week_index = None
-    if week_index is None:
-        posted_at = _coerce_dt(comment_row.get("posted_at"))
-        if posted_at is not None:
-            try:
-                windows, _ = _resolve_week_windows(
-                    context,
-                    timezone="America/New_York",
-                    source_scope=str(config.get("source_scope") or "network"),
-                    now_utc=_now_utc(),
-                )
-                week_window = _week_for_timestamp(posted_at, windows=windows, timezone="America/New_York")
-                week_index = week_window.week_index if week_window else None
-            except Exception:  # noqa: BLE001
-                week_index = None
-
-    mirror_comment = SimpleNamespace(
-        id=str(comment_row.get("id") or ""),
-        video_id=f"comment-{str(comment_row.get('comment_id') or '')}",
-        thumbnail_url="",
-        media_urls=source_media_urls,
-    )
-    result = _mirror_platform_media_to_s3_result(
-        context,
-        platform="tiktok",
-        post=mirror_comment,
-        week_index=week_index,
-        prefer_first_media_as_thumbnail=False,
-    )
-    _update_tiktok_comment_media_mirror_fields(
-        comment_id=str(comment_row.get("comment_id") or ""),
-        hosted_media_urls=list(result.get("hosted_media_urls") or []),
-        media_mirror_status=str(result.get("status") or "") or None,
-        media_mirror_error=str(result.get("error") or "") or None,
-        media_mirror_last_attempt_at=now_utc,
-        media_mirror_attempt_count=attempt_count,
-        media_mirror_last_job_id=job_id,
-    )
-    if bool(result.get("retryable_error")) and str(result.get("status") or "") in {"partial", "failed"}:
-        raise RuntimeError(str(result.get("error") or "comment_media_mirror_retryable"))
-
-    mirrored_assets = _normalize_non_negative_int(result.get("mirrored_count"))
-    metadata = {
-        "activity": {"phase": "comment_media_mirror_end", "last_progress_at": _iso(now_utc)},
-        "comment_media_mirror": {
-            "platform": "tiktok",
-            "comment_id": str(comment_row.get("comment_id") or ""),
-            "post_id": str(comment_row.get("post_id") or ""),
-            "status": str(result.get("status") or ""),
-            "error": str(result.get("error") or "") or None,
-            "source_count": _normalize_non_negative_int(result.get("source_count")),
-            "mirrored_count": mirrored_assets,
-            "week_index": week_index,
-        },
-    }
-    return 1, mirrored_assets, metadata
+    return _LOCAL_ROOM_FUNCTIONS["_run_tiktok_comment_media_mirror_stage"](*args, **kwargs)
 
 
 def _run_twitter_comment_media_mirror_stage(
@@ -33359,25 +31540,10 @@ def _run_async_sync(awaitable: Any) -> Any:
         loop.close()
 
 
-def _merge_tiktok_profile_snapshots(*snapshots: Mapping[str, Any] | None) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    for snapshot in snapshots:
-        metadata = _metadata_dict(snapshot)
-        if not metadata:
-            continue
-        for key in ("username", "sec_uid", "display_name", "bio", "avatar_url", "profile_url"):
-            value = str(metadata.get(key) or "").strip()
-            if value and not str(merged.get(key) or "").strip():
-                merged[key] = value
-        for key in ("follower_count", "following_count", "total_posts"):
-            if metadata.get(key) is None:
-                continue
-            merged[key] = max(
-                _normalize_non_negative_int(merged.get(key)), _normalize_non_negative_int(metadata.get(key))
-            )
-        if bool(metadata.get("is_verified")):
-            merged["is_verified"] = True
-    return merged
+def _merge_tiktok_profile_snapshots(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.profile import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_merge_tiktok_profile_snapshots"](*args, **kwargs)
 
 
 def _merge_social_profile_snapshots(*snapshots: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -33407,39 +31573,19 @@ def _snapshot_without_total_posts(snapshot: Mapping[str, Any] | None) -> dict[st
     return metadata
 
 
-def _tiktok_profile_snapshot_from_analysis_rows(
-    rows: Sequence[Mapping[str, Any]], account_handle: str
-) -> dict[str, Any]:
-    for row in rows:
-        row_json = _metadata_dict(row)
-        raw_data = _metadata_dict(row_json.get("raw_data"))
-        author = _metadata_dict(raw_data.get("author"))
-        display_name = str(
-            row_json.get("nickname")
-            or author.get("nickname")
-            or author.get("nickName")
-            or raw_data.get("nickname")
-            or ""
-        ).strip()
-        avatar_url = _best_profile_avatar_url(
-            [
-                row_json.get("user_avatar_url"),
-                row_json.get("avatar_url"),
-                *_extract_avatar_url_candidates_from_raw_data(raw_data),
-            ]
-        )
-        snapshot = {
-            "username": _normalize_account_handle(author.get("uniqueId") or author.get("unique_id") or account_handle),
-            "display_name": display_name or None,
-            "avatar_url": avatar_url,
-            "is_verified": bool(
-                author.get("verified") or author.get("isVerified") or raw_data.get("verified") or False
-            ),
-            "profile_url": _platform_profile_url_for_handle("tiktok", account_handle),
-        }
-        if any(snapshot.values()):
-            return snapshot
-    return {}
+def _tiktok_profile_snapshot_from_analysis_rows(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.parsing.profile import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_profile_snapshot_from_analysis_rows"](*args, **kwargs)
+
+
+def _configure_tiktok_profile_parsing_legacy_provider() -> None:
+    from trr_backend.socials.tiktok.parsing.profile import _LOCAL_ROOM_NAMES, _configure_legacy_provider
+
+    _configure_legacy_provider(globals(), {name: globals()[name] for name in _LOCAL_ROOM_NAMES})
+
+
+_configure_tiktok_profile_parsing_legacy_provider()
 
 
 def _twitter_profile_snapshot_from_analysis_rows(
@@ -34118,52 +32264,10 @@ def _batch_upsert_shared_catalog_instagram_posts(*args: Any, **kwargs: Any) -> A
     return _LOCAL_ROOM_FUNCTIONS["_batch_upsert_shared_catalog_instagram_posts"](*args, **kwargs)
 
 
-def _upsert_shared_catalog_tiktok_post(
-    *,
-    run_id: str | None,
-    account_handle: str,
-    post: Any,
-    conn: Any | None = None,
-) -> dict[str, Any] | None:
-    video_id = str(getattr(post, "video_id", "") or "").strip()
-    if not video_id:
-        return None
-    description = str(getattr(post, "description", "") or "")
-    media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
-    payload = _shared_catalog_payload_base(
-        source_id=video_id,
-        account_handle=account_handle,
-        posted_at=_parse_tiktok_time(getattr(post, "create_time", None)),
-        permalink=_shared_catalog_post_url(
-            "tiktok",
-            account_handle=account_handle,
-            source_id=video_id,
-            explicit=_first_non_empty_str(getattr(post, "video_url", None), getattr(post, "permalink", None)),
-        ),
-        description=description or None,
-        media_type="video",
-        media_urls=media_urls,
-        thumbnail_url=str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None),
-        hashtags=_as_text_list(
-            [*_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"), *_parse_hashtags(description)],
-            strip_prefix="#",
-        ),
-        mentions=_as_text_list(
-            [
-                *_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
-                *_parse_mentions(description),
-            ],
-            prefix="@",
-            strip_prefix="@",
-        ),
-        likes=getattr(post, "likes", 0),
-        comments_count=getattr(post, "comments", 0),
-        views=getattr(post, "views", 0),
-        shares=getattr(post, "shares", 0),
-        raw_data=post.to_dict() if hasattr(post, "to_dict") else {},
-        run_id=run_id,
-    )
-    return _pg_upsert(PLATFORM_CATALOG_POST_TABLES["tiktok"], payload, conflict_col="source_id", conn=conn)
+def _upsert_shared_catalog_tiktok_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.persistence import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_upsert_shared_catalog_tiktok_post"](*args, **kwargs)
 
 
 def _upsert_shared_catalog_twitter_post(
@@ -34643,6 +32747,14 @@ def _shared_catalog_total_posts_for_window(
     return _normalize_non_negative_int(row.get("total"))
 
 
+def _instagram_profile_summary_raw_sql(table: str, *, alias: str = "p", conn: Any | None = None) -> str:
+    # Additive rollout: old schemas and rows awaiting backfill keep exact raw semantics.
+    columns = _relation_columns("social", table, conn=conn)
+    if "profile_summary_raw_data" in columns:
+        return f"coalesce({alias}.profile_summary_raw_data, {alias}.raw_data, '{{}}'::jsonb)"
+    return f"coalesce({alias}.raw_data, '{{}}'::jsonb)"
+
+
 def _shared_catalog_summary_totals(
     platform: str,
     account_handle: str,
@@ -34653,7 +32765,54 @@ def _shared_catalog_summary_totals(
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     engagement_expr = _social_account_profile_engagement_sql(platform)
     views_expr = _social_account_profile_views_sql(platform)
-    account_match_clause = _shared_catalog_account_match_sql(platform, alias="p")
+    account_match_clause = (
+        _instagram_account_match_sql(
+            alias="p",
+            native_columns=frozenset({"source_account", "owner_username", "raw_data", "collaborators"}),
+            raw_data_sql=_instagram_profile_summary_raw_sql(table, conn=conn),
+            short_circuit_direct=True,
+        )
+        if table == "instagram_account_catalog_posts"
+        else _shared_catalog_account_match_sql(platform, alias="p")
+    )
+    source_sql = f"social.{table} p"
+    params = [normalized_account]
+    caption_expr = "nullif(trim(coalesce(caption, text, '')), '') is not null"
+    hashtag_count_expr = "jsonb_array_length(coalesce(hashtags, '[]'::jsonb))"
+    catalog_columns = (
+        _relation_columns("social", table, conn=conn) if table == "instagram_account_catalog_posts" else set()
+    )
+    if "profile_summary_catalog_ready" in catalog_columns and _relation_exists(
+        "social.instagram_profile_catalog_summary", conn=conn
+    ):
+        # Maintained rows read only the compact heap. Keep native counter types
+        # and evaluate engagement at read time to preserve addition overflow.
+        # NULL/unready source rows use the exact legacy predicate and errors.
+        source_sql = f"""(
+            select assignment_status, likes, comments_count, views, posted_at, has_caption, hashtag_count
+            from social.instagram_profile_catalog_summary p
+            where p.profile_summary_accounts ? %s::text
+            union all
+            select assignment_status, likes, comments_count, views, posted_at,
+                   {caption_expr} as has_caption, {hashtag_count_expr} as hashtag_count
+            from social.{table} p
+            where p.profile_summary_catalog_ready is distinct from true and ({account_match_clause})
+        ) p"""
+        account_match_clause = "true"
+        caption_expr = "has_caption"
+        hashtag_count_expr = "hashtag_count"
+        params.append(normalized_account)
+    elif "profile_summary_accounts" in catalog_columns:
+        # Compatibility with the earlier identity-only projection rollout.
+        source_sql = f"""(
+            select * from social.{table} p
+            where p.profile_summary_accounts ? %s::text
+            union all
+            select * from social.{table} p
+            where p.profile_summary_accounts is null and ({account_match_clause})
+        ) p"""
+        account_match_clause = "true"
+        params.append(normalized_account)
     sql = f"""
             select
               count(*)::int as catalog_total_posts,
@@ -34665,18 +32824,18 @@ def _shared_catalog_summary_totals(
               min({posted_at_column}) as catalog_first_post_at,
               max({posted_at_column}) as catalog_last_post_at,
               count(*) filter (
-                where nullif(trim(coalesce(caption, text, '')), '') is not null
+                where {caption_expr}
               )::int as caption_rows,
-              coalesce(sum(jsonb_array_length(coalesce(hashtags, '[]'::jsonb))), 0)::int as stored_hashtag_instances
-            from social.{table} p
+              coalesce(sum({hashtag_count_expr}), 0)::int as stored_hashtag_instances
+            from {source_sql}
             where {account_match_clause}
             """
     try:
         if conn is None:
-            row = pg.fetch_one(sql, [normalized_account]) or {}
+            row = pg.fetch_one(sql, params) or {}
         else:
             with pg.db_cursor(conn=conn, label="shared_catalog_summary_totals") as cur:
-                row = pg.fetch_one_with_cursor(cur, sql, [normalized_account]) or {}
+                row = pg.fetch_one_with_cursor(cur, sql, params) or {}
     except psycopg_errors.UndefinedTable:
         return {
             "catalog_total_posts": 0,
@@ -34693,190 +32852,10 @@ def _shared_catalog_summary_totals(
     return row
 
 
-def _tiktok_social_account_lite_header_stats(
-    account_handle: str,
-    *,
-    conn: Any | None = None,
-) -> dict[str, Any]:
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    owner_match_clause = _social_account_profile_owner_match_sql("tiktok", alias="p")
-    lifecycle_supported = _comment_lifecycle_supported("tiktok_comments", conn=conn)
-    active_comment_filter = "and c.is_missing is not true" if lifecycle_supported else ""
-    sql = f"""
-            with filtered_posts as materialized (
-              select
-                p.id,
-                p.posted_at,
-                coalesce(p.likes, 0)::bigint as likes,
-                greatest(coalesce(p.comments_count, 0), 0)::int as reported_comments,
-                coalesce(p.views, 0)::bigint as views,
-                case
-                  when jsonb_typeof(to_jsonb(p) -> 'media_urls') = 'array'
-                    then to_jsonb(p) -> 'media_urls'
-                  else '[]'::jsonb
-                end as media_urls,
-                case
-                  when jsonb_typeof(to_jsonb(p) -> 'hosted_media_urls') = 'array'
-                    then to_jsonb(p) -> 'hosted_media_urls'
-                  else '[]'::jsonb
-                end as hosted_media_urls,
-                nullif(to_jsonb(p) ->> 'thumbnail_url', '') as thumbnail_url,
-                nullif(to_jsonb(p) ->> 'hosted_thumbnail_url', '') as hosted_thumbnail_url,
-                nullif(to_jsonb(p) ->> 'hosted_user_avatar_url', '') as hosted_user_avatar_url
-              from social.tiktok_posts p
-              where {owner_match_clause}
-                and nullif(p.video_id, '') is not null
-            ),
-            post_totals as (
-              select
-                count(*)::int as total_posts,
-                coalesce(sum(likes + reported_comments), 0)::bigint as total_engagement,
-                coalesce(sum(views), 0)::bigint as total_views,
-                min(posted_at) as first_post_at,
-                max(posted_at) as last_post_at,
-                count(*) filter (where reported_comments > 0)::int as retrieved_comment_posts,
-                coalesce(sum(reported_comments), 0)::int as reported_comments,
-                coalesce(
-                  sum(
-                    jsonb_array_length(media_urls)
-                    + case when thumbnail_url is not null then 1 else 0 end
-                  ),
-                  0
-                )::int as total_post_media_files,
-                coalesce(
-                  sum(
-                    least(jsonb_array_length(hosted_media_urls), jsonb_array_length(media_urls))
-                    + case
-                        when thumbnail_url is not null and hosted_thumbnail_url is not null then 1
-                        else 0
-                      end
-                  ),
-                  0
-                )::int as saved_post_media_files,
-                count(distinct hosted_user_avatar_url) filter (where hosted_user_avatar_url is not null)::int
-                  as saved_avatar_files
-              from filtered_posts
-            ),
-            comment_counts as (
-              select
-                c.post_id,
-                count(*)::int as saved_comments
-              from social.tiktok_comments c
-              join filtered_posts fp on fp.id = c.post_id
-              where 1 = 1
-                {active_comment_filter}
-              group by c.post_id
-            ),
-            comment_totals as (
-              select
-                coalesce(sum(coalesce(cc.saved_comments, 0)), 0)::int as saved_comments,
-                count(*) filter (where coalesce(cc.saved_comments, 0) > 0)::int as saved_comment_posts,
-                coalesce(sum(greatest(fp.reported_comments - coalesce(cc.saved_comments, 0), 0)), 0)::int
-                  as missing_comments
-              from filtered_posts fp
-              left join comment_counts cc on cc.post_id = fp.id
-            ),
-            comment_media_rows as (
-              select
-                case
-                  when jsonb_typeof(to_jsonb(c) -> 'media_urls') = 'array'
-                    then to_jsonb(c) -> 'media_urls'
-                  else '[]'::jsonb
-                end as media_urls,
-                case
-                  when jsonb_typeof(to_jsonb(c) -> 'hosted_media_urls') = 'array'
-                    then to_jsonb(c) -> 'hosted_media_urls'
-                  else '[]'::jsonb
-                end as hosted_media_urls
-              from social.tiktok_comments c
-              join filtered_posts fp on fp.id = c.post_id
-              where 1 = 1
-                {active_comment_filter}
-            ),
-            comment_media_totals as (
-              select
-                coalesce(sum(jsonb_array_length(media_urls)), 0)::int as total_comment_media_files,
-                coalesce(
-                  sum(least(jsonb_array_length(hosted_media_urls), jsonb_array_length(media_urls))),
-                  0
-                )::int as saved_comment_media_files
-              from comment_media_rows
-            )
-            select
-              post_totals.total_posts,
-              post_totals.total_engagement,
-              post_totals.total_views,
-              post_totals.first_post_at,
-              post_totals.last_post_at,
-              post_totals.total_post_media_files,
-              post_totals.saved_post_media_files,
-              comment_totals.saved_comments,
-              comment_totals.saved_comment_posts,
-              comment_totals.missing_comments,
-              comment_media_totals.total_comment_media_files,
-              comment_media_totals.saved_comment_media_files,
-              post_totals.saved_avatar_files,
-              post_totals.reported_comments,
-              post_totals.retrieved_comment_posts
-            from post_totals
-            cross join comment_totals
-            cross join comment_media_totals
-            """
-    try:
-        if conn is None:
-            row = pg.fetch_one(sql, [normalized_account]) or {}
-        else:
-            with pg.db_cursor(conn=conn, label="tiktok_lite_header_stats") as cur:
-                row = pg.fetch_one_with_cursor(cur, sql, [normalized_account]) or {}
-    except psycopg_errors.UndefinedTable:
-        row = {}
+def _tiktok_social_account_lite_header_stats(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.header_stats import _LOCAL_ROOM_FUNCTIONS
 
-    totals = {
-        "total_posts": _normalize_non_negative_int(row.get("total_posts")),
-        "total_engagement": _normalize_non_negative_int(row.get("total_engagement")),
-        "total_views": _normalize_non_negative_int(row.get("total_views")),
-        "first_post_at": row.get("first_post_at"),
-        "last_post_at": row.get("last_post_at"),
-    }
-    saved_comments = _normalize_non_negative_int(row.get("saved_comments"))
-    missing_comments = _normalize_non_negative_int(row.get("missing_comments"))
-    reported_comments = _normalize_non_negative_int(row.get("reported_comments"))
-    retrieved_comments = max(reported_comments, saved_comments + missing_comments)
-    total_post_media_files = _normalize_non_negative_int(row.get("total_post_media_files"))
-    saved_post_media_files = min(_normalize_non_negative_int(row.get("saved_post_media_files")), total_post_media_files)
-    total_comment_media_files = _normalize_non_negative_int(row.get("total_comment_media_files"))
-    saved_comment_media_files = min(
-        _normalize_non_negative_int(row.get("saved_comment_media_files")),
-        total_comment_media_files,
-    )
-    total_files = total_post_media_files + total_comment_media_files
-    saved_files = saved_post_media_files + saved_comment_media_files
-    saved_comment_posts = _normalize_non_negative_int(row.get("saved_comment_posts"))
-    retrieved_comment_posts = max(
-        saved_comment_posts,
-        _normalize_non_negative_int(row.get("retrieved_comment_posts")),
-    )
-    return {
-        "totals": totals,
-        "comments_saved_summary": {
-            "saved_comments": saved_comments,
-            "retrieved_comments": retrieved_comments,
-            "saved_comment_posts": saved_comment_posts,
-            "retrieved_comment_posts": retrieved_comment_posts,
-            "saved_comment_media_files": saved_comment_media_files,
-        },
-        "media_coverage": {
-            "saved_files": min(saved_files, total_files),
-            "total_files": total_files,
-            "saved_post_media_files": saved_post_media_files,
-            "total_post_media_files": total_post_media_files,
-            "saved_comment_media_files": saved_comment_media_files,
-            "total_comment_media_files": total_comment_media_files,
-            "saved_avatar_files": _normalize_non_negative_int(row.get("saved_avatar_files")),
-            "saved_reel_still_files": 0,
-            "total_reel_still_files": 0,
-        },
-    }
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_social_account_lite_header_stats"](*args, **kwargs)
 
 
 def _shared_catalog_hashtag_items(
@@ -36170,6 +34149,40 @@ def _catalog_recent_runs_header(
                 rows = [dict(row) for row in pg.fetch_all_with_cursor(cur, sql, params)]
     except psycopg_errors.UndefinedTable:
         return []
+    comment_run_ids: set[str] = set()
+    media_job_ids: set[str] = set()
+    media_run_ids: set[str] = set()
+    for row in rows:
+        config = _metadata_dict(row.get("run_config"))
+        followups = _normalize_attached_followups(config.get("attached_followups"))
+        comments = dict(followups.get("comments") or {})
+        media = dict(followups.get("media") or {})
+        comment_run_id = str(comments.get("run_id") or "").strip() or str(config.get("comments_run_id") or "").strip()
+        if comment_run_id:
+            comment_run_ids.add(comment_run_id)
+        job_ids = {str(item).strip() for item in list(media.get("enqueued_job_ids") or []) if str(item).strip()}
+        if job_ids:
+            media_job_ids.update(job_ids)
+        else:
+            source = str(media.get("source") or "").strip().lower()
+            media_run_id = (
+                str(row.get("run_id") or "").strip()
+                if source == "catalog_media_mirror"
+                else comment_run_id
+                if source == "comments_media_followups"
+                else ""
+            )
+            if media_run_id:
+                media_run_ids.add(media_run_id)
+    # Include known missing children: otherwise the resolver repeats scalar reads.
+    run_status_by_id = dict.fromkeys(comment_run_ids, "")
+    if comment_run_ids:
+        run_status_by_id.update(_load_scrape_run_statuses(sorted(comment_run_ids), conn=conn))
+    media_jobs_by_id = {
+        str(row.get("id") or "").strip(): row
+        for row in (_load_scrape_jobs_for_ids(sorted(media_job_ids), conn=conn) if media_job_ids else [])
+    }
+    media_jobs_by_run_id = _load_media_followup_jobs_for_runs(sorted(media_run_ids), conn=conn) if media_run_ids else {}
     normalized_rows: list[dict[str, Any]] = []
     for row in rows:
         run_config = _metadata_dict(row.pop("run_config", None))
@@ -36193,6 +34206,9 @@ def _catalog_recent_runs_header(
             run_status=str(row.get("status") or "").strip().lower() or None,
             comments_run_id=row["comments_run_id"],
             conn=conn,
+            run_status_by_id=run_status_by_id,
+            media_jobs_by_id=media_jobs_by_id,
+            media_jobs_by_run_id=media_jobs_by_run_id,
         )
         normalized_rows.append(_lite_social_account_catalog_run(row))
     return normalized_rows
@@ -39604,141 +37620,52 @@ def _discover_instagram_cursor_partitions(*args: Any, **kwargs: Any) -> Any:
     return _LOCAL_ROOM_FUNCTIONS["_discover_instagram_cursor_partitions"](*args, **kwargs)
 
 
-def _bootstrap_shared_tiktok_account_context(
-    *,
-    account_handle: str,
-    delay_seconds: float = 0.35,
-    scraper: Any | None = None,
-    direct_comment_api_enabled_override: bool | None = None,
-) -> dict[str, Any]:
-    from trr_backend.socials.tiktok import TikTokScraper
+def _bootstrap_shared_tiktok_account_context(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.context import _LOCAL_ROOM_FUNCTIONS
 
-    scraper_kwargs: dict[str, Any] = {"cookies": _load_tiktok_cookies()}
-    if direct_comment_api_enabled_override is not None:
-        scraper_kwargs["direct_comment_api_enabled_override"] = direct_comment_api_enabled_override
-    tiktok_scraper = scraper or TikTokScraper(**scraper_kwargs)
-    try:
-        user_data = tiktok_scraper.fetch_user_detail(account_handle, delay_seconds)
-    except Exception:  # noqa: BLE001
-        logger.warning("[tiktok] shared-account user-detail enrichment failed for @%s", account_handle)
-        user_data = None
-    try:
-        html_data = tiktok_scraper._fetch_profile_html(account_handle, delay_seconds)  # noqa: SLF001
-    except Exception:  # noqa: BLE001
-        logger.warning("[tiktok] shared-account html enrichment failed for @%s", account_handle)
-        html_data = None
-    try:
-        html_items, html_sec_uid = tiktok_scraper._extract_posts_from_html_data(html_data or {}, account_handle)  # noqa: SLF001
-    except Exception:  # noqa: BLE001
-        logger.warning("[tiktok] shared-account html parsing failed for @%s", account_handle)
-        html_items, html_sec_uid = [], None
-    try:
-        profile_snapshot = tiktok_scraper.build_profile_snapshot(
-            account_handle,
-            user_data=user_data,
-            html_data=html_data,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("[tiktok] shared-account profile snapshot build failed for @%s", account_handle)
-        profile_snapshot = {}
-    sec_uid = str(profile_snapshot.get("sec_uid") or html_sec_uid or "").strip() or None
-    total_posts = max(
-        _normalize_non_negative_int(profile_snapshot.get("total_posts")),
-        len(html_items),
-    )
-    if total_posts > 0:
-        profile_snapshot["total_posts"] = total_posts
-    if sec_uid:
-        profile_snapshot["sec_uid"] = sec_uid
-    return {
-        "scraper": tiktok_scraper,
-        "user_data": user_data,
-        "html_data": html_data,
-        "html_items": html_items,
-        "sec_uid": sec_uid,
-        "profile_snapshot": profile_snapshot,
-        "total_posts": total_posts,
-    }
+    return _LOCAL_ROOM_FUNCTIONS["_bootstrap_shared_tiktok_account_context"](*args, **kwargs)
 
 
-def _apply_tiktok_profile_snapshot_to_post(post: Any, snapshot: Mapping[str, Any] | None) -> Any:
-    metadata = _metadata_dict(snapshot)
-    if not metadata:
-        return post
-    if not getattr(post, "author_nickname", None) and str(metadata.get("display_name") or "").strip():
-        post.author_nickname = str(metadata.get("display_name") or "").strip()
-    if not getattr(post, "user_avatar_url", None) and str(metadata.get("avatar_url") or "").strip():
-        post.user_avatar_url = str(metadata.get("avatar_url") or "").strip()
-    if not getattr(post, "username", None) and str(metadata.get("username") or "").strip():
-        post.username = str(metadata.get("username") or "").strip()
-    return post
+def _apply_tiktok_profile_snapshot_to_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.context import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_apply_tiktok_profile_snapshot_to_post"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_effective_tasks(config: Mapping[str, Any]) -> set[str]:
-    tasks = _normalize_optional_social_account_catalog_backfill_selected_tasks(
-        config.get("effective_selected_tasks")
-    ) or _normalize_optional_social_account_catalog_backfill_selected_tasks(config.get("selected_tasks"))
-    if tasks:
-        return set(tasks)
-    if not _shared_catalog_mode(config):
-        return set()
-    task_hint_present = any(
-        key in config
-        for key in (
-            "details_refresh_skip_detail_fetch",
-            "details_refresh_skip_media_followups",
-            "tiktok_comments_in_posts_stage",
-            "tiktok_direct_comment_api_override",
-        )
-    )
-    if not task_hint_present:
-        return set()
+def _shared_tiktok_catalog_effective_tasks(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
 
-    inferred: list[str] = []
-    if not bool(config.get("details_refresh_skip_detail_fetch")):
-        inferred.append("post_details")
-    if bool(config.get("tiktok_comments_in_posts_stage")):
-        inferred.append("comments")
-    if not bool(config.get("details_refresh_skip_media_followups")):
-        inferred.append("media")
-    return set(_normalize_optional_social_account_catalog_backfill_selected_tasks(inferred) or inferred)
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_effective_tasks"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_comments_enabled(config: Mapping[str, Any]) -> bool:
-    return "comments" in _shared_tiktok_catalog_effective_tasks(config) and bool(
-        config.get("tiktok_comments_in_posts_stage")
-    )
+def _shared_tiktok_catalog_comments_enabled(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_comments_enabled"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_direct_comment_override(config: Mapping[str, Any]) -> bool | None:
-    if _shared_tiktok_catalog_comments_enabled(config) and bool(config.get("tiktok_direct_comment_api_override")):
-        return True
-    return None
+def _shared_tiktok_catalog_direct_comment_override(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_direct_comment_override"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_comment_delay_seconds() -> float:
-    raw = str(os.getenv("SOCIAL_TIKTOK_CATALOG_COMMENT_DELAY_SECONDS") or "").strip()
-    if not raw:
-        return 0.35
-    try:
-        return max(0.05, float(raw))
-    except ValueError:
-        return 0.35
+def _shared_tiktok_catalog_comment_delay_seconds(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_comment_delay_seconds"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_max_comments_per_post(config: Mapping[str, Any]) -> int:
-    for key in ("max_comments_per_post", "catalog_max_comments_per_post"):
-        if config.get(key) is not None:
-            return _normalize_non_negative_int(config.get(key))
-    return 0
+def _shared_tiktok_catalog_max_comments_per_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_max_comments_per_post"](*args, **kwargs)
 
 
-def _shared_tiktok_comment_fetch_timeout_seconds(config: Mapping[str, Any]) -> int:
-    for key in ("comment_fetch_timeout_seconds", "tiktok_comment_fetch_timeout_seconds"):
-        if config.get(key) is not None:
-            value = _normalize_non_negative_int(config.get(key))
-            return max(5, value) if value > 0 else 0
-    return max(5, _resolve_positive_int_env("SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS", 180, minimum=5))
+def _shared_tiktok_comment_fetch_timeout_seconds(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_comment_fetch_timeout_seconds"](*args, **kwargs)
 
 
 def _normalize_uuid_text(value: Any) -> str | None:
@@ -39875,12 +37802,10 @@ def _shared_youtube_comment_persist_deadline(seconds: int, *, video_id: str) -> 
     )
 
 
-def _shared_tiktok_comment_fetch_deadline(seconds: int, *, video_id: str) -> Any:
-    return _shared_youtube_operation_deadline(
-        seconds,
-        message=f"TikTok comment fetch timed out for {video_id} after {seconds}s",
-        timeout_type=_SharedTikTokCommentFetchTimeoutError,
-    )
+def _shared_tiktok_comment_fetch_deadline(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_comment_fetch_deadline"](*args, **kwargs)
 
 
 def _shared_youtube_source_metadata(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -40396,535 +38321,52 @@ def _persist_shared_youtube_catalog_posts_with_followups(
     return rows
 
 
-def _load_tiktok_comment_gap_priority_by_video_id(
-    *,
-    account_handle: str,
-    video_ids: Sequence[str],
-    conn: Any | None = None,
-) -> dict[str, dict[str, int]]:
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    normalized_video_ids = sorted(
-        {str(video_id or "").strip() for video_id in video_ids if str(video_id or "").strip()}
-    )
-    if not normalized_account or not normalized_video_ids:
-        return {}
-    lifecycle_supported = _comment_lifecycle_supported("tiktok_comments", conn=conn)
-    active_comment_join_filter = "and c.is_missing is not true" if lifecycle_supported else ""
-    owner_match_clause = _social_account_profile_owner_match_sql("tiktok", alias="p")
-    sql = f"""
-        select
-          p.video_id,
-          greatest(coalesce(max(p.comments_count), 0), 0)::int as reported_comments,
-          count(c.id)::int as active_comments,
-          greatest(coalesce(max(p.comments_count), 0) - count(c.id), 0)::int as missing_gap
-        from social.tiktok_posts p
-        left join social.tiktok_comments c
-          on c.post_id = p.id
-         {active_comment_join_filter}
-        where {owner_match_clause}
-          and p.video_id = any(%s)
-        group by p.video_id
-    """
-    try:
-        if conn is None:
-            rows = pg.fetch_all(sql, [normalized_account, normalized_video_ids])
-        else:
-            with pg.db_cursor(conn=conn, label="tiktok-comment-gap-priority") as cur:
-                rows = pg.fetch_all_with_cursor(cur, sql, [normalized_account, normalized_video_ids])
-    except psycopg_errors.UndefinedTable:
-        return {}
-    priorities: dict[str, dict[str, int]] = {}
-    for row in rows:
-        video_id = str(row.get("video_id") or "").strip()
-        if not video_id:
-            continue
-        priorities[video_id] = {
-            "reported_comments": _normalize_non_negative_int(row.get("reported_comments")),
-            "active_comments": _normalize_non_negative_int(row.get("active_comments")),
-            "missing_gap": _normalize_non_negative_int(row.get("missing_gap")),
-        }
-    return priorities
+def _load_tiktok_comment_gap_priority_by_video_id(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.coverage import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_load_tiktok_comment_gap_priority_by_video_id"](*args, **kwargs)
 
 
-def _prioritize_shared_tiktok_posts_for_comment_gaps(
-    posts: Sequence[Any],
-    *,
-    account_handle: str,
-    config: Mapping[str, Any],
-) -> tuple[list[Any], dict[str, Any]]:
-    post_list = list(posts)
-    if not post_list or not _shared_tiktok_catalog_comments_enabled(config):
-        return post_list, {"enabled": False, "prioritized_posts": 0, "known_gap_posts": 0}
-    video_ids = [str(getattr(post, "video_id", "") or "").strip() for post in post_list]
-    priorities = _load_tiktok_comment_gap_priority_by_video_id(
-        account_handle=account_handle,
-        video_ids=video_ids,
-    )
+def _prioritize_shared_tiktok_posts_for_comment_gaps(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.comments.coverage import _LOCAL_ROOM_FUNCTIONS
 
-    def _priority(pair: tuple[int, Any]) -> tuple[int, int, int]:
-        index, post = pair
-        video_id = str(getattr(post, "video_id", "") or "").strip()
-        priority = priorities.get(video_id) or {}
-        reported_comments = max(
-            _normalize_non_negative_int(getattr(post, "comments", 0)),
-            _normalize_non_negative_int(priority.get("reported_comments")),
-        )
-        active_comments = _normalize_non_negative_int(priority.get("active_comments"))
-        missing_gap = max(
-            _normalize_non_negative_int(priority.get("missing_gap")),
-            max(reported_comments - active_comments, 0),
-        )
-        return (-missing_gap, -reported_comments, index)
-
-    ordered_pairs = sorted(enumerate(post_list), key=_priority)
-    return [post for _index, post in ordered_pairs], {
-        "enabled": True,
-        "prioritized_posts": len(post_list),
-        "known_gap_posts": sum(
-            1 for priority in priorities.values() if _normalize_non_negative_int(priority.get("missing_gap")) > 0
-        ),
-    }
+    return _LOCAL_ROOM_FUNCTIONS["_prioritize_shared_tiktok_posts_for_comment_gaps"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_assignment_ids(catalog_row: Mapping[str, Any] | None) -> tuple[str | None, str | None]:
-    row = _metadata_dict(catalog_row)
-    season_id = str(row.get("season_id") or row.get("assigned_season_id") or "").strip() or None
-    show_id = str(row.get("show_id") or row.get("assigned_show_id") or "").strip() or None
-    return season_id, show_id
+def _shared_tiktok_catalog_assignment_ids(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_assignment_ids"](*args, **kwargs)
 
 
-def _shared_tiktok_catalog_context_from_row(
-    catalog_row: Mapping[str, Any] | None,
-    *,
-    conn: Any | None = None,
-) -> SeasonContext | None:
-    season_id, _show_id = _shared_tiktok_catalog_assignment_ids(catalog_row)
-    if not season_id:
-        return None
-    try:
-        return get_season_context(season_id, conn=conn)
-    except Exception:  # noqa: BLE001
-        logger.debug("[tiktok] shared catalog row season context unavailable: %s", season_id, exc_info=True)
-        return None
+def _shared_tiktok_catalog_context_from_row(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_catalog_context_from_row"](*args, **kwargs)
 
 
-def _apply_shared_tiktok_catalog_assignment_to_post(
-    *,
-    post_row: Mapping[str, Any],
-    catalog_row: Mapping[str, Any] | None,
-    conn: Any | None = None,
-) -> None:
-    post_id = str(post_row.get("id") or "").strip()
-    if not post_id:
-        return
-    season_id, show_id = _shared_tiktok_catalog_assignment_ids(catalog_row)
-    if season_id:
-        _update_platform_post_field(platform="tiktok", post_id=post_id, field="season_id", value=season_id, conn=conn)
-    if show_id:
-        _update_platform_post_field(platform="tiktok", post_id=post_id, field="show_id", value=show_id, conn=conn)
+def _apply_shared_tiktok_catalog_assignment_to_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_apply_shared_tiktok_catalog_assignment_to_post"](*args, **kwargs)
 
 
-def _shared_tiktok_increment_counter(
-    counters: MutableMapping[str, int],
-    key: str,
-    amount: int = 1,
-) -> None:
-    counters[key] = int(counters.get(key) or 0) + max(0, int(amount or 0))
+def _shared_tiktok_increment_counter(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_shared_tiktok_increment_counter"](*args, **kwargs)
 
 
-def _hydrate_shared_tiktok_catalog_post(
-    *,
-    scraper: Any,
-    run_id: str | None,
-    account_handle: str,
-    config: Mapping[str, Any],
-    job_id: str,
-    post: Any,
-    catalog_row: Mapping[str, Any] | None,
-    counters: MutableMapping[str, int],
-    comment_fail_reasons: Counter[str],
-    progress_cb: Callable[[dict[str, Any]], None] | None = None,
-) -> dict[str, Any] | None:
-    tasks = _shared_tiktok_catalog_effective_tasks(config)
-    if not tasks:
-        return None
+def _hydrate_shared_tiktok_catalog_post(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
 
-    source_scope = str(config.get("source_scope") or "network").strip().lower() or "network"
-    should_materialize = bool(tasks & {"post_details", "comments", "media"})
-    should_enqueue_media = "media" in tasks and not bool(config.get("details_refresh_skip_media_followups"))
-    should_fetch_comments = _shared_tiktok_catalog_comments_enabled(config)
-    materialized_row: dict[str, Any] | None = None
-    context: SeasonContext | None = None
-    video_id = str(getattr(post, "video_id", "") or "").strip()
-    expected_comment_count = max(
-        _normalize_non_negative_int(getattr(post, "comments", 0)),
-        _normalize_non_negative_int(_metadata_dict(catalog_row).get("comments_count")),
-    )
-    pre_fetch_active_comments = 0
-
-    if should_materialize:
-        try:
-            with pg.db_connection(label="tiktok-shared-catalog-materialize") as conn:
-                context = _shared_tiktok_catalog_context_from_row(catalog_row, conn=conn)
-                materialized_row = _upsert_tiktok_post(
-                    context,
-                    job_id=job_id,
-                    account=account_handle,
-                    post=post,
-                    conn=conn,
-                )
-                if materialized_row:
-                    _shared_tiktok_increment_counter(counters, "materialized_posts_upserted")
-                    _apply_shared_tiktok_catalog_assignment_to_post(
-                        post_row=materialized_row,
-                        catalog_row=catalog_row,
-                        conn=conn,
-                    )
-                    expected_comment_count = max(
-                        expected_comment_count,
-                        _normalize_non_negative_int(materialized_row.get("comments_count")),
-                    )
-                    if should_fetch_comments:
-                        existing_coverage = _load_tiktok_comment_coverage_for_post(
-                            str(materialized_row.get("id") or ""),
-                            conn=conn,
-                        )
-                        pre_fetch_active_comments = _normalize_non_negative_int(
-                            existing_coverage.get("active_comments")
-                        )
-                    if should_enqueue_media:
-                        mirror_job_id = _enqueue_platform_media_mirror_job(
-                            context,
-                            platform="tiktok",
-                            run_id=run_id,
-                            source_scope=source_scope,
-                            account=account_handle,
-                            post_row=materialized_row,
-                            week_index=None,
-                            parent_job_id=job_id,
-                            conn=conn,
-                        )
-                        if mirror_job_id:
-                            _shared_tiktok_increment_counter(counters, "media_mirror_jobs_enqueued")
-        except Exception:  # noqa: BLE001
-            _shared_tiktok_increment_counter(counters, "materialized_post_errors")
-            logger.exception("[tiktok] Failed to materialize shared catalog post video_id=%s", video_id or "?")
-            return None
-
-    if not should_fetch_comments:
-        return materialized_row
-    if not materialized_row:
-        _shared_tiktok_increment_counter(counters, "comment_posts_skipped_missing_materialized_post")
-        _shared_tiktok_increment_counter(counters, "incomplete_comment_fetches")
-        return None
-    if pre_fetch_active_comments >= expected_comment_count:
-        _shared_tiktok_increment_counter(counters, "comment_posts_skipped_complete")
-        if progress_cb:
-            progress_cb(
-                {
-                    "phase": "skip_tiktok_comments_complete",
-                    "scraped_comments": _normalize_non_negative_int(counters.get("comments_fetched")),
-                    "comments_upserted": _normalize_non_negative_int(counters.get("comments_upserted")),
-                    "current_source_id": video_id or None,
-                }
-            )
-        return materialized_row
-
-    max_comments_per_post = _shared_tiktok_catalog_max_comments_per_post(config)
-    fetch_failed = False
-    fail_reason = ""
-    comments: list[Any] = []
-    local_comment_stats = _new_comment_persist_stats()
-    observed_comment_ids: set[str] = set()
-    comment_fetch_timeout_seconds = _shared_tiktok_comment_fetch_timeout_seconds(config)
-
-    def _emit_comment_fetch_progress(payload: dict[str, Any]) -> None:
-        if not progress_cb:
-            return
-        fetched_for_post = _normalize_non_negative_int(payload.get("comments_fetched"))
-        progress_cb(
-            {
-                "phase": str(payload.get("phase") or "fetch_tiktok_comments"),
-                "scraped_comments": _normalize_non_negative_int(counters.get("comments_fetched")) + fetched_for_post,
-                "comments_upserted": _normalize_non_negative_int(counters.get("comments_upserted")),
-                "current_source_id": video_id or None,
-            }
-        )
-
-    try:
-        with _shared_tiktok_comment_fetch_deadline(comment_fetch_timeout_seconds, video_id=video_id):
-            comments = scraper.fetch_comments(
-                video_id,
-                username=account_handle,
-                max_comments=max_comments_per_post or None,
-                fetch_replies=True,
-                delay=_shared_tiktok_catalog_comment_delay_seconds(),
-                fast_mode=True,
-                progress_callback=_emit_comment_fetch_progress,
-                max_replies_per_comment=max_comments_per_post or None,
-                reply_fetch_deadline_seconds=comment_fetch_timeout_seconds,
-            )
-        fail_reason = str(
-            getattr(scraper, "last_comment_fetch_reason", "") or getattr(scraper, "_last_api_fail_reason", "") or ""
-        ).strip()
-        if fail_reason:
-            comment_fail_reasons[fail_reason] += 1
-    except _SharedTikTokCommentFetchTimeoutError:
-        fetch_failed = True
-        fail_reason = "comment_fetch_timeout"
-        comment_fail_reasons[fail_reason] += 1
-        setter = getattr(scraper, "_set_comment_failure_reason", None)
-        if callable(setter):
-            setter(fail_reason)
-        try:
-            session = getattr(scraper, "session", None)
-            if session is not None and hasattr(session, "close"):
-                session.close()
-        except Exception:  # noqa: BLE001
-            logger.debug("[tiktok] Failed to close scraper session after comment timeout", exc_info=True)
-        logger.warning(
-            "[tiktok] Timed out fetching shared catalog comments video_id=%s after %ss",
-            video_id or "?",
-            comment_fetch_timeout_seconds,
-        )
-    except Exception:  # noqa: BLE001
-        fetch_failed = True
-        fail_reason = "fetch_exception"
-        comment_fail_reasons[fail_reason] += 1
-        logger.exception("[tiktok] Failed to fetch shared catalog comments video_id=%s", video_id or "?")
-
-    if fetch_failed:
-        _shared_tiktok_increment_counter(counters, "comment_errors")
-        _shared_tiktok_increment_counter(counters, "incomplete_comment_fetches")
-        _shared_tiktok_increment_counter(counters, "comments_mark_missing_skipped")
-        return materialized_row
-
-    post_db_id = str(materialized_row.get("id") or "").strip()
-    try:
-        with pg.db_connection(label="tiktok-shared-catalog-comments") as conn:
-            with _SavepointScope(conn=conn, prefix="tiktok_shared_catalog_comments", index=1):
-                for comment in comments:
-                    _upsert_tiktok_comment_tree(
-                        context,
-                        job_id=job_id,
-                        run_id=run_id,
-                        account=account_handle,
-                        post_id=post_db_id,
-                        comment=comment,
-                        source_scope=source_scope,
-                        observed_comment_ids=observed_comment_ids,
-                        persist_stats=local_comment_stats,
-                        conn=conn,
-                    )
-                fetched_count = _normalize_non_negative_int(local_comment_stats.get("comments_upserted"))
-                expected_count = max(expected_comment_count, pre_fetch_active_comments)
-                is_complete = _is_comment_fetch_complete(
-                    fetch_failed=False,
-                    fail_reason=fail_reason,
-                    auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                    fetched_count=fetched_count,
-                    max_comments_per_post=max_comments_per_post,
-                    expected_count=expected_count,
-                )
-                if is_complete:
-                    missing_marked = _mark_missing_comments_for_anchor(
-                        platform="tiktok",
-                        anchor_id=post_db_id,
-                        observed_comment_ids=observed_comment_ids,
-                        conn=conn,
-                    )
-                    _shared_tiktok_increment_counter(counters, "comments_marked_missing", missing_marked)
-                    _reconcile_post_comment_count(platform="tiktok", post_db_id=post_db_id, conn=conn)
-                else:
-                    _shared_tiktok_increment_counter(counters, "incomplete_comment_fetches")
-                    _shared_tiktok_increment_counter(counters, "comments_mark_missing_skipped")
-                    if pre_fetch_active_comments > 0 and fetched_count < pre_fetch_active_comments:
-                        _shared_tiktok_increment_counter(counters, "comments_mark_missing_skipped_existing_gap")
-    except Exception:  # noqa: BLE001
-        _shared_tiktok_increment_counter(counters, "comment_errors")
-        _shared_tiktok_increment_counter(counters, "incomplete_comment_fetches")
-        _shared_tiktok_increment_counter(counters, "comments_mark_missing_skipped")
-        logger.exception("[tiktok] Failed to persist shared catalog comments video_id=%s", video_id or "?")
-        return materialized_row
-
-    _merge_comment_persist_stats(cast(dict[str, int], counters), local_comment_stats)
-    if progress_cb:
-        progress_cb(
-            {
-                "phase": "persist_tiktok_comments",
-                "scraped_comments": _normalize_non_negative_int(counters.get("comments_fetched")),
-                "comments_upserted": _normalize_non_negative_int(counters.get("comments_upserted")),
-                "current_source_id": video_id or None,
-            }
-        )
-    return materialized_row
+    return _LOCAL_ROOM_FUNCTIONS["_hydrate_shared_tiktok_catalog_post"](*args, **kwargs)
 
 
-def _discover_tiktok_cursor_partitions(
-    *,
-    account_handle: str,
-    runner_count: int,
-    progress_cb: Callable[[dict[str, Any]], None] | None = None,
-    partition_callback: Callable[[SharedAccountCursorPartition, int | None], None] | None = None,
-) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
-    context = _bootstrap_shared_tiktok_account_context(
-        account_handle=account_handle,
-        delay_seconds=0.35,
-    )
-    scraper = context["scraper"]
-    sec_uid = str(context.get("sec_uid") or "").strip()
-    if not sec_uid:
-        profile_snapshot = _metadata_dict(context.get("profile_snapshot"))
-        total_posts = _normalize_non_negative_int(context.get("total_posts")) or _normalize_non_negative_int(
-            profile_snapshot.get("total_posts")
-        )
-        logger.warning(
-            "TikTok discovery missing sec_uid for @%s; falling back to direct full-history posts job.",
-            account_handle,
-        )
-        return [], {
-            "error_code": "tiktok_discovery_sec_uid_missing",
-            "error_class": "TikTokDiscoverySecUidMissing",
-            "retryable": True,
-            "pages_scanned": 0,
-            "posts_checked": 0,
-            "total_posts": total_posts or None,
-            "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-            "profile_snapshot": profile_snapshot,
-        }
-    total_posts = _normalize_non_negative_int(context.get("total_posts"))
-    target_posts_per_shard = _catalog_full_history_posts_per_shard("tiktok")
-    partitions: list[SharedAccountCursorPartition] = []
-    lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
-    shard_index = 0
-    cursor = 0
-    partition_start_cursor = 0
-    partition_start_at: datetime | None = None
-    partition_posts = 0
-    partition_pages = 0
-    pages_scanned = 0
-    posts_checked = 0
-    seen_cursors: set[int] = set()
-    expected_partition_count = (
-        -(-total_posts // target_posts_per_shard) if total_posts > 0 and target_posts_per_shard > 0 else None
-    )
+def _discover_tiktok_cursor_partitions(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.discovery import _LOCAL_ROOM_FUNCTIONS
 
-    while True:
-        pages_scanned += 1
-        data = scraper.fetch_posts(account_handle, sec_uid, cursor, 0.35)
-        if not data:
-            break
-        items = list(data.get("itemList") or [])
-        if not items:
-            break
-        timestamps = [
-            scraper._coerce_timestamp(item.get("createTime") or item.get("createTimeISO"))
-            for item in items
-            if scraper._coerce_timestamp(item.get("createTime") or item.get("createTimeISO")) > 0
-        ]
-        page_posts = len(items)
-        posts_checked += page_posts
-        partition_posts += page_posts
-        partition_pages += 1
-        page_newest_at = datetime.fromtimestamp(max(timestamps), tz=UTC) if timestamps else None
-        page_oldest_at = datetime.fromtimestamp(min(timestamps), tz=UTC) if timestamps else None
-        if partition_start_at is None:
-            partition_start_at = page_newest_at
-        next_cursor = int(data.get("cursor") or 0)
-        has_more = bool(data.get("hasMore"))
-        if progress_cb:
-            progress_cb(
-                {
-                    "phase": "discover_history",
-                    "pages_scanned": pages_scanned,
-                    "posts_checked": posts_checked,
-                    "matched_posts": 0,
-                    "saved_posts": 0,
-                    "total_posts": total_posts,
-                    "discovered_partitions": len(partitions),
-                }
-            )
-        should_finalize = partition_posts >= target_posts_per_shard or not has_more or next_cursor <= 0
-        if next_cursor > 0 and next_cursor in seen_cursors:
-            should_finalize = True
-            has_more = False
-            next_cursor = 0
-        if should_finalize:
-            partition_key = _shared_account_partition_key(
-                run_id="pending",
-                platform="tiktok",
-                account_handle=account_handle,
-                shard_index=shard_index,
-                cursor_start=str(partition_start_cursor),
-                cursor_end=str(next_cursor) if next_cursor > 0 else None,
-            )
-            partition = SharedAccountCursorPartition(
-                partition_key=partition_key,
-                shard_index=shard_index,
-                shard_total=0,
-                runner_lane=lanes[shard_index % len(lanes)],
-                cursor_start=str(partition_start_cursor),
-                cursor_end=str(next_cursor) if next_cursor > 0 else None,
-                boundary_start_at=partition_start_at,
-                boundary_end_at=page_oldest_at,
-                metadata={
-                    "pages_scanned": partition_pages,
-                    "posts_discovered": partition_posts,
-                    "sec_uid": sec_uid,
-                },
-            )
-            partitions.append(partition)
-            if partition_callback:
-                partition_callback(partition, expected_partition_count)
-            shard_index += 1
-            partition_start_cursor = next_cursor
-            partition_start_at = None
-            partition_posts = 0
-            partition_pages = 0
-        if not has_more or next_cursor <= 0:
-            break
-        cursor = next_cursor
-        seen_cursors.add(cursor)
-    shard_total = max(1, len(partitions))
-    for partition in partitions:
-        partition.shard_total = shard_total
-    retrieval_meta = {
-        "pages_scanned": pages_scanned,
-        "posts_checked": posts_checked,
-        "total_posts": total_posts or None,
-        "sec_uid": sec_uid,
-        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-        "profile_snapshot": _metadata_dict(context.get("profile_snapshot")),
-    }
-    endpoint_responses = _metadata_dict(
-        _metadata_dict(getattr(scraper, "last_retrieval_meta", {}) or {}).get("endpoint_responses")
-    )
-    if endpoint_responses:
-        retrieval_meta["endpoint_responses"] = endpoint_responses
-    if pages_scanned == 1 and posts_checked <= 0 and total_posts > 0:
-        retrieval_meta["error_code"] = "tiktok_discovery_empty_first_page"
-        retrieval_meta["error_class"] = "TikTokDiscoveryEmptyFirstPage"
-        retrieval_meta["retryable"] = False
-        fetch_posts_response = _metadata_dict(endpoint_responses.get("fetch_posts"))
-        logger.warning(
-            "TikTok discovery got an empty first page for @%s despite "
-            "total_posts=%s (request_id=%s, http_status=%s, content_length=%s)",
-            account_handle,
-            total_posts,
-            str(fetch_posts_response.get("request_id") or "").strip() or "unknown",
-            _normalize_non_negative_int(fetch_posts_response.get("http_status")) or "unknown",
-            _normalize_non_negative_int(fetch_posts_response.get("content_length")),
-        )
-    logger.info(
-        "TikTok discovery complete for @%s: pages=%s posts=%s partitions=%s total_posts=%s sec_uid_prefix=%s",
-        account_handle,
-        pages_scanned,
-        posts_checked,
-        len(partitions),
-        total_posts or 0,
-        sec_uid[:8] if sec_uid else "missing",
-    )
-    return partitions, retrieval_meta
+    return _LOCAL_ROOM_FUNCTIONS["_discover_tiktok_cursor_partitions"](*args, **kwargs)
 
 
 def _discover_shared_account_cursor_partitions(
@@ -40961,154 +38403,10 @@ def _scrape_shared_instagram_posts_partitioned(*args: Any, **kwargs: Any) -> Any
     return _LOCAL_ROOM_FUNCTIONS["_scrape_shared_instagram_posts_partitioned"](*args, **kwargs)
 
 
-def _scrape_shared_tiktok_posts_partitioned(
-    *,
-    run_id: str | None,
-    account_handle: str,
-    config: Mapping[str, Any],
-    progress_cb: Callable[[dict[str, Any]], None] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from trr_backend.socials.tiktok import TikTokScrapeConfig
+def _scrape_shared_tiktok_posts_partitioned(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
 
-    context = _bootstrap_shared_tiktok_account_context(
-        account_handle=account_handle,
-        delay_seconds=0.35,
-        direct_comment_api_enabled_override=_shared_tiktok_catalog_direct_comment_override(config),
-    )
-    scraper = context["scraper"]
-    scrape_config = TikTokScrapeConfig(username=account_handle, hashtags=[], delay_seconds=0.35, max_pages=None)
-    profile_snapshot = _merge_tiktok_profile_snapshots(
-        context.get("profile_snapshot"),
-        _metadata_dict(config.get("profile_snapshot")),
-    )
-    sec_uid = str(config.get("sec_uid") or profile_snapshot.get("sec_uid") or context.get("sec_uid") or "").strip()
-    if not sec_uid:
-        raise ValueError(f"Missing TikTok sec_uid partition metadata for @{account_handle}")
-    cursor = max(0, int(config.get("cursor_start") or 0))
-    end_cursor = max(0, int(config.get("cursor_end") or 0))
-    total_posts = max(
-        _normalize_non_negative_int(config.get("discovery_total_posts")),
-        _normalize_non_negative_int(profile_snapshot.get("total_posts")),
-        _normalize_non_negative_int(context.get("total_posts")),
-    )
-    last_cursor = cursor
-    pages_scanned = 0
-    posts_checked = 0
-    rows: list[dict[str, Any]] = []
-    persist_counters: dict[str, int] = {
-        "posts_upserted": 0,
-        "comments_upserted": 0,
-        "materialized_posts_upserted": 0,
-        "media_mirror_jobs_enqueued": 0,
-    }
-    comment_fail_reasons: Counter[str] = Counter()
-    seen_cursors: set[int] = set()
-    partition_completed = end_cursor <= 0
-    error_code: str | None = None
-
-    while True:
-        pages_scanned += 1
-        data = scraper.fetch_posts(account_handle, sec_uid, cursor, scrape_config.delay_seconds)
-        if not data:
-            if end_cursor > 0 and last_cursor != end_cursor:
-                error_code = "tiktok_partition_cursor_end_not_reached"
-            break
-        items = list(data.get("itemList") or [])
-        if not items:
-            if end_cursor > 0 and last_cursor != end_cursor:
-                error_code = "tiktok_partition_empty_page_before_cursor_end"
-            break
-        posts_checked += len(items)
-        for item in items:
-            post = _apply_tiktok_profile_snapshot_to_post(
-                scraper._parse_post_item(item, scrape_config), profile_snapshot
-            )
-            row = _upsert_shared_catalog_post(
-                platform="tiktok",
-                run_id=run_id,
-                account_handle=account_handle,
-                post=post,
-            )
-            if row:
-                rows.append(row)
-                persist_counters["posts_upserted"] = len(rows)
-                _hydrate_shared_tiktok_catalog_post(
-                    scraper=scraper,
-                    run_id=run_id,
-                    account_handle=account_handle,
-                    config=config,
-                    job_id=str(config.get("job_id") or "").strip(),
-                    post=post,
-                    catalog_row=row,
-                    counters=persist_counters,
-                    comment_fail_reasons=comment_fail_reasons,
-                    progress_cb=progress_cb,
-                )
-        if progress_cb:
-            progress_cb(
-                {
-                    "phase": "scrape_partition_page",
-                    "pages_scanned": pages_scanned,
-                    "posts_checked": posts_checked,
-                    "matched_posts": len(rows),
-                    "saved_posts": len(rows),
-                    "total_posts": total_posts or None,
-                }
-            )
-        next_cursor = int(data.get("cursor") or 0)
-        has_more = bool(data.get("hasMore"))
-        if end_cursor > 0 and next_cursor == end_cursor:
-            partition_completed = True
-            break
-        if not has_more or next_cursor <= 0 or next_cursor in seen_cursors:
-            if end_cursor > 0 and next_cursor != end_cursor:
-                error_code = "tiktok_partition_cursor_end_not_reached"
-            else:
-                partition_completed = True
-            break
-        cursor = next_cursor
-        last_cursor = cursor
-        seen_cursors.add(cursor)
-    retrieval_meta = {
-        "retrieval_mode": "api_partition",
-        "pages_scanned": pages_scanned,
-        "posts_checked": posts_checked,
-        "total_posts": total_posts or None,
-        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-        "persist_counters": {
-            **persist_counters,
-            "posts_upserted": len(rows),
-            "comments_upserted": _normalize_non_negative_int(persist_counters.get("comments_upserted")),
-        },
-        "profile_snapshot": profile_snapshot,
-    }
-    if comment_fail_reasons:
-        retrieval_meta["comment_fetch_failures_by_reason"] = dict(comment_fail_reasons)
-    for key in (
-        "comments_fetched",
-        "comments_marked_missing",
-        "comments_mark_missing_skipped",
-        "incomplete_comment_fetches",
-        "comment_errors",
-        "comment_posts_skipped_complete",
-        "comment_posts_skipped_missing_materialized_post",
-        "comments_mark_missing_skipped_existing_gap",
-        "comment_media_mirror_jobs_enqueued",
-        "comment_media_mirror_job_enqueue_errors",
-        "materialized_post_errors",
-    ):
-        if _normalize_non_negative_int(persist_counters.get(key)):
-            retrieval_meta[key] = _normalize_non_negative_int(persist_counters.get(key))
-    endpoint_responses = _metadata_dict(
-        _metadata_dict(getattr(scraper, "last_retrieval_meta", {}) or {}).get("endpoint_responses")
-    )
-    if endpoint_responses:
-        retrieval_meta["endpoint_responses"] = endpoint_responses
-    if error_code and not partition_completed:
-        retrieval_meta["error_code"] = error_code
-        retrieval_meta["error_class"] = "PartitionBoundaryNotReached"
-        retrieval_meta["retryable"] = True
-    return rows, retrieval_meta
+    return _LOCAL_ROOM_FUNCTIONS["_scrape_shared_tiktok_posts_partitioned"](*args, **kwargs)
 
 
 def _scrape_shared_instagram_post_details_refresh(*args: Any, **kwargs: Any) -> Any:
@@ -41123,144 +38421,10 @@ def _scrape_shared_instagram_posts(*args: Any, **kwargs: Any) -> Any:
     return _LOCAL_ROOM_FUNCTIONS["_scrape_shared_instagram_posts"](*args, **kwargs)
 
 
-def _scrape_shared_tiktok_posts(
-    *,
-    run_id: str | None,
-    account_handle: str,
-    config: Mapping[str, Any],
-    job_id: str,
-    progress_cb: Callable[[dict[str, Any]], None] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
+def _scrape_shared_tiktok_posts(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.scrape import _LOCAL_ROOM_FUNCTIONS
 
-    scraper_kwargs: dict[str, Any] = {"cookies": _load_tiktok_cookies()}
-    direct_comment_override = _shared_tiktok_catalog_direct_comment_override(config)
-    if direct_comment_override is not None:
-        scraper_kwargs["direct_comment_api_enabled_override"] = direct_comment_override
-    scraper = TikTokScraper(**scraper_kwargs)
-    expected_total_posts = max(
-        _normalize_non_negative_int(config.get("discovery_total_posts")),
-        _shared_account_expected_total_posts_from_config(
-            config,
-            platform="tiktok",
-            account_handle=account_handle,
-        ),
-    )
-    scrape_config = TikTokScrapeConfig(
-        username=account_handle,
-        hashtags=[],
-        date_start=_coerce_dt(config.get("date_start")),
-        date_end=_coerce_dt(config.get("date_end")),
-        delay_seconds=0.35,
-        max_pages=_shared_stage_post_limit(config),
-        scrape_mode="ytdlp",
-        ytdlp_max_videos_hint=expected_total_posts or None,
-    )
-    posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
-    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
-    profile_snapshot = _merge_tiktok_profile_snapshots(
-        _metadata_dict(retrieval_meta).get("profile_snapshot"),
-        _metadata_dict(config.get("profile_snapshot")),
-    )
-    rows: list[dict[str, Any]] = []
-    if _shared_catalog_mode(config):
-        persist_counters: dict[str, int] = {
-            "posts_upserted": 0,
-            "comments_upserted": 0,
-            "materialized_posts_upserted": 0,
-            "media_mirror_jobs_enqueued": 0,
-        }
-        comment_fail_reasons: Counter[str] = Counter()
-        progress_interval = _shared_catalog_progress_interval_posts()
-        pages_scanned = _normalize_non_negative_int(retrieval_meta.get("pages_scanned"))
-        posts_checked = max(_normalize_non_negative_int(retrieval_meta.get("posts_checked")), len(posts))
-        matched_posts = len(posts)
-        total_posts = retrieval_meta.get("total_posts")
-        posts, gap_priority_meta = _prioritize_shared_tiktok_posts_for_comment_gaps(
-            posts,
-            account_handle=account_handle,
-            config=config,
-        )
-        if gap_priority_meta.get("enabled"):
-            retrieval_meta["comment_gap_priority"] = gap_priority_meta
-
-        def _emit_persist_progress(saved_posts: int, *, force: bool = False) -> None:
-            if not progress_cb:
-                return
-            if not force and saved_posts > 0 and saved_posts % progress_interval != 0:
-                return
-            payload: dict[str, Any] = {
-                "phase": "persist_catalog_posts",
-                "pages_scanned": pages_scanned,
-                "posts_checked": posts_checked,
-                "matched_posts": matched_posts,
-                "saved_posts": max(0, int(saved_posts)),
-            }
-            if total_posts is not None:
-                payload["total_posts"] = _normalize_non_negative_int(total_posts)
-            progress_cb(payload)
-
-        _emit_persist_progress(0, force=True)
-        for index, post in enumerate(posts, start=1):
-            _apply_tiktok_profile_snapshot_to_post(post, profile_snapshot)
-            row = _upsert_shared_catalog_post(
-                platform="tiktok",
-                run_id=run_id,
-                account_handle=account_handle,
-                post=post,
-            )
-            if row:
-                rows.append(row)
-                persist_counters["posts_upserted"] = len(rows)
-                _hydrate_shared_tiktok_catalog_post(
-                    scraper=scraper,
-                    run_id=run_id,
-                    account_handle=account_handle,
-                    config=config,
-                    job_id=job_id,
-                    post=post,
-                    catalog_row=row,
-                    counters=persist_counters,
-                    comment_fail_reasons=comment_fail_reasons,
-                    progress_cb=progress_cb,
-                )
-            _emit_persist_progress(len(rows), force=index == len(posts))
-        retrieval_meta["persist_counters"] = {
-            **persist_counters,
-            "posts_upserted": len(rows),
-            "comments_upserted": _normalize_non_negative_int(persist_counters.get("comments_upserted")),
-        }
-        if comment_fail_reasons:
-            retrieval_meta["comment_fetch_failures_by_reason"] = dict(comment_fail_reasons)
-        for key in (
-            "comments_fetched",
-            "comments_marked_missing",
-            "comments_mark_missing_skipped",
-            "incomplete_comment_fetches",
-            "comment_errors",
-            "comment_posts_skipped_missing_materialized_post",
-            "comment_media_mirror_jobs_enqueued",
-            "comment_media_mirror_job_enqueue_errors",
-            "materialized_post_errors",
-        ):
-            if _normalize_non_negative_int(persist_counters.get(key)):
-                retrieval_meta[key] = _normalize_non_negative_int(persist_counters.get(key))
-    else:
-        for post in posts:
-            _apply_tiktok_profile_snapshot_to_post(post, profile_snapshot)
-            row = _upsert_tiktok_post(None, job_id=job_id, account=account_handle, post=post)
-            if row:
-                rows.append(row)
-    retrieval_meta["profile_snapshot"] = _merge_tiktok_profile_snapshots(
-        _metadata_dict(retrieval_meta.get("profile_snapshot")),
-        profile_snapshot,
-    )
-    retrieval_meta["total_posts"] = max(
-        _normalize_non_negative_int(retrieval_meta.get("total_posts")),
-        _normalize_non_negative_int(_metadata_dict(retrieval_meta.get("profile_snapshot")).get("total_posts")),
-        len(rows),
-    )
-    return rows, retrieval_meta
+    return _LOCAL_ROOM_FUNCTIONS["_scrape_shared_tiktok_posts"](*args, **kwargs)
 
 
 def _scrape_shared_youtube_posts(
@@ -47466,7 +44630,8 @@ def ingest_shared_accounts(
         row
         for row in sources
         if (
-            (_normalize_platform_name(row.get("platform")) or "")
+            (_normalize_platform_name(row.get("platform")) or "") != "tiktok"
+            and (_normalize_platform_name(row.get("platform")) or "")
             and (_normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip())
             and (
                 (
@@ -47971,6 +45136,7 @@ def ingest_shared_accounts(
                     normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
                     and (full_history_partition_enabled or bounded_frontier_direct)
                     and not force_tiktok_local_inline_direct
+                    and platform != "tiktok"
                     and (
                         _shared_account_catalog_frontier_supported(
                             platform=platform,
@@ -50430,18 +47596,12 @@ def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int 
             probe_deadline_sec = 22.0
         probe_deadline = time_module.monotonic() + max(4.0, probe_deadline_sec)
 
-        auth_cookies = _load_instagram_cookies()
         scraper_candidates: list[tuple[str, InstagramScraper]] = [
-            ("public_profile_info", InstagramScraper(cookies={}, browser_account_id=normalized_account))
-        ]
-        if auth_cookies:
-            scraper_candidates.append(
-                (
-                    "authenticated_profile_info",
-                    _get_cached_scraper(auth_cookies, cache_scope=f"instagram:{normalized_account}")
-                    or InstagramScraper(cookies=auth_cookies, browser_account_id=normalized_account),
-                )
+            (
+                "public_profile_info",
+                InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True),
             )
+        ]
 
         for source_label, scraper in scraper_candidates:
             if time_module.monotonic() >= probe_deadline:
@@ -55558,265 +52718,10 @@ def _week_detail_instagram(
     }
 
 
-def _week_detail_tiktok(
-    season_id: str,
-    *,
-    start_dt: datetime,
-    end_dt: datetime,
-    account_handles: set[str],
-    max_comments: int,
-    post_limit: int = 20,
-    post_offset: int = 0,
-    sort_field: str = "posted_at",
-    sort_dir: str = "desc",
-) -> dict[str, Any]:
-    thumbnail_expr = _platform_thumbnail_expr("p", "tiktok")
-    saves_expr = _tiktok_saves_expr("p")
-    mentions_expr = (
-        "coalesce(p.mentions, '[]'::jsonb)" if _platform_posts_has_column("tiktok", "mentions") else "'[]'::jsonb"
-    )
-    account_handles_list = sorted(account_handles)
-    account_filter = (
-        "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
-        if account_handles_list
-        else ""
-    )
-    params = [season_id, start_dt, end_dt]
-    if account_handles_list:
-        params.append(account_handles_list)
-    count_rows = pg.fetch_all(
-        f"""
-        select count(*)::int as post_count
-        from social.tiktok_posts p
-        where p.season_id = %s
-          and p.posted_at >= %s
-          and p.posted_at <= %s
-        {account_filter}
-        """,
-        params,
-    )
-    total_post_count = int((count_rows[0] if count_rows else {}).get("post_count") or 0)
-    effective_post_limit = max(0, post_limit + post_offset)
-    order_by_clause = _week_detail_order_by_clause(
-        timestamp_expr="p.posted_at",
-        field_expr_by_sort={
-            "likes": "p.likes",
-            "views": "p.views",
-            "comments_count": "p.comments_count",
-            "shares": "p.shares",
-            "retweets": "0",
-        },
-        engagement_expr=(
-            "coalesce(p.likes, 0) + coalesce(p.comments_count, 0) + coalesce(p.shares, 0) + coalesce(p.views, 0)"
-        ),
-        sort_field=sort_field,
-        sort_dir=sort_dir,
-    )
-    posts = pg.fetch_all(
-        f"""
-        select
-          p.id,
-          p.video_id as source_id,
-          p.username as author,
-          p.nickname,
-          p.description as text,
-          coalesce(p.likes, 0) as likes,
-          coalesce(p.comments_count, 0) as comments_count,
-          coalesce(p.shares, 0) as shares,
-          {saves_expr} as saves,
-          coalesce(p.views, 0) as views,
-          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
-          {mentions_expr} as mentions,
-          {thumbnail_expr} as thumbnail_url,
-          coalesce(nullif(p.thumbnail_url, ''), '') as source_thumbnail_url,
-          coalesce(nullif(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-          coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-          {_platform_hosted_media_expr("p")} as hosted_media_urls,
-          p.duration_seconds,
-          nullif(coalesce(to_jsonb(p) ->> 'user_avatar_url', ''), '') as user_avatar_url,
-          nullif(coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', ''), '') as hosted_user_avatar_url,
-          coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
-          p.posted_at as ts
-        from social.tiktok_posts p
-        where p.season_id = %s
-          and p.posted_at >= %s
-          and p.posted_at <= %s
-          {account_filter}
-        order by {order_by_clause}
-        limit {effective_post_limit}
-        """,
-        params,
-    )
+def _week_detail_tiktok(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.week import _LOCAL_ROOM_FUNCTIONS
 
-    post_ids = [p["id"] for p in posts]
-    comments_by_post: dict[Any, list[dict]] = defaultdict(list)
-    comment_counts_by_post: dict[Any, int] = defaultdict(int)
-    tiktok_comment_active_filter = (
-        "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("tiktok_comments") else ""
-    )
-
-    if post_ids:
-        count_rows = pg.fetch_all(
-            f"""
-            select c.post_id, count(*)::int as cnt
-            from social.tiktok_comments c
-            where c.post_id = any(%s::uuid[])
-              {tiktok_comment_active_filter}
-            group by c.post_id
-            """,
-            [post_ids],
-        )
-        for row in count_rows:
-            comment_counts_by_post[row["post_id"]] = row["cnt"]
-
-        limit_clause = f"limit {max_comments}" if max_comments > 0 else "limit all"
-        comment_rows = pg.fetch_all(
-            f"""
-            select sub.*
-            from unnest(%s::uuid[]) as pid(id)
-            cross join lateral (
-              select
-                c.comment_id,
-                c.post_id,
-                c.username as author,
-                c.text,
-                coalesce(c.likes, 0) as likes,
-                coalesce(c.is_reply, false) as is_reply,
-                coalesce(c.reply_count, 0) as reply_count,
-                c.created_at,
-                coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb) as media_urls,
-                coalesce(to_jsonb(c) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
-                nullif(coalesce(to_jsonb(c) ->> 'media_mirror_status', ''), '') as media_mirror_status
-              from social.tiktok_comments c
-              where c.post_id = pid.id
-                {tiktok_comment_active_filter}
-              order by c.likes desc nulls last, c.created_at asc
-              {limit_clause}
-            ) sub
-            """,
-            [post_ids],
-        )
-        for row in comment_rows:
-            comments_by_post[row["post_id"]].append(row)
-
-    result_posts = []
-    total_engagement = 0
-    total_comments_count = 0
-    saved_comments_count = 0
-    for p in posts:
-        engagement = p["likes"] + p["comments_count"] + p["shares"] + p["views"]
-        total_engagement += engagement
-        total_comments_count += p["comments_count"]
-        db_comment_count = comment_counts_by_post.get(p["id"], 0)
-        saved_comments_count += db_comment_count
-        post_comments = comments_by_post.get(p["id"], [])
-
-        hashtags = _json_text_list(p.get("hashtags"), strip_prefix="#")
-        if not hashtags:
-            hashtags = _parse_hashtags(p.get("text"))
-        mentions = _json_text_list(p.get("mentions"), prefix="@", strip_prefix="@")
-        if not mentions:
-            mentions = _parse_mentions(p.get("text"))
-
-        author = p["author"] or ""
-        user_avatar_url = _resolve_post_avatar_url(
-            hosted_avatar_url=p.get("hosted_user_avatar_url"),
-            direct_avatar_url=p.get("user_avatar_url"),
-            raw_data=p.get("raw_data"),
-        )
-        user_url = _resolve_platform_profile_url("tiktok", handle=author)
-        mentions_detail = _build_handle_details_from_tokens("tiktok", mentions)
-        source_media_urls = _as_text_list(p.get("source_media_urls"))
-        hosted_media_urls = _as_text_list(p.get("hosted_media_urls"))
-        source_thumbnail_url = str(p.get("source_thumbnail_url") or "").strip() or None
-        hosted_thumbnail_url = str(p.get("hosted_thumbnail_url") or "").strip() or None
-        display_thumbnail = _build_display_thumbnail_payload(
-            asset_manifest=_extract_platform_post_asset_manifest("tiktok", dict(p)),
-            hosted_thumbnail_url=hosted_thumbnail_url,
-            source_thumbnail_url=source_thumbnail_url,
-            hosted_media_urls=hosted_media_urls,
-            source_media_urls=source_media_urls,
-        )
-        result_posts.append(
-            {
-                "source_id": p["source_id"],
-                "author": author,
-                "nickname": p.get("nickname") or "",
-                "text": p.get("text") or "",
-                "url": f"https://www.tiktok.com/@{author}/video/{p['source_id']}" if p["source_id"] and author else "",
-                "posted_at": _iso(p["ts"]),
-                "likes": p["likes"],
-                "comments_count": p["comments_count"],
-                "shares": p["shares"],
-                "saves": int(p.get("saves") or 0),
-                "views": p["views"],
-                "hashtags": hashtags,
-                "thumbnail_url": p.get("thumbnail_url"),
-                "source_thumbnail_url": source_thumbnail_url,
-                "hosted_thumbnail_url": hosted_thumbnail_url,
-                **display_thumbnail,
-                "media_urls": source_media_urls,
-                "source_media_urls": source_media_urls,
-                "hosted_media_urls": hosted_media_urls,
-                "duration_seconds": p.get("duration_seconds"),
-                "mentions": mentions,
-                "user": {
-                    "username": author,
-                    "display_name": p.get("nickname") or "",
-                    "url": user_url,
-                    "avatar_url": user_avatar_url,
-                },
-                "mentions_detail": mentions_detail,
-                "engagement": engagement,
-                "total_comments_available": db_comment_count,
-                "comments": [
-                    {
-                        "comment_id": c["comment_id"],
-                        "author": c["author"] or "",
-                        "text": c["text"] or "",
-                        "likes": c["likes"],
-                        "is_reply": c["is_reply"],
-                        "reply_count": c["reply_count"],
-                        "created_at": _iso(c["created_at"]),
-                        "media_urls": _as_text_list(c.get("media_urls")),
-                        "hosted_media_urls": _as_text_list(c.get("hosted_media_urls")),
-                        "media_mirror_status": c.get("media_mirror_status"),
-                    }
-                    for c in post_comments
-                ],
-                "status": _build_post_status_payload(
-                    expected_comments=int(p["comments_count"] or 0),
-                    saved_comments=db_comment_count,
-                    source_media_urls=_as_text_list(p.get("source_media_urls")),
-                    hosted_media_urls=_as_text_list(p.get("hosted_media_urls")),
-                    source_thumbnail_url=str(p.get("source_thumbnail_url") or "").strip() or None,
-                    hosted_thumbnail_url=str(p.get("hosted_thumbnail_url") or "").strip() or None,
-                    media_mirror_status=(
-                        "partial"
-                        if len(_as_text_list(p.get("hosted_media_urls")))
-                        < len(_as_text_list(p.get("source_media_urls")))
-                        else "complete"
-                    ),
-                    last_refresh_at=None,
-                    last_refresh_reason="tiktok_metadata_unavailable"
-                    if not _as_text_list(p.get("source_media_urls")) and int(p.get("views") or 0) <= 0
-                    else None,
-                ),
-            }
-        )
-
-    return {
-        "posts": result_posts,
-        "total_posts": total_post_count,
-        "totals": {
-            "posts": len(result_posts),
-            "total_comments": total_comments_count,
-            "total_engagement": total_engagement,
-            "expected_comments_total": total_comments_count,
-            "saved_comments_total": saved_comments_count,
-            "comments_saved_pct": _safe_percent(saved_comments_count, total_comments_count),
-        },
-    }
+    return _LOCAL_ROOM_FUNCTIONS["_week_detail_tiktok"](*args, **kwargs)
 
 
 def _week_detail_youtube(
@@ -57132,32 +54037,10 @@ def _week_summary_fast_instagram(
     )
 
 
-def _week_summary_fast_tiktok(
-    *,
-    season_id: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    account_handles: set[str],
-) -> dict[str, Any]:
-    comments_active_filter = (
-        "and coalesce(c.is_missing, false) = false" if _comment_lifecycle_supported("tiktok_comments") else ""
-    )
-    return _week_summary_fast_generic(
-        season_id=season_id,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        account_handles=account_handles,
-        post_table="tiktok_posts",
-        timestamp_column="posted_at",
-        account_expr="coalesce(nullif(p.username, ''), nullif(p.source_account, ''))",
-        comment_table="tiktok_comments",
-        comment_fk_column="post_id",
-        likes_expr="p.likes",
-        comments_expr="p.comments_count",
-        views_expr="p.views",
-        shares_expr="p.shares",
-        comments_active_filter=comments_active_filter,
-    )
+def _week_summary_fast_tiktok(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.week import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_week_summary_fast_tiktok"](*args, **kwargs)
 
 
 def _week_summary_fast_facebook(
@@ -57814,129 +54697,62 @@ def get_post_comments(*args: Any, **kwargs: Any) -> Any:
     return _LOCAL_ROOM_FUNCTIONS["get_post_comments"](*args, **kwargs)
 
 
-def _tiktok_filter_sql(
-    *,
-    season_id: str,
-    date_start: datetime | None = None,
-    date_end: datetime | None = None,
-    cast_member_id: str | None = None,
-    hashtag: str | None = None,
-    keyword: str | None = None,
-    sound_id: str | None = None,
-) -> tuple[str, list[Any]]:
-    where_parts = ["p.season_id = %s::uuid"]
-    params: list[Any] = [season_id]
-    start_dt = _coerce_dt(date_start)
-    end_dt = _coerce_dt(date_end)
-    if start_dt:
-        where_parts.append("p.posted_at >= %s")
-        params.append(start_dt)
-    if end_dt:
-        where_parts.append("p.posted_at <= %s")
-        params.append(end_dt)
+def _tiktok_filter_sql(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.analytics.filters import _LOCAL_ROOM_FUNCTIONS
 
-    normalized_sound_id = _normalize_tiktok_sound_id(sound_id)
-    if normalized_sound_id and _platform_posts_has_column("tiktok", "sound_id"):
-        where_parts.append("coalesce(p.sound_id, '') = %s")
-        params.append(normalized_sound_id)
-
-    normalized_cast_member_id = str(cast_member_id or "").strip()
-    if normalized_cast_member_id and _relation_exists("social.tiktok_post_cast_members"):
-        where_parts.append(
-            """
-            exists (
-              select 1
-              from social.tiktok_post_cast_members cm
-              where cm.post_id = p.id
-                and cm.cast_member_id = %s::uuid
-            )
-            """
-        )
-        params.append(normalized_cast_member_id)
-
-    normalized_hashtag = str(hashtag or "").strip().lstrip("#").lower()
-    if normalized_hashtag and _relation_exists("social.tiktok_post_tokens"):
-        where_parts.append(
-            """
-            exists (
-              select 1
-              from social.tiktok_post_tokens tk
-              where tk.post_id = p.id
-                and tk.token_type = 'hashtag'
-                and tk.normalized_token = %s
-            )
-            """
-        )
-        params.append(normalized_hashtag)
-
-    normalized_keyword = str(keyword or "").strip().lower()
-    if normalized_keyword and _relation_exists("social.tiktok_post_tokens"):
-        where_parts.append(
-            """
-            exists (
-              select 1
-              from social.tiktok_post_tokens tk
-              where tk.post_id = p.id
-                and tk.token_type = 'keyword'
-                and tk.normalized_token = %s
-            )
-            """
-        )
-        params.append(normalized_keyword)
-
-    return " and ".join(where_parts), params
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_filter_sql"](*args, **kwargs)
 
 
 def get_tiktok_overview(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_overview"](*args, **kwargs)
 
 
 def get_tiktok_cast_members(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_cast_members"](*args, **kwargs)
 
 
 def get_tiktok_hashtags(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_hashtags"](*args, **kwargs)
 
 
 def get_tiktok_sounds(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_sounds"](*args, **kwargs)
 
 
 def get_tiktok_content_health(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_content_health"](*args, **kwargs)
 
 
 def get_tiktok_sound_detail(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_sound_detail"](*args, **kwargs)
 
 
 def get_tiktok_sound_posts(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_sound_posts"](*args, **kwargs)
 
 
 def get_tiktok_post_detail(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_post_detail"](*args, **kwargs)
 
 
 def get_tiktok_sentiment_trends(*args: Any, **kwargs: Any) -> Any:
-    from trr_backend.socials.analytics.read_models import _LOCAL_ROOM_FUNCTIONS
+    from trr_backend.socials.tiktok.analytics.reads import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["get_tiktok_sentiment_trends"](*args, **kwargs)
 
@@ -58043,39 +54859,10 @@ def _refresh_instagram_post_detail_sync(
     }
 
 
-def _refresh_tiktok_post_detail_sync(
-    context: SeasonContext,
-    *,
-    source_id: str,
-    account: str,
-    row_json: dict[str, Any],
-    detail_job_id: str | None,
-) -> dict[str, Any]:
-    from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
+def _refresh_tiktok_post_detail_sync(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.lane_start import _LOCAL_ROOM_FUNCTIONS
 
-    scraper = TikTokScraper(cookies=_load_tiktok_cookies())
-    username = str(row_json.get("username") or account or "").strip().lstrip("@")
-    canonical_url = _resolve_tiktok_canonical_url(source_id=source_id, row_json=row_json, account=account)
-    metadata = scraper._ytdlp_get_video_metadata(canonical_url)  # noqa: SLF001
-    if not isinstance(metadata, dict):
-        raise RuntimeError("tiktok_metadata_unavailable")
-    config = TikTokScrapeConfig(username=username or str(account or "").strip().lstrip("@") or "unknown")
-    post = scraper._parse_ytdlp_metadata(metadata, config)  # noqa: SLF001
-    if not getattr(post, "video_id", ""):
-        post.video_id = source_id
-    with pg.db_connection() as conn:
-        upserted = _upsert_tiktok_post(
-            context,
-            job_id=detail_job_id,
-            account=account or getattr(post, "username", "") or username,
-            post=post,
-            conn=conn,
-        )
-    return {
-        "status": "success" if upserted else "failed",
-        "post_id": str((upserted or {}).get("id") or ""),
-        "source": "yt_dlp_single_post",
-    }
+    return _LOCAL_ROOM_FUNCTIONS["_refresh_tiktok_post_detail_sync"](*args, **kwargs)
 
 
 def _refresh_youtube_post_detail_sync(
@@ -60583,6 +57370,40 @@ def _fetch_social_account_profile_source_rows(
     ]
 
 
+def _instagram_profile_search_projection_sql(source_id_column: str, *, native_columns: set[str]) -> str:
+    # Keep the maintained matcher inputs, without transferring source/media payloads.
+    optional_fields = (
+        "title",
+        "headline",
+        "caption",
+        "text",
+        "post_url",
+        "permalink",
+        "permalink_url",
+        "canonical_url",
+        "url",
+        "link",
+        "hashtags",
+        "mentions",
+        "collaborators",
+        "collaborators_detail",
+        "profile_tags",
+    )
+    fields = ", ".join(
+        f"p.{name} as {name}" if name in native_columns else f"null as {name}" for name in optional_fields
+    )
+    return f"""
+        p.id::text as id, p.{source_id_column} as source_id,
+        p.{source_id_column} as shortcode, p.source_account, p.posted_at,
+        sh.name as show_name, {fields},
+        jsonb_build_object(
+            'caption', p.raw_data -> 'caption',
+            'caption_text', p.raw_data -> 'caption_text',
+            'text', p.raw_data -> 'text'
+        ) as raw_data
+    """
+
+
 def _instagram_catalog_profile_rows_select_sql() -> str:
     return """
             select
@@ -60609,6 +57430,8 @@ def _fetch_instagram_owner_catalog_rows(
     account_handle: str,
     *,
     limit: int | None = None,
+    search_projection: bool = False,
+    source_ids: list[str] | None = None,
     posted_since: datetime | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -60623,16 +57446,36 @@ def _fetch_instagram_owner_catalog_rows(
     if normalized_posted_since is not None:
         posted_since_clause = "and p.posted_at >= %s"
         params.append(normalized_posted_since)
+    native_columns = (
+        _relation_columns("social", "instagram_account_catalog_posts", conn=conn)
+        if search_projection or source_ids is not None
+        else None
+    )
+    source_ids_clause = ""
+    if source_ids is not None:
+        source_ids_clause = "and p.source_id = any(%s::text[])"
+        params.append(source_ids)
+    select_sql = _instagram_catalog_profile_rows_select_sql()
+    if search_projection:
+        select_sql = (
+            "select "
+            + _instagram_profile_search_projection_sql("source_id", native_columns=native_columns or set())
+            + select_sql[select_sql.index("from social.instagram_account_catalog_posts") :]
+        )
     limit_clause = ""
     if limit is not None:
         limit_clause = "limit %s"
         params.append(max(1, int(limit)))
-    account_match_clause = _instagram_account_match_sql(alias="p")
+    account_match_clause = _instagram_account_match_sql(
+        alias="p",
+        native_columns=frozenset(native_columns) if native_columns is not None else None,
+    )
     try:
         query = f"""
-            {_instagram_catalog_profile_rows_select_sql()}
+            {select_sql}
             where {account_match_clause}
               {posted_since_clause}
+              {source_ids_clause}
             order by p.posted_at desc nulls last, p.id desc
             {limit_clause}
             """
@@ -60648,6 +57491,8 @@ def _fetch_instagram_collaborator_catalog_rows(
     account_handle: str,
     *,
     limit: int | None = None,
+    search_projection: bool = False,
+    source_ids: list[str] | None = None,
     posted_since: datetime | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
@@ -60662,18 +57507,35 @@ def _fetch_instagram_collaborator_catalog_rows(
     if normalized_posted_since is not None:
         posted_since_clause = "and m.posted_at >= %s"
         params.append(normalized_posted_since)
+    native_columns = (
+        _relation_columns("social", "instagram_account_catalog_posts", conn=conn)
+        if search_projection or source_ids is not None
+        else None
+    )
+    source_ids_clause = ""
+    if source_ids is not None:
+        source_ids_clause = "and p.source_id = any(%s::text[])"
+        params.append(source_ids)
+    select_sql = _instagram_catalog_profile_rows_select_sql()
+    if search_projection:
+        select_sql = (
+            "select "
+            + _instagram_profile_search_projection_sql("source_id", native_columns=native_columns or set())
+            + select_sql[select_sql.index("from social.instagram_account_catalog_posts") :]
+        )
     limit_clause = ""
     if limit is not None:
         limit_clause = "limit %s"
         params.append(max(1, int(limit)))
     try:
         query = f"""
-            {_instagram_catalog_profile_rows_select_sql()}
+            {select_sql}
             join social.instagram_account_catalog_post_collaborators m
               on m.catalog_post_id = p.id
             where m.collaborator_handle = %s
               and lower(p.source_account) <> %s
               {posted_since_clause}
+              {source_ids_clause}
             order by m.posted_at desc nulls last, m.catalog_post_id desc
             {limit_clause}
             """
@@ -60791,16 +57653,83 @@ def _instagram_social_account_profile_dataset_rows(
     collaborator_posted_since: datetime | None = None,
     conn: Any | None = None,
     comments_only: bool = False,
+    comment_filter: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
 ) -> list[dict[str, Any]]:
+    from trr_backend.socials.read_models.account_profile.comment_breakdown import (
+        instagram_facebook_comment_count_from_row,
+    )
+
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     fetch_limit = max(1, int(limit)) if limit is not None else None
+    source_kwargs: dict[str, Any] = {}
+    if search and comments_only and fetch_limit is None:
+        candidate_rows = []
+        for loader, args, projection, surface, mode, priority, since in (
+            (
+                _fetch_social_account_profile_rows,
+                ("instagram", normalized_account),
+                {"projection": "search"},
+                "materialized",
+                "owner",
+                3,
+                posted_since,
+            ),
+            (
+                _fetch_instagram_owner_catalog_rows,
+                (normalized_account,),
+                {"search_projection": True},
+                "catalog",
+                "owner",
+                2,
+                posted_since,
+            ),
+            (
+                _fetch_instagram_collaborator_catalog_rows,
+                (normalized_account,),
+                {"search_projection": True},
+                "catalog",
+                "collaborator",
+                1,
+                collaborator_posted_since if collaborator_posted_since is not None else posted_since,
+            ),
+        ):
+            candidates = _call_profile_summary_loader_with_conn(
+                loader,
+                *args,
+                posted_since=since,
+                conn=conn,
+                **projection,
+            )
+            candidate_rows.extend(
+                _annotate_instagram_social_account_profile_dataset_rows(
+                    candidates,
+                    source_surface=surface,
+                    match_mode=mode,
+                    priority=priority,
+                )
+            )
+        source_ids = [
+            str(row.get("source_id") or row.get("shortcode") or "")
+            for row in _dedupe_social_account_profile_dataset_rows(candidate_rows)
+            if _social_account_profile_row_matches_search(
+                "instagram",
+                row,
+                account_handle=normalized_account,
+                search=search,
+                known_handle_identity_index={},
+            )
+        ]
+        if not source_ids:
+            return []
+        source_kwargs["source_ids"] = source_ids
     materialized_rows = _call_profile_summary_loader_with_conn(
         _fetch_social_account_profile_rows,
         "instagram",
         normalized_account,
         limit=fetch_limit,
+        **source_kwargs,
         posted_since=posted_since,
         conn=conn,
     )
@@ -60808,6 +57737,7 @@ def _instagram_social_account_profile_dataset_rows(
         _fetch_instagram_owner_catalog_rows,
         normalized_account,
         limit=fetch_limit,
+        **source_kwargs,
         posted_since=posted_since,
         conn=conn,
     )
@@ -60835,6 +57765,7 @@ def _instagram_social_account_profile_dataset_rows(
             _fetch_instagram_collaborator_catalog_rows,
             normalized_account,
             limit=collaborator_limit,
+            **source_kwargs,
             posted_since=collaborator_posted_since if collaborator_posted_since is not None else posted_since,
             conn=conn,
         )
@@ -60850,6 +57781,18 @@ def _instagram_social_account_profile_dataset_rows(
             ),
         ]
     )
+    known_handle_identity_index = _build_social_account_profile_known_handle_identity_index("instagram", dataset_rows)
+    dataset_rows = [
+        row
+        for row in dataset_rows
+        if _social_account_profile_row_matches_search(
+            "instagram",
+            row,
+            account_handle=normalized_account,
+            search=search,
+            known_handle_identity_index=known_handle_identity_index,
+        )
+    ]
     post_ids = [str(row.get("id") or "").strip() for row in dataset_rows if str(row.get("id") or "").strip()]
     saved_comment_counts: dict[str, int] = {}
     saved_comment_breakdowns: dict[str, dict[str, int]] = {}
@@ -60871,6 +57814,7 @@ def _instagram_social_account_profile_dataset_rows(
                 "instagram",
                 conn=conn,
             )
+    normalized_comment_filter = _normalize_social_account_profile_comment_filter(comment_filter)
     enriched_rows: list[dict[str, Any]] = []
     for row in dataset_rows:
         normalized_row = dict(row)
@@ -60889,22 +57833,27 @@ def _instagram_social_account_profile_dataset_rows(
         normalized_row["saved_comments"] = _normalize_non_negative_int(saved_comment_counts.get(row_id, 0))
         if comments_only:
             reported_comments = _normalize_non_negative_int(normalized_row.get("comments_count"))
-            if max(reported_comments, _normalize_non_negative_int(normalized_row.get("saved_comments"))) <= 0:
+            saved_comments = _normalize_non_negative_int(normalized_row.get("saved_comments"))
+            if normalized_comment_filter == "commentable":
+                include = reported_comments > 0
+            elif normalized_comment_filter == "not_commentable":
+                include = reported_comments == 0
+            elif normalized_comment_filter == "incomplete":
+                accounted = (
+                    saved_comments
+                    + _normalize_non_negative_int(normalized_row.get("classified_missing_comments"))
+                    + instagram_facebook_comment_count_from_row(normalized_row)
+                )
+                include = reported_comments > 0 and (
+                    reported_comments - accounted > _INCOMPLETE_COMMENT_TARGET_ALLOWED_MISSING_COMMENTS
+                )
+            else:
+                include = max(reported_comments, saved_comments) > 0
+            if not include:
                 continue
         enriched_rows.append(normalized_row)
 
-    known_handle_identity_index = _build_social_account_profile_known_handle_identity_index("instagram", enriched_rows)
-    dataset_rows = [
-        row
-        for row in enriched_rows
-        if _social_account_profile_row_matches_search(
-            "instagram",
-            row,
-            account_handle=normalized_account,
-            search=search,
-            known_handle_identity_index=known_handle_identity_index,
-        )
-    ]
+    dataset_rows = enriched_rows
     dataset_rows = _sort_social_account_profile_post_rows(dataset_rows, sort_by=sort_by, sort_dir=sort_dir)
     if fetch_limit is not None:
         return dataset_rows[:fetch_limit]
@@ -61281,7 +58230,8 @@ def _fetch_instagram_owner_comments_only_profile_rows_page(
         sort_dir=sort_dir,
         missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
     )
-    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
+    owner_columns = _relation_columns("social", "instagram_posts", conn=conn)
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p", native_columns=owner_columns)
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
     use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
@@ -61454,7 +58404,8 @@ def _fetch_instagram_comments_only_profile_rows_page(
         sort_dir=sort_dir,
         missing_comments_sql="greatest(coalesce(filtered_rows.missing_comments, 0), 0)",
     )
-    owner_match_clause = _instagram_owner_account_match_sql(alias="p")
+    owner_columns = _relation_columns("social", "instagram_posts", conn=conn)
+    owner_match_clause = _instagram_owner_account_match_sql(alias="p", native_columns=owner_columns)
     lifecycle_supported = _comment_lifecycle_supported("instagram_comments", conn=conn)
     use_comment_rollups = _instagram_post_comment_rollups_available(conn=conn)
     active_condition = "c.is_missing is not true" if lifecycle_supported else "true"
@@ -61487,6 +58438,11 @@ def _fetch_instagram_comments_only_profile_rows_page(
         reported_comments_is_normalized=True,
     )
     search_where_sql, search_params = _comments_only_profile_search_where_sql(search, alias="d")
+    catalog_columns = _relation_columns("social", "instagram_account_catalog_posts", conn=conn)
+
+    def optional_field(columns: set[str], name: str, data_type: str) -> str:
+        return f"p.{name}" if name in columns else f"null::{data_type}"
+
     candidate_rows_sql = f"""
         with owner_rows as materialized (
           select
@@ -61509,14 +58465,16 @@ def _fetch_instagram_comments_only_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce({optional_field(owner_columns, "hosted_media_urls", "jsonb")}, '[]'::jsonb) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            nullif(coalesce({optional_field(owner_columns, "hosted_thumbnail_url", "text")}, ''), '')
+              as hosted_thumbnail_url,
+            nullif(coalesce({optional_field(owner_columns, "post_format", "text")}, ''), '') as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb) as collaborators_detail,
+            coalesce({optional_field(owner_columns, "collaborators_detail", "jsonb")}, '[]'::jsonb)
+              as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
             {reported_comments_expr}::bigint as comments_count,
@@ -61564,14 +58522,16 @@ def _fetch_instagram_comments_only_profile_rows_page(
             coalesce(p.media_urls, '[]'::jsonb) as media_urls,
             nullif(p.thumbnail_url, '') as thumbnail_url,
             coalesce(p.media_urls, '[]'::jsonb) as source_media_urls,
-            coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
+            coalesce({optional_field(catalog_columns, "hosted_media_urls", "jsonb")}, '[]'::jsonb) as hosted_media_urls,
             nullif(p.thumbnail_url, '') as source_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', ''), '') as hosted_thumbnail_url,
-            nullif(coalesce(to_jsonb(p) ->> 'post_format', ''), '') as post_format,
+            nullif(coalesce({optional_field(catalog_columns, "hosted_thumbnail_url", "text")}, ''), '')
+              as hosted_thumbnail_url,
+            nullif(coalesce({optional_field(catalog_columns, "post_format", "text")}, ''), '') as post_format,
             coalesce(p.hashtags, '[]'::jsonb) as hashtags,
             coalesce(p.mentions, '[]'::jsonb) as mentions,
             coalesce(p.collaborators, '[]'::jsonb) as collaborators,
-            coalesce(to_jsonb(p) -> 'collaborators_detail', p.raw_data -> 'collaborators_detail', '[]'::jsonb)
+            coalesce({optional_field(catalog_columns, "collaborators_detail", "jsonb")},
+                     p.raw_data -> 'collaborators_detail', '[]'::jsonb)
               as collaborators_detail,
             coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
             coalesce(p.likes, 0)::bigint as likes,
@@ -61818,8 +58778,16 @@ def _call_with_optional_conn(
     return loader(*args, conn=conn, **kwargs)
 
 
+@contextmanager
 def _social_account_profile_summary_connection(label: str):
-    return pg.db_read_connection(label=label, pool_name="social_profile")
+    started_at = time_module.perf_counter()
+    with pg.db_read_connection(label=label, pool_name="social_profile") as conn:
+        logger.info(
+            "Social profile connection acquired: label=%s elapsed_ms=%.1f",
+            label,
+            (time_module.perf_counter() - started_at) * 1000,
+        )
+        yield conn
 
 
 def _social_profile_perf_enabled() -> bool:
@@ -61843,7 +58811,7 @@ def _log_social_profile_perf(
     handle: str,
     breakdown: Mapping[str, float],
 ) -> None:
-    if not _social_profile_perf_enabled():
+    if route != "get_social_account_profile_summary" and not _social_profile_perf_enabled():
         return
     timings_ms = {key: float(value) for key, value in breakdown.items()}
     total_ms = sum(float(value) for value in breakdown.values())
@@ -62058,13 +59026,19 @@ def _fetch_social_account_profile_rows(
     limit: int | None = None,
     offset: int = 0,
     search: str | None = None,
-    projection: Literal["detail", "summary"] = "detail",
+    projection: Literal["detail", "summary", "search"] = "detail",
+    source_ids: list[str] | None = None,
     posted_since: datetime | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
     table, source_id_column, posted_at_column = _social_account_profile_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    owner_match_clause = _social_account_profile_owner_match_sql(platform, alias="p")
+    native_columns = None
+    if platform == "instagram" and (projection == "search" or source_ids is not None):
+        native_columns = _relation_columns("social", table, conn=conn)
+        owner_match_clause = _instagram_account_match_sql(alias="p", native_columns=frozenset(native_columns))
+    else:
+        owner_match_clause = _social_account_profile_owner_match_sql(platform, alias="p")
     params: list[Any] = [normalized_account]
     posted_since_clause = ""
     if posted_since is not None:
@@ -62075,12 +59049,21 @@ def _fetch_social_account_profile_rows(
         params.append(normalized_posted_since)
     search_clause, search_params = _social_account_profile_search_sql_parts(platform, search=search)
     params.extend(search_params)
+    source_ids_clause = ""
+    if source_ids is not None:
+        source_ids_clause = f"and p.{source_id_column} = any(%s::text[])"
+        params.append(source_ids)
     limit_clause = ""
     if limit is not None:
         safe_limit = max(1, min(int(limit), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
         limit_clause = "limit %s offset %s"
         params.extend([safe_limit, max(0, int(offset))])
-    if projection == "summary":
+    if projection == "search":
+        select_fields = _instagram_profile_search_projection_sql(
+            source_id_column,
+            native_columns=native_columns or set(),
+        )
+    elif projection == "summary":
         summary_raw_data_sql = _social_account_profile_summary_raw_data_sql(platform, alias="p")
         select_fields = f"""
           p.id::text as id,
@@ -62150,6 +59133,7 @@ def _fetch_social_account_profile_rows(
         where {owner_match_clause}
           {posted_since_clause}
           {search_clause}
+          {source_ids_clause}
         order by p.{posted_at_column} desc nulls last, p.id desc
         {limit_clause}
         """
@@ -63195,9 +60179,42 @@ def _instagram_social_account_lite_header_stats(
     conn: Any | None = None,
 ) -> dict[str, Any]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
-    reported_comments_expr = _instagram_reported_comments_sql("p")
-    external_facebook_comments_expr = _instagram_external_facebook_comments_sql("p")
+    raw_data_sql = _instagram_profile_summary_raw_sql("instagram_posts", conn=conn)
+    owner_match_clause = _instagram_account_match_sql(
+        alias="p",
+        native_columns=frozenset(
+            {"source_account", "owner_username", "username", "raw_data", "collaborators", "collaborators_detail"}
+        ),
+        raw_data_sql=raw_data_sql,
+    )
+    reported_comments_expr = _instagram_reported_comments_sql("p", raw_data_sql=raw_data_sql)
+    external_facebook_comments_expr = _instagram_external_facebook_comments_sql("p", raw_data_sql=raw_data_sql)
+    media_count_expr = "jsonb_array_length(coalesce(p.media_urls, '[]'::jsonb))"
+    hosted_media_count_expr = "jsonb_array_length(coalesce(p.hosted_media_urls, '[]'::jsonb))"
+    params = [normalized_account]
+    if "profile_summary_header" in _relation_columns("social", "instagram_posts", conn=conn):
+        # These exact per-post values are maintained with source writes. Old
+        # schemas, unfilled rows and malformed legacy values keep the fallback.
+        header = "p.profile_summary_header"
+        owner_match_clause = (
+            f"case when {header} is not null then {header} -> 'accounts' ? %s::text else ({owner_match_clause}) end"
+        )
+        params.append(normalized_account)
+        reported_comments_expr = (
+            f"case when {header} is not null then ({header} ->> 'reported_comments')::bigint "
+            f"else ({reported_comments_expr}) end"
+        )
+        external_facebook_comments_expr = (
+            f"case when {header} is not null then ({header} ->> 'facebook_comments')::bigint "
+            f"else ({external_facebook_comments_expr}) end"
+        )
+        media_count_expr = (
+            f"case when {header} is not null then ({header} ->> 'media_count')::int else {media_count_expr} end"
+        )
+        hosted_media_count_expr = (
+            f"case when {header} is not null then ({header} ->> 'hosted_media_count')::int "
+            f"else {hosted_media_count_expr} end"
+        )
     sql = f"""
             with filtered_posts as materialized (
               select
@@ -63207,8 +60224,8 @@ def _instagram_social_account_lite_header_stats(
                 {reported_comments_expr}::int as reported_comments,
                 {external_facebook_comments_expr}::int as external_facebook_comments,
                 coalesce(p.views, 0)::bigint as views,
-                coalesce(p.media_urls, '[]'::jsonb) as media_urls,
-                coalesce(p.hosted_media_urls, '[]'::jsonb) as hosted_media_urls,
+                {media_count_expr} as media_count,
+                {hosted_media_count_expr} as hosted_media_count,
                 nullif(p.hosted_owner_profile_pic_url, '') as hosted_owner_profile_pic_url
               from social.instagram_posts p
               where {owner_match_clause}
@@ -63224,9 +60241,9 @@ def _instagram_social_account_lite_header_stats(
                 count(*) filter (where reported_comments > 0)::int as retrieved_comment_posts,
                 coalesce(sum(reported_comments), 0)::int as retrieved_comments,
                 coalesce(sum(external_facebook_comments), 0)::int as external_facebook_comments,
-                coalesce(sum(jsonb_array_length(media_urls)), 0)::int as total_post_media_files,
+                coalesce(sum(media_count), 0)::int as total_post_media_files,
                 coalesce(
-                  sum(least(jsonb_array_length(hosted_media_urls), jsonb_array_length(media_urls))),
+                  sum(least(hosted_media_count, media_count)),
                   0
                 )::int as saved_post_media_files,
                 count(distinct hosted_owner_profile_pic_url)::int as saved_avatar_files
@@ -63284,10 +60301,10 @@ def _instagram_social_account_lite_header_stats(
             cross join comment_totals
             """
     if conn is None:
-        row = pg.fetch_one(sql, [normalized_account]) or {}
+        row = pg.fetch_one(sql, params) or {}
     else:
         with pg.db_cursor(conn=conn, label="instagram_lite_header_stats") as cur:
-            row = pg.fetch_one_with_cursor(cur, sql, [normalized_account]) or {}
+            row = pg.fetch_one_with_cursor(cur, sql, params) or {}
     totals = {
         "total_posts": _normalize_non_negative_int(row.get("total_posts")),
         "total_engagement": _normalize_non_negative_int(row.get("total_engagement")),
@@ -63946,11 +60963,10 @@ def get_active_social_account_comments_run(*args: Any, **kwargs: Any) -> Any:
 SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS: tuple[str, ...] = ("post_details", "comments", "media")
 
 
-def _tiktok_catalog_comment_override_enabled() -> bool:
-    raw = (os.getenv("SOCIAL_TIKTOK_CATALOG_BACKFILL_COMMENT_OVERRIDE_ENABLED") or "").strip().lower()
-    if not raw:
-        return True
-    return raw in {"1", "true", "yes", "on"}
+def _tiktok_catalog_comment_override_enabled(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.shared_catalog.config import _LOCAL_ROOM_FUNCTIONS
+
+    return _LOCAL_ROOM_FUNCTIONS["_tiktok_catalog_comment_override_enabled"](*args, **kwargs)
 
 
 def _normalize_social_account_catalog_backfill_selected_tasks(selected_tasks: Sequence[Any] | None) -> list[str]:
@@ -64127,122 +61143,10 @@ def _configure_instagram_posts_control_legacy_provider() -> None:
 _configure_instagram_posts_control_legacy_provider()
 
 
-def start_tiktok_posts_scrapling_scrape(
-    *,
-    account_handle: str,
-    max_pages: int | None = None,
-    source_scope: str = "network",
-    season_id: str | None = None,
-    initiated_by: str | None = None,
-    inline_worker_id: str | None = None,
-) -> dict[str, Any]:
-    """Enqueue a manual posts_scrapling scrape run for one TikTok account.
+def start_tiktok_posts_scrapling_scrape(*args: Any, **kwargs: Any) -> Any:
+    from trr_backend.socials.tiktok.lane_start import _LOCAL_ROOM_FUNCTIONS
 
-    Returns: {run_id, job_id, status, platform, account_handle, required_worker_lane}
-    Raises: SocialIngestValidationError on bad args, SocialIngestConflictError on concurrent run.
-    """
-    normalized_platform = "tiktok"
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    if not normalized_account:
-        raise SocialIngestValidationError(
-            "SOCIAL_POSTS_SCRAPLING_ACCOUNT_REQUIRED",
-            "A TikTok account handle is required.",
-        )
-    _assert_social_account_profile_exists(normalized_platform, normalized_account)
-
-    lock_key = _social_account_posts_scrapling_start_lock_key(normalized_platform, normalized_account)
-    lock_label = f"posts-scrapling-start-lock:tiktok:{normalized_account[:48]}"
-    # Keep the recovery advisory lock out of the default query pool. Modal
-    # social workers intentionally cap the default session-pooler connection at
-    # one, and recovery finalization performs normal catalog queries while the
-    # lock is held.
-    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
-        with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
-            lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
-        if not bool(lock_row.get("locked")):
-            active_run = get_active_social_account_posts_scrapling_run(normalized_platform, normalized_account)
-            raise SocialIngestConflictError(
-                "SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE",
-                f"Posts_scrapling run already active for @{normalized_account}.",
-                detail=active_run or {"platform": normalized_platform, "account_handle": normalized_account},
-            )
-        try:
-            active_run = get_active_social_account_posts_scrapling_run(normalized_platform, normalized_account)
-            if active_run:
-                raise SocialIngestConflictError(
-                    "SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE",
-                    f"Posts_scrapling run {active_run.get('run_id')} already active for @{normalized_account}.",
-                    detail=active_run,
-                )
-            if is_queue_enabled():
-                assert_worker_available_when_queue_enabled(
-                    required_worker_lane=TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
-                    platform=normalized_platform,
-                )
-
-            run_status = "queued" if is_queue_enabled() else "pending"
-            run_config = {
-                "platform": normalized_platform,
-                "account": normalized_account,
-                "source_scope": source_scope,
-                "stage": TIKTOK_POSTS_SCRAPLING_STAGE,
-                "max_pages": max_pages,
-                "season_id": season_id,
-                "required_worker_lane": TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
-                "ingest_mode": "posts_only",
-            }
-            run_id = _create_run(
-                None,
-                source_scope=source_scope,
-                initiated_by=initiated_by,
-                config=run_config,
-                status=run_status,
-            )
-            try:
-                job_id = _create_job(
-                    None,
-                    run_id=run_id,
-                    platform=normalized_platform,
-                    source_scope=source_scope,
-                    job_type="posts",
-                    stage=TIKTOK_POSTS_SCRAPLING_STAGE,
-                    config={**run_config, "account": normalized_account},
-                    initiated_by=initiated_by,
-                    status=run_status,
-                    priority=105,
-                    worker_id=inline_worker_id,
-                    preclaim=bool(inline_worker_id),
-                )
-            except Exception:  # noqa: BLE001
-                try:
-                    _set_run_status(run_id, "failed")
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "[posts-scrapling-start] failed to mark orphaned tiktok run as failed run_id=%s",
-                        run_id,
-                        exc_info=True,
-                    )
-                raise
-            if is_queue_enabled():
-                dispatch_due_social_jobs(run_id=run_id)
-            return {
-                "run_id": run_id,
-                "job_id": job_id,
-                "status": run_status,
-                "platform": normalized_platform,
-                "account_handle": normalized_account,
-                "required_worker_lane": TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
-            }
-        finally:
-            try:
-                with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
-                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "[posts-scrapling-start-lock] advisory unlock failed for tiktok/%s",
-                    normalized_account,
-                    exc_info=True,
-                )
+    return _LOCAL_ROOM_FUNCTIONS["start_tiktok_posts_scrapling_scrape"](*args, **kwargs)
 
 
 def _build_comments_scrape_run_progress_payload(*args: Any, **kwargs: Any) -> Any:
@@ -68388,6 +65292,24 @@ for _provider_path in (
     "trr_backend.socials.control_plane.runtime",
     "trr_backend.socials.control_plane.shared_accounts",  # noqa: E501
     "trr_backend.socials.instagram.catalog_ingest",
+    "trr_backend.socials.tiktok.cookies",
+    "trr_backend.socials.tiktok.parsing.sounds",
+    "trr_backend.socials.tiktok.posts.persistence",
+    "trr_backend.socials.tiktok.comments.persistence",
+    "trr_backend.socials.tiktok.comments.coverage",
+    "trr_backend.socials.tiktok.comments.media_mirror",
+    "trr_backend.socials.tiktok.posts.ingest",
+    "trr_backend.socials.tiktok.shared_catalog.context",
+    "trr_backend.socials.tiktok.shared_catalog.config",
+    "trr_backend.socials.tiktok.shared_catalog.discovery",
+    "trr_backend.socials.tiktok.shared_catalog.scrape",
+    "trr_backend.socials.tiktok.shared_catalog.persistence",
+    "trr_backend.socials.tiktok.analytics.week",
+    "trr_backend.socials.tiktok.analytics.filters",
+    "trr_backend.socials.tiktok.analytics.header_stats",
+    "trr_backend.socials.tiktok.alerts",
+    "trr_backend.socials.tiktok.lane_start",
+    "trr_backend.socials.tiktok.analytics.reads",
     "trr_backend.socials.pipelines.account_catalog.launch",  # noqa: E501
     "trr_backend.socials.pipelines.comments.instagram",
 ):

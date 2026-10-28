@@ -1,0 +1,43 @@
+{
+  "status": "PASS",
+  "engine": "DBOS 3.3.0",
+  "pinned_application_version": "partition-v1",
+  "business_run_id": "partitioned-1000",
+  "targets_per_partition": 50,
+  "partitions": 20,
+  "max_history_steps_per_workflow": 51,
+  "total_history_steps": 1020,
+  "at_crash": {
+    "targets": 1000,
+    "dispatches": 50,
+    "receipts": 50,
+    "attempts": 50
+  },
+  "cursor_at_crash": 50,
+  "continuation_intents_at_crash": [
+    [
+      0,
+      true
+    ],
+    [
+      1,
+      false
+    ]
+  ],
+  "outcomes": {
+    "targets": 1000,
+    "dispatches": 1000,
+    "receipts": 1000,
+    "attempts": 1000
+  },
+  "final_cursor": 1000,
+  "all_continuations_completed": true,
+  "postgres_statement_calls": 20817,
+  "database_bytes": 9828019,
+  "retained_relation_bytes_by_schema": {
+    "dbos": 974848,
+    "public": 630784
+  },
+  "sampled_peak_sessions_excluding_observer": 4,
+  "seconds_including_forced_crash_and_recovery": 17.767
+}

@@ -1,0 +1,8 @@
+{
+  "source_sha256": "358eee16bfbee37d81b16f9129b9c7b4677ab2b0f2533af7c6db35c972a8f3fe",
+  "source": "scripts/ingestion_engine_eval/dbos_partitioned.py",
+  "command": "python scripts/ingestion_engine_eval/dbos_partitioned.py --runtime-dir /tmp/trr-dbos-partitioned-1000-6f437318",
+  "result": "PASS:20partitions,max51steps,1000unique outcomes,atomic cursor/outbox continuation recovered",
+  "earlier_evidence_unchanged": true,
+  "limits": "finite local DBOS proof; no global storage bound, live provider or Temporal partitioning claim"
+}

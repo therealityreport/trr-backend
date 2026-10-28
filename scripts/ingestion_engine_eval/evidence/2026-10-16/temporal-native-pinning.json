@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "same_task_queue": true,
+  "promoted_current_version": "v2",
+  "old_execution_held_without_v1": true,
+  "recovered_activity_version": "v1",
+  "versioning_info": "behavior: VERSIONING_BEHAVIOR_PINNED\nversion: \"trr-eval-pinning.v1\"\ndeployment_version {\n  build_id: \"v1\"\n  deployment_name: \"trr-eval-pinning\"\n}\nrevision_number: 1\n"
+}

@@ -1273,3 +1273,32 @@ def test_get_reddit_analytics_posts_forwards_filters(
         page=1,
         per_page=10,
     )
+
+
+def test_analytics_summary_forwards_validated_display_windows(client, monkeypatch):
+    import json
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    community_id, season_id = str(uuid4()), str(uuid4())
+    windows = [{"key": "episode-1", "start": "2026-10-01T19:01:01-04:00", "end": "2026-10-08T19:01:10-04:00"}]
+    with patch(
+        "trr_backend.repositories.reddit_refresh.get_reddit_community_analytics_summary", return_value={}
+    ) as repo:
+        response = client.get(
+            f"/api/v1/admin/socials/reddit/analytics/community/{community_id}/summary",
+            params={"season_id": season_id, "windows": json.dumps(windows)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    assert repo.call_args.kwargs["windows"] == [
+        {"key": "episode-1", "start": "2026-10-01T23:01:01Z", "end": "2026-10-08T23:01:10Z"}
+    ]
+    with patch("trr_backend.repositories.reddit_refresh.get_reddit_community_analytics_summary") as repo:
+        response = client.get(
+            f"/api/v1/admin/socials/reddit/analytics/community/{community_id}/summary",
+            params={"season_id": season_id, "windows": '[{"key":"bad"}]'},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 400
+    repo.assert_not_called()

@@ -68,3 +68,70 @@ def test_scrape_tiktok_returns_safe_diagnostics_subset(monkeypatch) -> None:
         "triage_bucket",
         "profile_enrichment_status",
     }
+
+
+def test_scrape_tiktok_runs_scraper_off_the_event_loop_thread(monkeypatch) -> None:
+    import threading
+
+    captured: dict[str, Any] = {}
+
+    class _FakeScraper:
+        def __init__(self, *, cookies=None):  # noqa: ANN003
+            self.last_retrieval_meta: dict[str, Any] = {}
+
+        def scrape(self, config):  # noqa: ANN001
+            captured["scrape_thread"] = threading.get_ident()
+            captured["config"] = config
+            return []
+
+    monkeypatch.setattr(socials_router, "_load_social_auth_or_503", lambda **_kwargs: {"sessionid": "c"})
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
+
+    async def _call() -> Any:
+        captured["loop_thread"] = threading.get_ident()
+        return await socials_router.scrape_tiktok(
+            socials_router.TikTokScrapeRequest(
+                username="bravotv",
+                hashtags=["RHOSLC"],
+                date_start=datetime(2025, 1, 1, tzinfo=UTC),
+                date_end=datetime(2025, 1, 2, tzinfo=UTC),
+                max_pages=2,
+            ),
+            {"email": "admin@example.com"},
+        )
+
+    payload = asyncio.run(_call())
+
+    assert payload.success is True
+    assert captured["scrape_thread"] != captured["loop_thread"]
+    # max_pages is translated into the yt-dlp matched-post cap (2 pages x 50 posts).
+    assert captured["config"].ytdlp_max_videos_hint == 100
+
+
+def test_scrape_tiktok_without_max_pages_keeps_ytdlp_uncapped(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeScraper:
+        def __init__(self, *, cookies=None):  # noqa: ANN003
+            self.last_retrieval_meta: dict[str, Any] = {}
+
+        def scrape(self, config):  # noqa: ANN001
+            captured["config"] = config
+            return []
+
+    monkeypatch.setattr(socials_router, "_load_social_auth_or_503", lambda **_kwargs: {"sessionid": "c"})
+    monkeypatch.setattr("trr_backend.socials.tiktok.scraper.TikTokScraper", _FakeScraper)
+
+    asyncio.run(
+        socials_router.scrape_tiktok(
+            socials_router.TikTokScrapeRequest(
+                username="bravotv",
+                hashtags=["RHOSLC"],
+                date_start=datetime(2025, 1, 1, tzinfo=UTC),
+                date_end=datetime(2025, 1, 2, tzinfo=UTC),
+            ),
+            {"email": "admin@example.com"},
+        )
+    )
+
+    assert captured["config"].ytdlp_max_videos_hint is None

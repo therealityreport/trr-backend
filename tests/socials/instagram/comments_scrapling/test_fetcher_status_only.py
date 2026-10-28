@@ -7,6 +7,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from trr_backend.socials.instagram.comments_scrapling.counts import (
     child_reply_count,
@@ -89,18 +90,38 @@ def test_public_comments_coverage_stays_partial_on_exhausted_relay_with_display_
     assert metadata["fallback_blocked_reason"] == "public_comments_partial_public_recovery_pending"
 
 
-def test_public_comments_coverage_complete_when_effective_target_is_met() -> None:
+@pytest.mark.parametrize(
+    "advertised,recovered,limit,reason,missing,classification,limited,exhausted",
+    [
+        (27_000, 100, 100, "graphql_relay_target_reached", 0, "public_partial", True, False),
+        (27_000, 100, 100, "pagination_complete", 0, "public_partial", True, True),
+        (None, 100, 100, "graphql_relay_target_reached", 0, "public_partial", True, False),
+        (100, 100, 100, "graphql_relay_target_reached", 0, "public_partial", True, False),
+        (100, 100, 100, "pagination_complete", 0, "public_complete", False, True),
+        (100, 100, 0, "graphql_relay_target_reached", 0, "public_complete", False, False),
+        (None, 5, 100, "pagination_complete", 0, "public_complete", False, True),
+        (100, 100, 0, "pagination_complete", 2, "public_partial", False, True),
+    ],
+)
+def test_public_comments_coverage_distinguishes_request_limit_from_completion(
+    advertised, recovered, limit, reason, missing, classification, limited, exhausted
+) -> None:
     metadata = _public_comments_coverage_metadata(
-        advertised_count=27_000,
-        recovered_count=100,
-        terminal_reason="pagination_complete",
-        max_comments=100,
-        missing_replies=0,
+        advertised_count=advertised,
+        recovered_count=recovered,
+        terminal_reason=reason,
+        max_comments=limit,
+        missing_replies=missing,
     )
 
-    assert metadata["classification"] == "public_complete"
-    assert metadata["effective_target_count"] == 100
-    assert metadata["fallback_blocked_reason"] is None
+    assert metadata["classification"] == classification
+    assert metadata["request_limit_reached"] is (limit > 0 and recovered >= limit)
+    assert metadata["limited_by_request"] is limited
+    assert metadata["source_exhausted"] is exhausted
+    if limited or classification == "public_complete":
+        assert metadata["fallback_blocked_reason"] is None
+    else:
+        assert metadata["fallback_blocked_reason"] == "public_comments_partial_public_recovery_pending"
 
 
 def test_public_relay_nested_graphql_rate_limit_code_is_blocking() -> None:
@@ -1439,3 +1460,515 @@ def test_single_session_load_all_uses_rendered_hydration_only_after_api_gap(monk
     assert result.diagnostic_metadata["rendered_merged_comments"] == 1
     assert result.diagnostic_metadata["merged_comments"] == 2
     fetcher._fetch_rendered_single_session_load_all.assert_awaited_once()
+
+
+def test_public_only_runtime_metadata_does_not_claim_unused_browser(monkeypatch):
+    from trr_backend.socials.instagram.comments_scrapling import fetcher as module
+
+    monkeypatch.setattr(
+        module, "build_stealthy_fetcher", lambda: (_ for _ in ()).throw(AssertionError("browser built"))
+    )
+    fetcher = InstagramCommentsScraplingFetcher(cookies=[], raw_cookies={}, browser_account_id=None, public_only=True)
+    metadata = fetcher.runtime_metadata
+    assert metadata["scrapling_fetcher_class"] is None
+    assert metadata["browser_used"] is False and metadata["http_client"] is None
+    fetcher._parser.session.close()
+
+
+def test_relay_runtime_metadata_reports_actual_http_client(monkeypatch):
+    from trr_backend.socials.instagram.comments_scrapling import fetcher as module
+
+    class _CurlCffiAsyncClient:
+        cookies = httpx.Cookies()
+
+        def __init__(self, **_kwargs):
+            self.requests = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **_kwargs):
+            self.requests.append(url)
+            return httpx.Response(403, request=httpx.Request("GET", url))
+
+    fetcher = _build_fetcher()
+    monkeypatch.setattr(module, "build_comments_async_client", _CurlCffiAsyncClient)
+    monkeypatch.setattr(fetcher, "_pace_api_requests", AsyncMock(return_value=True))
+    try:
+        comments, metadata = asyncio.run(
+            fetcher._fetch_public_relay_coauthor_comments_for_status_only(
+                "AAAABC",
+                "https://www.instagram.com/p/AAAABC/",
+                allow_authenticated=False,
+                use_proxy=False,
+                max_comments=5,
+                fetch_replies=False,
+            )
+        )
+        assert comments == [] and metadata["reason"] == "graphql_relay_post_page_unavailable"
+        assert fetcher.runtime_metadata["http_client"] == "curl_cffi"
+        assert fetcher.runtime_metadata["transport"] == "curl_cffi"
+        assert fetcher.runtime_metadata["browser_used"] is False
+        assert fetcher.runtime_metadata["scrapling_fetcher_class"] is None
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+@pytest.mark.parametrize("missing_replies", [False, True])
+@pytest.mark.parametrize("terminal_reason", ["graphql_relay_target_reached", "http_429"])
+def test_public_relay_request_limit_is_partial_without_automatic_retry(missing_replies, terminal_reason):
+    fetcher = InstagramCommentsScraplingFetcher(cookies=[], raw_cookies={}, browser_account_id=None, public_only=True)
+    comments = [_comment(str(index), reply_count=2 if index == 0 and missing_replies else 0) for index in range(5)]
+    fetcher._fetch_public_relay_coauthor_comments_for_status_only = AsyncMock(
+        return_value=(comments, {"reason": terminal_reason, "pages": [{"has_next_page": True}]})
+    )
+    try:
+        result = asyncio.run(
+            fetcher.fetch_comments_for_shortcode(
+                "AAAABC", max_comments=5, fetch_replies=False, expected_comment_count=50, load_strategy="public_relay"
+            )
+        )
+        metadata = result.diagnostic_metadata["public_comments"]
+        assert metadata["classification"] == "public_partial"
+        assert metadata["request_limit_reached"] is True and metadata["source_exhausted"] is False
+        assert result.fetch_failed is (terminal_reason == "http_429")
+        assert result.retryable is False
+        assert result.fetch_reason == terminal_reason
+        assert metadata["missing_reply_count"] == (2 if missing_replies else 0)
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+def _relay_budget_node(identity, *, reply_count=0, previews=()):
+    node = {
+        "pk": identity,
+        "text": f"comment {identity}",
+        "created_at": 1772766459,
+        "child_comment_count": reply_count,
+        "user": {"pk": f"user-{identity}", "username": f"user{identity}"},
+    }
+    if previews:
+        node["edge_threaded_comments"] = {
+            "count": reply_count,
+            "edges": [{"node": _relay_budget_node(child)} for child in previews],
+            "page_info": {"has_next_page": True, "end_cursor": "inline-next"},
+        }
+    return node
+
+
+def _relay_budget_page(nodes, *, child=False, more=True, cursor="next"):
+    key = (
+        "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection"
+        if child
+        else "xdt_api__v1__media__media_id__comments__connection"
+    )
+    return httpx.Response(
+        200,
+        json={
+            "data": {
+                key: {
+                    "edges": [{"node": node} for node in nodes],
+                    "page_info": {"has_next_page": more, "end_cursor": cursor if more else None},
+                }
+            }
+        },
+    )
+
+
+def _run_public_budget_sample(monkeypatch, *, cap, fetch_replies, parent_pages, child_pages):
+    from trr_backend.socials.instagram.comments_scrapling import fetcher as module
+
+    calls = []
+    parent_pages, child_pages = list(parent_pages), list(child_pages)
+    client = MagicMock()
+    client.cookies = httpx.Cookies()
+    client.get = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            text='"LSD",[],{"token":"fixture"}',
+            request=httpx.Request("GET", "https://www.instagram.com/p/AAAABC/"),
+        )
+    )
+
+    async def post(_url, *, data, **_kwargs):
+        variables = json.loads(data["variables"])
+        child = "parent_comment_id" in variables
+        calls.append(("child" if child else "parent", variables))
+        pages = child_pages if child else parent_pages
+        assert pages, "unexpected source request after the sample budget or block"
+        response = pages.pop(0)
+        response.request = httpx.Request("POST", _url)
+        return response
+
+    client.post = AsyncMock(side_effect=post)
+    monkeypatch.setattr(module, "build_comments_async_client", lambda **_kw: _AsyncClientContext(client))
+    monkeypatch.setattr(module, "_post_comments_graphql_doc_ids", lambda *_: ["parent-doc"])
+    monkeypatch.setattr(module, "_post_child_comments_graphql_doc_attempts", lambda: [("child-query", "child-doc")])
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    try:
+        result = asyncio.run(
+            fetcher.fetch_comments_for_shortcode(
+                "AAAABC",
+                max_comments=cap,
+                fetch_replies=fetch_replies,
+                expected_comment_count=1000,
+                load_strategy="public_relay",
+            )
+        )
+        return result, calls
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+@pytest.mark.parametrize("cap", [1, 2, 100])
+@pytest.mark.parametrize("fetch_replies", [False, True])
+def test_public_sample_reserves_reply_room_within_total_cap(monkeypatch, cap, fetch_replies):
+    parents = [_relay_budget_node(str(index), reply_count=1000 if index == cap - 1 else 0) for index in range(cap)]
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=cap,
+        fetch_replies=fetch_replies,
+        parent_pages=[_relay_budget_page(parents)],
+        child_pages=[_relay_budget_page([_relay_budget_node(f"reply-{index}") for index in range(50)], child=True)],
+    )
+    assert flattened_comment_count(result.comments) == cap
+    expected_replies = 1 if fetch_replies and cap > 1 else 0
+    assert child_reply_count(result.comments) == expected_replies
+    assert [kind for kind, _ in calls] == (["parent", "child"] if expected_replies else ["parent"])
+    if expected_replies:
+        assert calls[-1][1]["first"] == 1
+        assert result.diagnostic_metadata["relay_comments"]["pages"][0]["reply_slots_reserved"] == 1
+    assert not result.fetch_failed and not result.retryable
+
+
+def test_public_sample_hydrates_between_parent_pages_and_counts_inline_previews(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=5,
+        fetch_replies=True,
+        parent_pages=[
+            _relay_budget_page([_relay_budget_node("p1", reply_count=3, previews=["preview"])]),
+            _relay_budget_page([_relay_budget_node("p2")]),
+        ],
+        child_pages=[_relay_budget_page([_relay_budget_node("r1"), _relay_budget_node("r2")], child=True, more=False)],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "child", "parent"]
+    assert flattened_comment_count(result.comments) == 5
+    assert parent_comment_count(result.comments) == 2 and child_reply_count(result.comments) == 3
+
+
+def test_public_sample_without_reply_gaps_continues_parent_pages(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=3,
+        fetch_replies=True,
+        parent_pages=[
+            _relay_budget_page([_relay_budget_node("p1")]),
+            _relay_budget_page([_relay_budget_node("p2"), _relay_budget_node("p3")]),
+        ],
+        child_pages=[],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "parent"]
+    assert flattened_comment_count(result.comments) == 3 and child_reply_count(result.comments) == 0
+
+
+def test_public_sample_inline_reply_tree_cannot_overflow_total_cap(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=2,
+        fetch_replies=False,
+        parent_pages=[
+            _relay_budget_page(
+                [
+                    _relay_budget_node("p1", reply_count=4, previews=["r1", "r2", "r3", "r4"]),
+                    _relay_budget_node("p2"),
+                ]
+            )
+        ],
+        child_pages=[],
+    )
+    assert [kind for kind, _ in calls] == ["parent"]
+    assert flattened_comment_count(result.comments) == 2
+
+
+def test_public_child_budget_deduplicates_existing_ids_before_count_and_stops_pages(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=5,
+        fetch_replies=True,
+        parent_pages=[_relay_budget_page([_relay_budget_node("p1", reply_count=100, previews=["preview"])])],
+        child_pages=[
+            _relay_budget_page(
+                [_relay_budget_node("preview"), _relay_budget_node("r1"), _relay_budget_node("r1")], child=True
+            ),
+            _relay_budget_page(
+                [
+                    _relay_budget_node("r1"),
+                    _relay_budget_node("r2"),
+                    _relay_budget_node("r3"),
+                    _relay_budget_node("overflow"),
+                ],
+                child=True,
+            ),
+        ],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "child", "child"]
+    assert [variables["first"] for kind, variables in calls if kind == "child"] == [3, 2]
+    assert flattened_comment_count(result.comments) == 5
+    assert [reply.comment_id for reply in result.comments[0].replies] == ["preview", "r1", "r2", "r3"]
+
+
+def test_public_child_block_after_partial_replies_is_not_target_success(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=5,
+        fetch_replies=True,
+        parent_pages=[_relay_budget_page([_relay_budget_node("p1", reply_count=10)])],
+        child_pages=[
+            _relay_budget_page([_relay_budget_node("r1")], child=True),
+            httpx.Response(429, text="rate limited"),
+        ],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "child", "child"]
+    assert result.fetch_failed and not result.retryable
+    assert result.fetch_reason == "http_429" and result.public_block_signal != "none"
+    assert result.diagnostic_metadata["public_comments"]["classification"] == "public_partial"
+    assert child_reply_count(result.comments) == 1
+
+
+def test_public_sample_reserves_reply_slot_when_gap_parent_arrives_on_later_page(monkeypatch):
+    result, calls = _run_public_budget_sample(
+        monkeypatch,
+        cap=3,
+        fetch_replies=True,
+        parent_pages=[
+            _relay_budget_page([_relay_budget_node("p1"), _relay_budget_node("p2")]),
+            _relay_budget_page([_relay_budget_node("p3", reply_count=10)]),
+        ],
+        child_pages=[_relay_budget_page([_relay_budget_node("r1")], child=True)],
+    )
+    assert [kind for kind, _ in calls] == ["parent", "parent", "child"]
+    assert [parent.comment_id for parent in result.comments] == ["p1", "p3"]
+    assert [reply.comment_id for reply in result.comments[-1].replies] == ["r1"]
+    assert flattened_comment_count(result.comments) == 3
+    assert parent_comment_count(result.comments) == 2 and child_reply_count(result.comments) == 1
+    assert result.diagnostic_metadata["relay_comments"]["pages"][-1]["reply_slots_reserved"] == 1
+
+
+def test_public_relay_child_hydration_probes_unknown_without_zero_probe_allowance(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", raising=False)
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parent = _comment("unknown-parent")
+    parent.reply_count = parent.child_comment_count = None
+    public_client = MagicMock()
+    public_client.post = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection": {
+                        "edges": [],
+                        "page_info": {"has_next_page": False, "end_cursor": None},
+                    }
+                },
+            },
+        )
+    )
+    metadata = asyncio.run(
+        fetcher._fetch_public_relay_child_comments_for_status_only(
+            public_client=public_client,
+            shortcode="fixture",
+            post_url="https://www.instagram.com/p/fixture/",
+            media_id="123",
+            comments=[parent],
+            graphql_headers={},
+            common_body={},
+            target_count=None,
+            max_comments=0,
+        )
+    )
+    assert public_client.post.await_count == 1
+    assert metadata["zero_count_parent_probes"] == 0
+    assert parent.reply_count is None and parent.child_comment_count is None
+
+
+def _run_default_child_contract(monkeypatch, *, strict, resume=None, rejected=False):
+    for key in ("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_DOC_IDS", "INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_PAGE_SIZE", "12")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PUBLIC_COMMENTS_ZERO_REPLY_PROBE_LIMIT", "0")
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parent = _comment("18034559608366960")
+    parent.reply_count = parent.child_comment_count = None
+    client = MagicMock()
+    client.cookies = httpx.Cookies()
+    payloads = []
+    fetcher._source_payload_observer = lambda kind, payload: payloads.append((kind, payload))
+    node = _relay_budget_node("17928451544257455")
+    node["parent_comment_id"] = parent.comment_id
+    response = (
+        httpx.Response(
+            200,
+            json={
+                "errors": [
+                    {"code": 1675004, "message": "Rate limit exceeded", "severity": "CRITICAL"},
+                ]
+            },
+        )
+        if rejected
+        else _relay_budget_page([node], child=True, more=False)
+    )
+    response.request = httpx.Request("POST", "https://www.instagram.com/graphql/query/")
+    client.post = AsyncMock(return_value=response)
+    try:
+        metadata = asyncio.run(
+            fetcher._fetch_public_relay_child_comments_for_status_only(
+                public_client=client,
+                shortcode="CfhVcINpHiY",
+                post_url="https://www.instagram.com/p/CfhVcINpHiY/",
+                media_id="2873672329179986072",
+                comments=[parent],
+                graphql_headers={},
+                common_body={},
+                target_count=None,
+                max_comments=0,
+                relay_is_logged_in=False,
+                strict_native_exhaustion=strict,
+                durable_resume=resume,
+            )
+        )
+        return metadata, parent, client.post.await_args_list, payloads
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_default_child_contract_prefers_proven_secondary_and_merges_unknown_count_reply(monkeypatch, strict):
+    metadata, parent, calls, payloads = _run_default_child_contract(monkeypatch, strict=strict)
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.args == ("https://www.instagram.com/graphql/query/",)
+    assert request.kwargs["data"]["doc_id"] == "36239935742272683"
+    assert request.kwargs["data"]["fb_api_req_friendly_name"] == "PolarisPostCommentsChildrenPaginationtQuery"
+    assert request.kwargs["headers"]["x-fb-friendly-name"] == "PolarisPostCommentsChildrenPaginationtQuery"
+    assert json.loads(request.kwargs["data"]["variables"]) == {
+        "__relay_internal__pv__PolarisIsLoggedInrelayprovider": False,
+        "first": 12,
+        "is_chronological": False,
+        "media_id": "2873672329179986072",
+        "parent_comment_id": "18034559608366960",
+    }
+    assert metadata["merged_replies"] == 1 and metadata["pages"][0]["has_next_page"] is False
+    assert parent.reply_count is None and parent.child_comment_count is None
+    assert [reply.comment_id for reply in parent.replies] == ["17928451544257455"]
+    assert parent.replies[0].parent_comment_id == parent.comment_id
+    if strict:
+        assert metadata["native_complete"] is True
+        assert metadata["completed_parent_ids"] == [parent.comment_id]
+        assert payloads[0][1]["cursor_payload"]["relay_doc_id"] == "36239935742272683"
+
+
+def test_pinned_child_resume_keeps_primary_contract_and_exact_cursor(monkeypatch):
+    resume = {
+        "18034559608366960": {
+            "pending": True,
+            "relay_doc_id": "34884685271179117",
+            "relay_friendly_name": "PolarisPostChildCommentsQuery",
+            "page_size": 17,
+            "after": "pinned-child-tail",
+            "seen_cursors": ["pinned-child-tail"],
+        }
+    }
+    metadata, parent, calls, payloads = _run_default_child_contract(monkeypatch, strict=True, resume=resume)
+    assert len(calls) == 1
+    request = calls[0].kwargs
+    assert request["data"]["doc_id"] == "34884685271179117"
+    assert request["data"]["fb_api_req_friendly_name"] == "PolarisPostChildCommentsQuery"
+    assert request["headers"]["x-fb-friendly-name"] == "PolarisPostChildCommentsQuery"
+    variables = json.loads(request["data"]["variables"])
+    assert variables["after"] == "pinned-child-tail" and variables["first"] == 17
+    assert variables["parent_comment_id"] == parent.comment_id
+    assert metadata["native_complete"] is True
+    assert payloads[0][1]["cursor_payload"]["relay_doc_id"] == "34884685271179117"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_default_child_native_rejection_tries_one_alternate_without_identity_block(monkeypatch, strict):
+    metadata, parent, calls, _ = _run_default_child_contract(monkeypatch, strict=strict, rejected=True)
+    assert len(calls) == 2
+    assert [call.kwargs["data"]["doc_id"] for call in calls] == ["36239935742272683", "34884685271179117"]
+    assert metadata["reason"] == "reply_access_rejected"
+    assert "block_reason" not in metadata
+    assert [lane["native_code"] for lane in metadata["rejected_lanes"]] == ["1675004", "1675004"]
+    assert parent.replies == []
+    if strict:
+        assert metadata.get("native_complete") is not True
+
+
+def test_pinned_rejected_primary_falls_through_once_to_proven_alternate_root(monkeypatch):
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parent = _comment("parent")
+    parent.reply_count = parent.child_comment_count = None
+    client = MagicMock()
+    client.cookies = httpx.Cookies()
+    request = httpx.Request("POST", "https://www.instagram.com/graphql/query/")
+    client.post = AsyncMock(
+        side_effect=[
+            httpx.Response(
+                200, json={"errors": [{"code": 1675004, "message": "Rate limit exceeded"}]}, request=request
+            ),
+            _relay_budget_page([_relay_budget_node("reply")], child=True, more=False),
+        ]
+    )
+    retained = []
+    fetcher._source_payload_observer = lambda *args: retained.append(args)
+    try:
+        metadata = asyncio.run(
+            fetcher._fetch_public_relay_child_comments_for_status_only(
+                public_client=client,
+                shortcode="fixture",
+                post_url="https://www.instagram.com/p/fixture/",
+                media_id="123",
+                comments=[parent],
+                graphql_headers={},
+                common_body={},
+                target_count=None,
+                max_comments=0,
+                strict_native_exhaustion=True,
+                durable_resume={
+                    "parent": {
+                        "pending": True,
+                        "relay_doc_id": "34884685271179117",
+                        "relay_friendly_name": "PolarisPostChildCommentsQuery",
+                        "page_size": 12,
+                        "after": "old-tail",
+                        "seen_cursors": ["old-tail"],
+                    }
+                },
+            )
+        )
+        assert [call.kwargs["data"]["doc_id"] for call in client.post.await_args_list] == [
+            "34884685271179117",
+            "36239935742272683",
+        ]
+        variables = [json.loads(call.kwargs["data"]["variables"]) for call in client.post.await_args_list]
+        assert variables[0]["after"] == "old-tail" and "after" not in variables[1]
+        assert metadata["native_complete"] is True and metadata["completed_parent_ids"] == ["parent"]
+        assert metadata["rejected_lanes"] == [
+            {"parent_id": "parent", "doc_id": "34884685271179117", "native_code": "1675004"}
+        ]
+        assert [item.comment_id for item in parent.replies] == ["reply"]
+    finally:
+        asyncio.run(fetcher.aclose())
+        fetcher._parser.session.close()

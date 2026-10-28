@@ -216,13 +216,26 @@ class TestInMemoryBrokerEphemeral:
 
 
 class _FakePubSub:
-    def __init__(self) -> None:
+    def __init__(self, script: list[Any] | None = None) -> None:
         self.subscribed: list[str] = []
         self.unsubscribed: list[str] = []
         self.closed = False
+        # Each get_message() call pops one item: an exception is raised, a dict is returned.
+        self.script: list[Any] = list(script or [])
+        self.get_message_calls = 0
 
-    async def subscribe(self, room: str) -> None:
-        self.subscribed.append(room)
+    async def subscribe(self, *rooms: str) -> None:
+        self.subscribed.extend(rooms)
+
+    async def get_message(self, *, ignore_subscribe_messages: bool = False, timeout: float | None = 0.0):
+        self.get_message_calls += 1
+        if self.script:
+            item = self.script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        await asyncio.sleep(timeout or 0)
+        return None
 
     async def unsubscribe(self, room: str) -> None:
         self.unsubscribed.append(room)
@@ -237,8 +250,14 @@ class _FakePubSub:
 
 
 class _FakeRedis:
-    def __init__(self, *, scan_keys: list[str] | None = None, ping_error: BaseException | None = None) -> None:
-        self.pubsub_instance = _FakePubSub()
+    def __init__(
+        self,
+        *,
+        scan_keys: list[str] | None = None,
+        ping_error: BaseException | None = None,
+        pubsub_script: list[Any] | None = None,
+    ) -> None:
+        self.pubsub_instance = _FakePubSub(pubsub_script)
         self.scan_keys = scan_keys or []
         self.scan_patterns: list[str] = []
         self.ping_error = ping_error
@@ -288,6 +307,169 @@ def _install_fake_redis(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis) -> No
     redis_module.asyncio = redis_asyncio_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "redis", redis_module)
     monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio_module)
+
+
+def _install_fake_redis_sequence(monkeypatch: pytest.MonkeyPatch, fakes: list[_FakeRedis]) -> list[_FakeRedis]:
+    """Return a new fake client on each from_url() call, as a reconnect would."""
+    created: list[_FakeRedis] = []
+    redis_module = ModuleType("redis")
+    redis_asyncio_module = ModuleType("redis.asyncio")
+
+    def _from_url(_url: str, *, decode_responses: bool):
+        fake = fakes[len(created)] if len(created) < len(fakes) else fakes[-1]
+        fake.decode_responses = decode_responses
+        created.append(fake)
+        return fake
+
+    redis_asyncio_module.from_url = _from_url  # type: ignore[attr-defined]
+    redis_module.asyncio = redis_asyncio_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "redis", redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio_module)
+    return created
+
+
+async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not reached before timeout")
+        await asyncio.sleep(0.005)
+
+
+def _fast_reconnect(broker: RedisBroker) -> RedisBroker:
+    broker.reconnect_initial_delay_s = 0.01
+    broker.reconnect_max_delay_s = 0.04
+    broker.listen_poll_timeout_s = 0.01
+    return broker
+
+
+class TestRedisBrokerRecovery:
+    """The listener must survive Redis errors and keep delivering events."""
+
+    def test_listener_waits_for_first_room_instead_of_exiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        message = {"type": "message", "channel": "room1", "data": '{"type": "test"}'}
+        fake = _FakeRedis(pubsub_script=[message])
+        _install_fake_redis(monkeypatch, fake)
+
+        async def _test():
+            broker = _fast_reconnect(RedisBroker("redis://cache.example.com:6379/0"))
+            await broker.connect()
+            await asyncio.sleep(0.05)
+            assert broker.status()["listener_running"] is True
+            assert fake.pubsub_instance.get_message_calls == 0
+
+            received: list[dict] = []
+
+            async def callback(event: dict) -> None:
+                received.append(event)
+
+            await broker.subscribe("room1", callback)
+            await _wait_until(lambda: received)
+            assert received == [{"type": "test"}]
+            await broker.disconnect()
+
+        _run_async(_test())
+
+    def test_listener_reconnects_and_restores_rooms_after_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _FakeRedis(pubsub_script=[ConnectionError("lost cache.example.com with password secret")])
+        message = {"type": "message", "channel": "room1", "data": '{"type": "after-reconnect"}'}
+        second = _FakeRedis(pubsub_script=[message])
+        created = _install_fake_redis_sequence(monkeypatch, [first, second])
+
+        async def _test():
+            broker = _fast_reconnect(RedisBroker("redis://user:secret@cache.example.com:6379/0"))
+            await broker.connect()
+            received: list[dict] = []
+
+            async def callback(event: dict) -> None:
+                received.append(event)
+
+            await broker.subscribe("room1", callback)
+            await _wait_until(lambda: received)
+
+            assert received == [{"type": "after-reconnect"}]
+            assert created[:2] == [first, second]
+            assert first.closed is True and first.pubsub_instance.closed is True
+            assert second.pubsub_instance.subscribed == ["room1"]
+            status = broker.status()
+            assert status["connected"] is True
+            assert status["reconnect_count"] == 1
+            assert status["last_reconnect_at"] is not None
+            assert status["last_error"] is None
+            assert status["listener_running"] is True
+            await broker.disconnect()
+
+        _run_async(_test())
+
+    def test_reconnect_retries_with_backoff_and_redacts_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _FakeRedis(pubsub_script=[ConnectionError("dropped")])
+        down = _FakeRedis(ping_error=OSError("cannot reach cache.example.com with password secret"))
+        recovered = _FakeRedis()
+        _install_fake_redis_sequence(monkeypatch, [first, down, down, recovered])
+
+        async def _test():
+            broker = _fast_reconnect(RedisBroker("redis://user:secret@cache.example.com:6379/0"))
+            await broker.connect()
+
+            async def callback(_event: dict) -> None:
+                return None
+
+            await broker.subscribe("room1", callback)
+            await _wait_until(lambda: broker.status()["reconnect_count"] == 1)
+            status = broker.status()
+            assert status["reconnect_failures"] == 2
+            assert status["connected"] is True
+            assert recovered.pubsub_instance.subscribed == ["room1"]
+            assert down.closed is True
+            await broker.disconnect()
+
+        _run_async(_test())
+
+    def test_failed_reconnect_status_is_redacted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _FakeRedis(pubsub_script=[ConnectionError("dropped")])
+        down = _FakeRedis(ping_error=OSError("cannot reach cache.example.com with password secret"))
+        _install_fake_redis_sequence(monkeypatch, [first, down, down, down, down, down, down, down])
+
+        async def _test():
+            broker = _fast_reconnect(RedisBroker("redis://user:secret@cache.example.com:6379/0"))
+            await broker.connect()
+
+            async def callback(_event: dict) -> None:
+                return None
+
+            await broker.subscribe("room1", callback)
+            await _wait_until(lambda: broker.status()["reconnect_failures"] >= 1)  # pyright: ignore[reportOperatorIssue]
+            status = broker.status()
+            assert status["connected"] is False
+            last_error: Any = status["last_error"]
+            assert "secret" not in last_error["message"]
+            assert "cache.example.com" not in last_error["message"]
+            await broker.disconnect()
+            assert broker.status()["listener_running"] is False
+
+        _run_async(_test())
+
+    def test_disconnect_during_backoff_stops_cleanly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _FakeRedis(pubsub_script=[ConnectionError("dropped")])
+        _install_fake_redis_sequence(monkeypatch, [first, _FakeRedis()])
+
+        async def _test():
+            broker = RedisBroker("redis://cache.example.com:6379/0")
+            broker.reconnect_initial_delay_s = 30.0
+            broker.listen_poll_timeout_s = 0.01
+            await broker.connect()
+
+            async def callback(_event: dict) -> None:
+                return None
+
+            await broker.subscribe("room1", callback)
+            await _wait_until(lambda: broker.status()["connected"] is False)
+            task = broker._listener_task
+            await asyncio.wait_for(broker.disconnect(), timeout=1.0)
+            assert task is not None and task.done()
+            assert broker.status()["listener_running"] is False
+
+        _run_async(_test())
 
 
 class TestRedisBroker:

@@ -42,6 +42,7 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials.scrapling_transport import (
     SCRAPLING_BROWSER_LOCALE,
+    build_async_stealthy_session,
     build_stealthy_fetcher,
     cookies_to_scrapling,
     merge_response_cookies,
@@ -51,15 +52,17 @@ from trr_backend.socials.scrapling_transport import (
     scrapling_fetcher_metadata,
     scrapling_runtime_metadata,
 )
+from trr_backend.socials.tiktok.constants import (
+    TIKTOK_POST_LIST_URL,
+    TIKTOK_POST_PAGE_SIZE,
+    TIKTOK_POST_PAGE_SIZE_MAX,
+    TIKTOK_POST_PAGE_SIZE_MIN,
+    TIKTOK_USER_DETAIL_URL,
+)
 from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
 
 logger = logging.getLogger("socials.tiktok.posts_scrapling.fetcher")
 
-TIKTOK_USER_DETAIL_URL = "https://www.tiktok.com/api/user/detail/"
-TIKTOK_POST_LIST_URL = "https://www.tiktok.com/api/post/item_list/"
-TIKTOK_POST_PAGE_SIZE = 30
-TIKTOK_POST_PAGE_SIZE_MIN = 10
-TIKTOK_POST_PAGE_SIZE_MAX = 50
 _SEC_UID_RE = re.compile(r'\\?"secUid\\?"\s*:\s*\\?"(?P<sec_uid>[^"\\]+)')
 _TIKTOK_SCRAPLING_OPTION_KEYS = frozenset(
     {
@@ -117,12 +120,7 @@ def _classify_challenge_response(text: str) -> str | None:
     return None
 
 
-def _captured_xhr_paths(response: Any) -> list[str]:
-    candidates: list[Any] = []
-    for attr_name in ("captured_xhr", "xhr", "xhr_requests", "requests"):
-        value = getattr(response, attr_name, None)
-        if isinstance(value, list):
-            candidates.extend(value)
+def _captured_xhr_paths(candidates: list[Any]) -> list[str]:
     paths: list[str] = []
     for item in candidates:
         raw_url = ""
@@ -263,7 +261,6 @@ class TikTokPostsScraplingFetcher:
         text = _response_text(response)
         status = _status_code(response)
         self._warmup_status_code = status
-        self._captured_xhr_paths = _captured_xhr_paths(response)
         self._warmup_challenge_classification = _classify_challenge_response(text)
         if (status in {401, 403}) or (
             self._warmup_challenge_classification is not None and status not in range(200, 300)
@@ -416,7 +413,13 @@ class TikTokPostsScraplingFetcher:
             "retry_delay": 1.0,
         }
         if self._capture_xhr:
-            fetch_kwargs["capture_xhr"] = r"/api/(?:user/detail|post/item_list)/"
+            async with build_async_stealthy_session(
+                **fetch_kwargs, record_requests=True, max_recorded_requests=100
+            ) as session:
+                response = await session.fetch(url)
+                recorded = session.network.search(url_pattern=r"/api/(?:user/detail|post/item_list)/", limit=None)
+                self._captured_xhr_paths = _captured_xhr_paths(recorded)
+                return response
         return await self._fetcher.async_fetch(url, **fetch_kwargs)
 
     # -------------------------------------------------------------------

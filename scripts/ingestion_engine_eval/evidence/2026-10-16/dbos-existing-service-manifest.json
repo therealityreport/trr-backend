@@ -1,0 +1,6 @@
+{
+  "source_sha256": "d33600049c31e42803a71826cca6c78d89940929ed04fae5e95919ed47c80da7",
+  "source": "scripts/ingestion_engine_eval/dbos_existing_service.py",
+  "earlier_evidence_unchanged": true,
+  "initial_setup_failure": "pool1 bootstrap requires second migration connection; separated supported DBOS.migrate bootstrap from runtime"
+}

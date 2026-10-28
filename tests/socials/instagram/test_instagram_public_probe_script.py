@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,19 +60,37 @@ def test_env_guard_blocks_cookies_decodo_proxy_and_auth(monkeypatch: pytest.Monk
     assert any(item.startswith("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER=decodo") for item in violations)
 
 
-def test_default_comments_fetcher_treats_non_dict_public_comments_as_empty(
+@pytest.mark.parametrize("limited_sample", [False, True])
+def test_default_comments_fetcher_reports_limit_evidence_and_handles_missing_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
+    limited_sample: bool,
 ) -> None:
+    observed = {}
+
     class FakeCommentsFetcher:
         def __init__(self, **_kwargs: Any) -> None:
-            self._parser: object | None = None
+            observed["public_only"] = _kwargs["public_only"]
 
         async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            observed["fetch"] = _kwargs
             return SimpleNamespace(
-                diagnostic_metadata={"public_comments": None, "relay_comments": None},
+                diagnostic_metadata={
+                    "public_comments": {
+                        "classification": "public_partial",
+                        "recovered_count": 5,
+                        "request_limit_reached": True,
+                        "source_exhausted": False,
+                    }
+                    if limited_sample
+                    else None,
+                    "relay_comments": None,
+                },
                 comments=[],
                 fetch_reason="relay unavailable",
             )
+
+        async def aclose(self):
+            observed["closed"] = True
 
     monkeypatch.setattr(
         "trr_backend.socials.instagram.comments_scrapling.fetcher.InstagramCommentsScraplingFetcher",
@@ -86,9 +105,14 @@ def test_default_comments_fetcher_treats_non_dict_public_comments_as_empty(
 
     result = _default_comments_fetcher(PublicPostSummary(shortcode="ABC123", comment_count=3))
 
-    assert result.classification == "public_blocked"
-    assert result.recovered_count == 0
+    assert result.classification == ("public_partial" if limited_sample else "public_blocked")
+    assert result.recovered_count == (5 if limited_sample else 0)
+    assert result.request_limit_reached is limited_sample
+    assert result.source_exhausted is False
     assert result.stop_reason == "relay unavailable"
+
+    assert observed["public_only"] is True and observed["closed"] is True
+    assert observed["fetch"]["max_comments"] == 5 and observed["fetch"]["fetch_replies"] is False
 
 
 def test_probe_raises_before_scraping_when_public_env_is_dirty(
@@ -147,7 +171,14 @@ def test_probe_paginates_persists_state_and_reaches_boundary(tmp_path: Path) -> 
     assert result.pages_recovered == 2
     assert result.unique_posts_recovered == 3
     assert result.post_details == {"attempted": 3, "succeeded": 3, "failed": 0}
-    assert result.comments == {"attempted": 2, "complete": 2, "partial": 0, "blocked": 0}
+    assert result.comments == {
+        "attempted": 2,
+        "complete": 2,
+        "partial": 0,
+        "blocked": 0,
+        "limit_reached": 0,
+        "source_exhausted": 2,
+    }
     state_payload = _read_json(tmp_path / "state.json")
     assert state_payload["stop_reason"] == "historical_boundary_reached"
     assert state_payload["cursor"] == "cursor-3"
@@ -267,16 +298,16 @@ def test_probe_reports_2025_and_2026_target_posts(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("status", "reason", "retry_after"),
     [
-        (401, "public_graphql_401_backoff_required", 3600),
-        (403, "public_graphql_403_backoff_required", 7200),
-        (429, "public_graphql_429_backoff_required", 7200),
+        (401, "public_graphql_401_backoff_required", None),
+        (403, "public_graphql_403_backoff_required", None),
+        (429, "public_graphql_429_backoff_required", None),
     ],
 )
 def test_probe_maps_public_graphql_blocks_to_exact_backoff_stop_reasons(
     tmp_path: Path,
     status: int,
     reason: str,
-    retry_after: int,
+    retry_after: int | None,
 ) -> None:
     def fetch_page(_account: str, _cursor: str | None) -> PublicProbePage:
         return PublicProbePage(
@@ -381,7 +412,14 @@ def test_probe_marks_comments_partial_after_successful_pagination(tmp_path: Path
     )
 
     assert result.stop_reason == "comments_partial"
-    assert result.comments == {"attempted": 1, "complete": 0, "partial": 1, "blocked": 0}
+    assert result.comments == {
+        "attempted": 1,
+        "complete": 0,
+        "partial": 1,
+        "blocked": 0,
+        "limit_reached": 0,
+        "source_exhausted": 0,
+    }
 
 
 def _config(tmp_path: Path, *, max_pages: int = 3) -> PublicProbeConfig:
@@ -437,6 +475,7 @@ def _comments_complete(post: PublicPostSummary) -> PublicCommentsStatus:
         recovered_count=post.comment_count or 0,
         coverage_ratio=1.0,
         terminal_reason="pagination_complete",
+        source_exhausted=True,
         fallback_source="public_relay_comments",
     )
 
@@ -445,3 +484,303 @@ def _read_json(path: Path) -> dict[str, Any]:
     import json
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("page_cap", [1, 2])
+def test_probe_honors_page_and_sample_caps_including_resume(tmp_path: Path, page_cap: int) -> None:
+    page_calls = []
+    detail_calls = []
+    comment_calls = []
+
+    def page_fetcher(_account, cursor):
+        page_calls.append(cursor)
+        page_num = len(page_calls)
+        return PublicProbePage(
+            posts=[_node(f"P{page_num}N{n}", "2026-10-01T00:00:00+00:00", comments=10) for n in range(4)],
+            page_info={"has_next_page": True, "end_cursor": f"cursor-{page_num}"},
+            metadata={},
+            connection_found=True,
+        )
+
+    def detail_fetcher(shortcode):
+        detail_calls.append(shortcode)
+        return _detail_success(shortcode)
+
+    def comments_fetcher(post):
+        comment_calls.append(post.shortcode)
+        return _comments_complete(post)
+
+    config = replace(_config(tmp_path, max_pages=page_cap), sample_details_per_page=1)
+    for resume in [False, True]:
+        result = run_public_probe(
+            replace(config, resume=resume),
+            page_fetcher=page_fetcher,
+            detail_fetcher=detail_fetcher,
+            comments_fetcher=comments_fetcher,
+        )
+        multiplier = 2 if resume else 1
+        assert len(page_calls) == page_cap * multiplier
+        assert len(detail_calls) == page_cap * multiplier
+        assert len(comment_calls) == page_cap * multiplier
+        assert result.environment["page_cap"] == page_cap
+        assert result.stop_reason == "page_cap_reached"
+        assert result.next_resume_cursor == f"cursor-{page_cap * multiplier}"
+
+
+@pytest.mark.parametrize(
+    "status,body,reason",
+    [
+        (200, '<html><a href="/accounts/login/">Log in</a></html>', "redirect_login"),
+        (200, "<html>challenge_required</html>", "challenge_required"),
+        (200, "", "empty_response"),
+        (200, "<html>public shell without embedded media</html>", "metadata_not_found"),
+        (401, "unauthorized", "RuntimeError: public_detail_http_401"),
+        (403, "forbidden", "RuntimeError: public_detail_http_403"),
+        (302, "", "RuntimeError: public_detail_http_302"),
+    ],
+)
+def test_detail_probe_classifies_responses_without_route_retries(monkeypatch, status, body, reason):
+    import requests
+
+    from trr_backend.socials.instagram import public_probe as probe
+
+    calls = []
+    closed = []
+
+    def factory(**kwargs):
+        assert kwargs == {"cookies": {}, "attach_auth_session": False, "strict_public_credentials": True}
+        response = requests.Response()
+        response.status_code = status
+        response._content = body.encode()
+        return SimpleNamespace(
+            session=SimpleNamespace(close=lambda: closed.append(True)),
+            _get=lambda url, **kw: calls.append(url) or response,
+            _request_cookies=lambda: {},
+        )
+
+    monkeypatch.setattr(probe, "InstagramScraper", factory)
+    result = probe._default_detail_fetcher("PUBLIC01")
+    assert not result.succeeded and result.stop_reason == reason
+    assert result.http_status == status and result.response_bytes == len(body.encode())
+    assert len(calls) == 1 and closed == [True]
+    assert probe._detail_status_from_state(__import__("dataclasses").asdict(result)) == result
+
+
+def test_detail_probe_parses_public_shortcode_payload_missing_from_legacy_parser(monkeypatch):
+    import json
+
+    import requests
+
+    from trr_backend.socials.instagram import public_probe as probe
+
+    payload = {
+        "data": {
+            "xdt_shortcode_media": {
+                "code": "PUBLIC01",
+                "media_type": 2,
+                "taken_at": 1700000000,
+                "caption": {"text": "Public caption #Bravo @friend"},
+                "video_versions": [{"url": "https://cdn.example/video.mp4", "width": 720, "height": 1280}],
+                "image_versions2": {
+                    "candidates": [{"url": "https://cdn.example/cover.jpg", "width": 720, "height": 1280}]
+                },
+            }
+        }
+    }
+    body = '<script type="application/json">' + json.dumps(payload) + "</script>"
+    response = requests.Response()
+    response.status_code = 200
+    response._content = body.encode()
+    calls = []
+    monkeypatch.setattr(
+        probe,
+        "InstagramScraper",
+        lambda **kwargs: SimpleNamespace(
+            session=SimpleNamespace(close=lambda: None),
+            _get=lambda url, **kw: calls.append(url) or response,
+            _request_cookies=lambda: {},
+        ),
+    )
+    result = probe._default_detail_fetcher("PUBLIC01")
+    assert result.succeeded and result.caption_present and result.thumbnail_present
+    assert result.media_url_count == 1 and result.taken_at == "2023-11-14T22:13:20+00:00"
+    assert result.http_status == 200 and len(calls) == 1
+
+
+@pytest.mark.parametrize("legacy_media", [False, True])
+def test_detail_probe_reports_an_empty_parsed_shell_as_failure(monkeypatch, legacy_media):
+    """Logged-out permalinks can parse to a shortcode-only shell; that is not a detail."""
+    import json
+
+    import requests
+
+    from trr_backend.socials.instagram import public_probe as probe
+
+    payload = {"data": {"xdt_shortcode_media": {"code": "PUBLIC01"}}}
+    response = requests.Response()
+    response.status_code = 200
+    response._content = ('<script type="application/json">' + json.dumps(payload) + "</script>").encode()
+    monkeypatch.setattr(
+        probe,
+        "InstagramScraper",
+        lambda **kwargs: SimpleNamespace(
+            session=SimpleNamespace(close=lambda: None),
+            _get=lambda url, **kw: response,
+            _request_cookies=lambda: {},
+        ),
+    )
+    if legacy_media:
+        monkeypatch.setattr(probe, "fetch_permalink_media_item", lambda *args, **kwargs: {"code": "PUBLIC01"})
+    result = probe._default_detail_fetcher("PUBLIC01")
+    assert not result.succeeded
+    assert result.stop_reason == ("metadata_empty" if legacy_media else "metadata_not_found")
+    assert not result.caption_present and result.media_url_count == 0
+    assert probe._detail_status_from_state(__import__("dataclasses").asdict(result)) == result
+
+
+def test_comments_rollup_reports_sample_limit_separately_from_source_exhaustion():
+    from trr_backend.socials.instagram.public_probe import _comments_rollup
+
+    statuses = [
+        PublicCommentsStatus(
+            shortcode="sample",
+            attempted=True,
+            classification="public_partial",
+            recovered_count=5,
+            request_limit_reached=True,
+            source_exhausted=False,
+        ),
+        PublicCommentsStatus(
+            shortcode="exhausted",
+            attempted=True,
+            classification="public_complete",
+            recovered_count=3,
+            source_exhausted=True,
+        ),
+    ]
+    assert _comments_rollup(statuses) == {
+        "attempted": 2,
+        "complete": 1,
+        "partial": 1,
+        "blocked": 0,
+        "limit_reached": 1,
+        "source_exhausted": 1,
+    }
+
+
+@pytest.mark.parametrize("limit_reached,source_exhausted", [(True, False), (False, True), (False, False)])
+def test_comments_status_state_roundtrip_preserves_evidence_flags(limit_reached, source_exhausted):
+    from dataclasses import asdict
+
+    from trr_backend.socials.instagram.public_probe import _comments_status_from_state
+
+    status = PublicCommentsStatus(
+        shortcode="sample",
+        attempted=True,
+        classification="public_partial",
+        recovered_count=5,
+        request_limit_reached=limit_reached,
+        source_exhausted=source_exhausted,
+    )
+    assert _comments_status_from_state(asdict(status)) == status
+
+
+@pytest.mark.parametrize(
+    "classification,advertised,recovered,reason,expected_classification,expected_limit",
+    [
+        ("public_complete", 2140, 5, "child_comments_target_reached", "public_partial", True),
+        ("public_complete", 2140, 5, "graphql_relay_target_reached", "public_partial", True),
+        ("public_complete", None, 5, "child_comments_target_reached", "public_complete", False),
+        ("public_complete", 5, 5, "child_comments_target_reached", "public_complete", False),
+        ("public_complete", 2140, 5, "pagination_complete", "public_complete", False),
+        ("public_partial", 2140, 5, "child_comments_target_reached", "public_partial", False),
+    ],
+)
+def test_legacy_comments_state_normalizes_only_proven_capped_sample(
+    classification, advertised, recovered, reason, expected_classification, expected_limit
+):
+    from copy import deepcopy
+
+    from trr_backend.socials.instagram.public_probe import _comments_status_from_state
+
+    row = {
+        "shortcode": "legacy",
+        "attempted": True,
+        "classification": classification,
+        "advertised_count": advertised,
+        "recovered_count": recovered,
+        "terminal_reason": reason,
+    }
+    original = deepcopy(row)
+    status = _comments_status_from_state(row)
+    assert status.classification == expected_classification
+    assert status.request_limit_reached is expected_limit
+    assert status.source_exhausted is False
+    assert row == original
+
+
+def test_probe_resume_keeps_current_flags_and_normalizes_legacy_sample_without_resampling(tmp_path):
+    import json
+    from dataclasses import asdict
+
+    current = PublicCommentsStatus(
+        shortcode="sample",
+        attempted=True,
+        classification="public_partial",
+        advertised_count=50,
+        recovered_count=5,
+        request_limit_reached=True,
+    )
+    exhausted = PublicCommentsStatus(
+        shortcode="exhausted",
+        attempted=True,
+        classification="public_complete",
+        advertised_count=3,
+        recovered_count=3,
+        source_exhausted=True,
+        terminal_reason="pagination_complete",
+    )
+    legacy = {
+        "shortcode": "legacy",
+        "attempted": True,
+        "classification": "public_complete",
+        "advertised_count": 2140,
+        "recovered_count": 5,
+        "terminal_reason": "child_comments_target_reached",
+    }
+    original_text = json.dumps({"account": "bravotv", "comment_statuses": [asdict(current), asdict(exhausted), legacy]})
+    original_path = tmp_path / "original-input.json"
+    original_path.write_text(original_text)
+    config = replace(_config(tmp_path), resume=True)
+    assert config.state_file is not None
+    config.state_file.write_text(original_text)
+
+    def unexpected(*_args):
+        pytest.fail("saved comments must not be fetched again during this resume")
+
+    result = run_public_probe(
+        config,
+        page_fetcher=lambda *_: PublicProbePage(
+            posts=[],
+            page_info={"has_next_page": False},
+            metadata={},
+            connection_found=True,
+        ),
+        detail_fetcher=unexpected,
+        comments_fetcher=unexpected,
+    )
+    assert result.comments == {
+        "attempted": 3,
+        "complete": 1,
+        "partial": 2,
+        "blocked": 0,
+        "limit_reached": 2,
+        "source_exhausted": 1,
+    }
+    restored = {row["shortcode"]: row for row in _read_json(config.state_file)["comment_statuses"]}
+    assert restored["sample"]["request_limit_reached"] is True
+    assert restored["exhausted"]["source_exhausted"] is True
+    assert restored["legacy"]["classification"] == "public_partial"
+    assert restored["legacy"]["request_limit_reached"] is True
+    assert restored["legacy"]["source_exhausted"] is False
+    assert original_path.read_text() == original_text

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib import import_module
 
+from trr_backend.socials.analytics.periods import get_periods
 from trr_backend.socials.analytics.read_models import (
     build_csv,
     build_pdf,
@@ -35,6 +36,7 @@ __all__ = [
     "get_comments_coverage",
     "get_mirror_coverage",
     "get_post_comments",
+    "get_periods",
     "get_tiktok_cast_members",
     "get_tiktok_content_health",
     "get_tiktok_hashtags",
@@ -53,6 +55,8 @@ __all__ = [
 
 
 def _refresh_legacy_patchable_export(name: str):
+    if name == "get_periods":
+        return getattr(import_module("trr_backend.socials.analytics.periods"), name)
     return getattr(import_module("trr_backend.socials.analytics.read_models"), name)
 
 

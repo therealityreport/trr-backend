@@ -57,14 +57,20 @@ def _request_optional_value(request: Any, name: str, default: Any = None) -> Any
 
 def _build_scrape_config(request: Any) -> Any:
     import trr_backend.socials.tiktok.scraper as tiktok_module
+    from trr_backend.socials.tiktok.http_client import TIKTOK_POSTS_PER_PAGE
 
+    max_pages = _request_optional_value(request, "max_pages")
+    # The default yt-dlp path has no pages; translate the route's max_pages into
+    # a matched-post cap so the request field is honored instead of ignored.
+    ytdlp_max_videos_hint = int(max_pages) * TIKTOK_POSTS_PER_PAGE if max_pages else None
     return tiktok_module.TikTokScrapeConfig(
         username=_request_value(request, "username"),
         hashtags=_request_value(request, "hashtags"),
         date_start=_request_value(request, "date_start"),
         date_end=_request_value(request, "date_end"),
         delay_seconds=_request_optional_value(request, "delay_seconds", 2.0),
-        max_pages=_request_optional_value(request, "max_pages"),
+        max_pages=max_pages,
+        ytdlp_max_videos_hint=ytdlp_max_videos_hint,
         show_id=_request_optional_value(request, "show_id"),
         season_number=_request_optional_value(request, "season_number"),
         person_id=_request_optional_value(request, "person_id"),

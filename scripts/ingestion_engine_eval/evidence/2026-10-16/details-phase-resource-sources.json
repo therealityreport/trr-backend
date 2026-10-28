@@ -1,0 +1,10 @@
+{
+  "trr_backend/ingestion/canonical.py": "3dc4d313424316be7c234411741070d4a58e9f88c11755e1750a860140cb66b9",
+  "trr_backend/ingestion/application.py": "2a46999255834a5477cbc3c30d91f523e637211cbc1d65c8cc06d64b2b77be18",
+  "trr_backend/ingestion/worker.py": "e1d74d36f7b6c577de3e941b1389378e60e3fcea585802054f17c655d71ffbcd",
+  "trr_backend/ingestion/workflow_store.py": "a752376c2927d26b7f3224078a6f6181d52b19d1695d39434eadf5ff97e4ec8d",
+  "trr_backend/ingestion/persistence.py": "4991665b278541845da6c17e5ac49eb1d7f374c6d91e657f6badc4c0274006c7",
+  "trr_backend/ingestion/workflows.py": "97800439daa185b8972ebf8b45ebb28bf754a384c6086f16b021f94acc6434ea",
+  "trr_backend/socials/instagram/catalog_ingest.py": "0496172d32f82ba38084741f294c237d28ccc2f7528130968adca4784cc2b445",
+  "trr_backend/socials/control_plane/instagram_detail_targets.py": "102094a15e3342172c7435d57c091c44e065cb041f4986dacc88890453dea5f0"
+}

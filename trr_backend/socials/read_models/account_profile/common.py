@@ -268,6 +268,7 @@ if TYPE_CHECKING:
         collaborator_posted_since: datetime | None = None,
         conn: Any | None = None,
         comments_only: bool = False,
+        comment_filter: str | None = None,
         sort_by: str | None = None,
         sort_dir: str | None = None,
     ) -> list[dict[str, Any]]: ...
@@ -2684,6 +2685,7 @@ def get_social_account_profile_posts(
                     normalized_account,
                     search=normalized_search,
                     comments_only=comments_only,
+                    comment_filter=normalized_comment_filter,
                     sort_by=normalized_sort_by,
                     sort_dir=normalized_sort_dir,
                 )

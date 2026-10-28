@@ -421,8 +421,53 @@
   },
   {
     "method": "POST",
+    "path": "/admin/socials/reddit/communities/{community_id}/analysis",
+    "name": "reddit_analysis"
+  },
+  {
+    "method": "POST",
     "path": "/admin/socials/reddit/communities/{community_id}/auto-categorize-flairs",
     "name": "auto_categorize_community_flairs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/communities/{community_id}/coverage",
+    "name": "reddit_coverage"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/communities/{community_id}/episode-discussions/discover",
+    "name": "reddit_episode_discovery"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/communities/{community_id}/legacy-inventory",
+    "name": "reddit_legacy_inventory"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/communities/{community_id}/lifecycle",
+    "name": "reddit_lifecycle"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/communities/{community_id}/reclassify",
+    "name": "reddit_reclassify"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/communities/{community_id}/settings",
+    "name": "reddit_settings"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/socials/reddit/communities/{community_id}/settings",
+    "name": "reddit_update_settings"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/jobs/{job_id}",
+    "name": "reddit_job"
   },
   {
     "method": "GET",
@@ -443,6 +488,21 @@
     "method": "GET",
     "path": "/admin/socials/reddit/runs/{run_id}",
     "name": "get_reddit_refresh_run"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/runs/{run_id}/compare",
+    "name": "reddit_run_compare"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/runs/{run_id}/control",
+    "name": "reddit_run_control"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/runs/{run_id}/targets",
+    "name": "reddit_run_targets"
   },
   {
     "method": "GET",
@@ -468,6 +528,11 @@
     "method": "GET",
     "path": "/admin/socials/seasons/{season_id}/analytics/mirror-coverage",
     "name": "get_season_mirror_coverage"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/periods",
+    "name": "get_season_analytics_periods"
   },
   {
     "method": "GET",

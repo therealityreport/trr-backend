@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -118,6 +119,38 @@ def test_account_profile_singleflight_caches_deep_copies_and_retries_failures() 
             )
     assert failure_calls == 2
     assert profile_cache._ACCOUNT_PROFILE_SINGLEFLIGHT == {}
+
+
+@pytest.mark.parametrize("refill_before_old_finishes", [False, True])
+def test_invalidated_profile_load_cannot_repopulate_cache(refill_before_old_finishes: bool) -> None:
+    started, release = Event(), Event()
+    cache = profile_cache._ACCOUNT_PROFILE_SUMMARY_CACHE
+    cache_lock = profile_cache._ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK
+    key = ("summary", "instagram", "bravotv")
+
+    def old_loader() -> dict[str, Any]:
+        started.set()
+        assert release.wait(5)
+        return {"revision": "old"}
+
+    def resolve(loader: Any) -> dict[str, Any]:
+        return profile_cache._resolve_account_profile_singleflight(
+            key, loader, cache=cache, cache_lock=cache_lock, ttl_seconds=30, max_entries=4
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        old = executor.submit(resolve, old_loader)
+        try:
+            assert started.wait(5)
+            profile_cache._clear_account_profile_caches()
+            if refill_before_old_finishes:
+                assert resolve(lambda: {"revision": "new"}) == {"revision": "new"}
+        finally:
+            release.set()
+        assert old.result(timeout=5) == {"revision": "old"}
+
+    cached = profile_cache._get_ttl_cached_payload(cache, cache_lock, key)
+    assert cached == ({"revision": "new"} if refill_before_old_finishes else None)
 
 
 def test_catalog_freshness_uses_cached_lane_and_force_bypasses_it() -> None:

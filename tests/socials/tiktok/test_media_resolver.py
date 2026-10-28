@@ -11,6 +11,21 @@ import pytest
 from trr_backend.socials.tiktok import media_resolver
 
 
+@pytest.fixture(autouse=True)
+def _public_tiktok_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep network-mocked tests offline while retaining address validation."""
+    from trr_backend.socials import media_url_safety
+
+    monkeypatch.setattr(
+        media_url_safety.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("8.8.8.8", 443))],
+    )
+    monkeypatch.delenv("SOCIAL_TIKTOK_YTDLP_PROXY_URL", raising=False)
+    monkeypatch.delenv("SOCIAL_TIKTOK_YTDLP_USE_CANONICAL_COOKIES", raising=False)
+    monkeypatch.setattr(media_resolver, "_find_ytdlp_cookie_file", lambda: None)
+
+
 class _FakeResponse:
     def __init__(self, *, text: str, status_code: int = 200) -> None:
         self.text = text

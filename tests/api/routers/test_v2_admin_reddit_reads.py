@@ -58,6 +58,9 @@ def _post_detail(**overrides: Any) -> dict[str, Any]:
             "failed_media": 0,
         },
         "assigned_threads": [],
+        "capture_state": {
+            "comments": {"state": "complete", "successful_at": "2026-10-23T19:00:00Z", "evidence": {"count": 4}}
+        },
     }
     payload.update(overrides)
     return payload
@@ -229,6 +232,7 @@ def test_reddit_post_and_post_window_reads_use_the_frozen_v2_contracts(
 
     assert post.status_code == 200
     assert post.json()["post"]["reddit_post_id"] == "post-1"
+    assert post.json()["post"]["capture_state"] == _post_detail()["capture_state"]
     assert post.json()["post"]["comment_summary"]["total_comments"] == 1
     assert resolved.status_code == 200
     assert resolved.json()["detail_slug"] == "episode-thread--u-bravofan"

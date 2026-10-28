@@ -1,0 +1,9 @@
+{
+  "rest": {
+    "comments": [{"pk": "parent1", "text": "Parent", "created_at": 1792152000, "user": {"pk": "author1", "username": "commenter", "full_name": "Public Name", "is_verified": false, "profile_pic_url": "https://cdn.example/avatar.jpg?signature=secret", "sessionid": "excluded"}, "comment_like_count": 3, "child_comment_count": 1, "comment_gif": {"url": "https://cdn.example/gif.mp4?token=excluded"}, "preview_child_comments": [{"pk": "reply1", "text": "Reply", "user": {"pk": "author2", "username": "replier"}, "child_comment_count": 0}]}],
+    "comment_count": 2, "has_more_comments": false, "has_more_headload_comments": false,
+    "viewer": {"pk": "private"}, "sessionid": "excluded"
+  },
+  "graphql": {"data": {"shortcode_media": {"edge_media_to_parent_comment": {"count": 1, "edges": [{"node": {"id": "parent1", "text": "Parent", "owner": {"id": "author1", "username": "commenter"}, "edge_threaded_comments": {"count": 1, "edges": [{"node": {"id": "reply1", "text": "Reply", "owner": {"id": "author2", "username": "replier"}, "child_comment_count": 0}}], "page_info": {"has_next_page": false, "end_cursor": "last-child"}}}}], "page_info": {"has_next_page": false, "end_cursor": "last-parent"}}}}},
+  "replies": {"parent_comment_id": "parent1", "data": {"xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection": {"edges": [{"node": {"id": "reply2", "text": "Second reply", "user": {"pk": "author3", "username": "third"}, "child_comment_count": 0}}], "page_info": {"has_next_page": false, "end_cursor": "last"}}}}
+}

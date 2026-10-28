@@ -1,0 +1,561 @@
+{
+  "legacy": [
+    {
+      "query": "COMMIT",
+      "calls": 340,
+      "category": "transaction_control_raw"
+    },
+    {
+      "query": "BEGIN",
+      "calls": 340,
+      "category": "transaction_control_raw"
+    },
+    {
+      "query": "select status from social.scrape_jobs where id = $1",
+      "calls": 113,
+      "category": "legacy_job_run_heartbeat"
+    },
+    {
+      "query": "select status from social.scrape_runs where id = $1",
+      "calls": 113,
+      "category": "legacy_job_run_heartbeat"
+    },
+    {
+      "query": "select set_config($1, $2, $3)",
+      "calls": 56,
+      "category": "legacy_deadline"
+    },
+    {
+      "query": "select id, run_id, detail_dispatch_generation from social.scrape_jobs\n        where id = $1::uuid and detail_dispatch_token = $2 and worker_id = $3\n          and status = $4 and detail_dispatch_expires_at > now()\n        for update",
+      "calls": 27,
+      "category": "legacy_job_run_heartbeat"
+    },
+    {
+      "query": "select *, now() as current_time\n                    from social.instagram_detail_request_lanes where identity_key = $1 for update",
+      "calls": 24,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "with candidate as (\n              select run_id, source_id from social.instagram_detail_run_targets\n              where run_id = $1::uuid and account_handle = $2 and (\n                state = $3 or (state = $4 and next_attempt_at <= now())\n                or (state = $5 and lease_expires_at <= now()))\n              order by target_key for update skip locked limit $6\n            ) update social.instagram_detail_run_targets t set state = $7,\n              lease_owner = $8, lease_job_id = $9::uuid, lease_generation = lease_generation + $10,\n              lease_expires_at = now() + interval $11\n            from candidate c where t.run_id = c.run_id and t.source_id = c.source_id\n            returning t.*",
+      "calls": 13,
+      "category": "legacy_target_lifecycle"
+    },
+    {
+      "query": "insert into social.instagram_detail_request_lanes(identity_key)\n                    values ($1) on conflict do nothing",
+      "calls": 12,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "select coalesce(s.raw_data, c.raw_data) as raw_data\n                from social.instagram_account_catalog_posts c\n                left join social.instagram_account_catalog_post_payloads s on s.catalog_post_id = c.id\n                where c.source_id = $1 and lower(ltrim(trim(c.source_account), $2)) = $3 limit $4",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set blocked = $1,\n                    last_error_code = $2, consecutive_failures = $3, cooldown_until = $4,\n                    failure_generation = failure_generation + $5, blocked_fingerprint = $6,\n                    probe_token = $7, probe_expires_at = $8 where identity_key = $9",
+      "calls": 12,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_run_targets set phase_elapsed_ms = $1::jsonb,\n                error_summary = coalesce($2, error_summary)\n                where run_id = $3::uuid and source_id = $4 and lease_owner = $5 and lease_generation = $6\n                returning source_id",
+      "calls": 12,
+      "category": "legacy_target_lifecycle"
+    },
+    {
+      "query": "update social.instagram_detail_run_targets\n        set attempt_count = attempt_count + $1, request_count = request_count + $2\n        where run_id = $3::uuid and source_id = $4 and state = $5\n          and lease_owner = $6 and lease_generation = $7 and lease_expires_at > now()\n          and (not $8 or attempt_count < $9) returning source_id",
+      "calls": 12,
+      "category": "legacy_target_lifecycle"
+    },
+    {
+      "query": "select p.*, coalesce(s.raw_data, p.raw_data) as raw_data,\n                coalesce(s.raw_data, p.raw_data)->$1->>$2 as view_metrics_observed_at\n                from social.instagram_posts p left join social.instagram_post_payloads s on s.post_id = p.id\n                where p.shortcode = $3",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select id from social.scrape_jobs\n                where id = $1 and status = $2\n                  and (config->>$3) is not distinct from $4::text\n                  and worker_id is not distinct from $5::text\n                  and ($6::boolean or $7::text is not null)\n                for update",
+      "calls": 12,
+      "category": "legacy_job_run_heartbeat"
+    },
+    {
+      "query": "INSERT INTO social.social_post_media_assets (platform, post_id, position, media_type, source_url, hosted_url, thumbnail_url, hosted_thumbnail_url, width, height, duration_seconds, mirror_status, mirror_error, mirror_last_attempt_at, media_payload)\n        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)\n        ON CONFLICT (platform, post_id, position) DO UPDATE SET media_type = EXCLUDED.media_type, source_url = EXCLUDED.source_url, hosted_url = EXCLUDED.hosted_url, thumbnail_url = EXCLUDED.thumbnail_url, hosted_thumbnail_url = EXCLUDED.hosted_thumbnail_url, width = EXCLUDED.width, height = EXCLUDED.height, duration_seconds = EXCLUDED.duration_seconds, mirror_status = EXCLUDED.mirror_status, mirror_error = EXCLUDED.mirror_error, mirror_last_attempt_at = EXCLUDED.mirror_last_attempt_at, media_payload = EXCLUDED.media_payload\n        RETURNING *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "INSERT INTO social.social_post_entities (platform, post_id, entity_type, entity_key, entity_key_norm, entity_payload, last_seen_at)\n        VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz),($8,$9,$10,$11,$12,$13,$14::timestamptz)\n        ON CONFLICT (platform, entity_type, entity_key_norm, post_id) DO UPDATE SET entity_key = EXCLUDED.entity_key, entity_payload = EXCLUDED.entity_payload, last_seen_at = EXCLUDED.last_seen_at\n        RETURNING *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select coalesce(p.views, $1)::bigint as views, coalesce(s.raw_data, p.raw_data, $2::jsonb) as raw_data, coalesce(s.child_posts_data, p.child_posts_data, $3::jsonb) as child_posts_data, coalesce(s.asset_manifest, p.asset_manifest, $4::jsonb) as asset_manifest, coalesce(p.media_urls, $5::jsonb) as media_urls, nullif(p.thumbnail_url, $6) as thumbnail_url from social.instagram_posts p left join social.instagram_post_payloads s on s.post_id = p.id where p.shortcode = $7 limit $8",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.scrape_jobs\n        set\n          heartbeat_at = now()\n        where id = $1\n          and status = $2\n          and claimed_at is not null\n          and worker_id = $3::text\n          and config->>$4 = $5::text\n        returning id::text",
+      "calls": 12,
+      "category": "legacy_job_run_heartbeat"
+    },
+    {
+      "query": "select count(*)::int as total,\n          count(*) filter (where state = $1)::int as committed,\n          count(*) filter (where state = $2)::int as cached_satisfied,\n          count(*) filter (where state = $3)::int as source_unavailable,\n          count(*) filter (where state not in ($4,$5,$6))::int as unresolved,\n          count(*) filter (where state = $7)::int as failed,\n          count(*) filter (where state = $8)::int as retry_wait,\n          count(*) filter (where state not in ($9,$10,$11)\n            and attempt_count < $12 and coalesce(error_code, $13) <> $14)::int as resumable,\n          coalesce(sum(attempt_count), $15)::int as attempted,\n          coalesce(sum(request_count), $16)::int as requests,\n          min(next_attempt_at) filter (where state = $17) as next_attempt_at,\n          min(case when state = $18 then lease_expires_at\n                   when state = $19 then next_attempt_at\n                   when state = $20 then now() end) as next_eligible_at,\n          max(committed_at) as last_progress_at\n        from social.instagram_detail_run_targets where run_id = $21::uuid\n          and ($22::text is null or account_handle = $23)",
+      "calls": 2,
+      "category": "legacy_target_lifecycle"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz,$12::timestamptz],\n                    probe_token = $13, probe_expires_at = $14 where identity_key = $15",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz],\n                    probe_token = $6, probe_expires_at = $7 where identity_key = $8",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_run_targets t set\n          state = v.state, fetched_at = v.fetched_at::timestamptz, committed_at = clock_timestamp(),\n          error_code = $1, error_summary = $2, next_attempt_at = $3, lease_expires_at = $4\n        from (values ($5,$6,$7,$8,$9,$10,$11::timestamptz),($12,$13,$14,$15,$16,$17,$18::timestamptz),($19,$20,$21,$22,$23,$24,$25::timestamptz),($26,$27,$28,$29,$30,$31,$32::timestamptz),($33,$34,$35,$36,$37,$38,$39::timestamptz),($40,$41,$42,$43,$44,$45,$46::timestamptz),($47,$48,$49,$50,$51,$52,$53::timestamptz),($54,$55,$56,$57,$58,$59,$60::timestamptz),($61,$62,$63,$64,$65,$66,$67::timestamptz),($68,$69,$70,$71,$72,$73,$74::timestamptz)) v(run_id, source_id, job_id, owner, generation, state, fetched_at)\n        where t.run_id = v.run_id::uuid and t.source_id = v.source_id\n          and t.state = $75 and t.lease_job_id = v.job_id::uuid\n          and t.lease_owner = v.owner and t.lease_generation = v.generation\n          and t.lease_expires_at > clock_timestamp()\n          and exists (select $76 from social.scrape_jobs j where j.id = v.job_id::uuid\n            and j.detail_dispatch_token = v.owner and j.status = $77\n            and j.detail_dispatch_expires_at > clock_timestamp())\n        returning t.run_id::text, t.source_id",
+      "calls": 1,
+      "category": "legacy_target_lifecycle"
+    },
+    {
+      "query": "INSERT INTO social.social_post_legacy_refs (platform, post_id, legacy_schema, legacy_table, legacy_pk, legacy_source_id)\n        VALUES ($1,$2,$3,$4,$5,$6),($7,$8,$9,$10,$11,$12),($13,$14,$15,$16,$17,$18),($19,$20,$21,$22,$23,$24),($25,$26,$27,$28,$29,$30),($31,$32,$33,$34,$35,$36),($37,$38,$39,$40,$41,$42),($43,$44,$45,$46,$47,$48),($49,$50,$51,$52,$53,$54),($55,$56,$57,$58,$59,$60)\n        ON CONFLICT (platform, legacy_table, legacy_pk) DO UPDATE SET post_id = EXCLUDED.post_id, legacy_schema = EXCLUDED.legacy_schema, legacy_source_id = EXCLUDED.legacy_source_id\n        RETURNING post_id",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.social_post_observations\n        (platform, post_id, source_table, source_pk, source_url, raw_payload, normalized_payload,\n         detail_run_id, detail_source_id)\n        values ($1,$2,$3,$4,$5,$6,$7,$8,$9),($10,$11,$12,$13,$14,$15,$16,$17,$18),($19,$20,$21,$22,$23,$24,$25,$26,$27),($28,$29,$30,$31,$32,$33,$34,$35,$36),($37,$38,$39,$40,$41,$42,$43,$44,$45),($46,$47,$48,$49,$50,$51,$52,$53,$54),($55,$56,$57,$58,$59,$60,$61,$62,$63),($64,$65,$66,$67,$68,$69,$70,$71,$72),($73,$74,$75,$76,$77,$78,$79,$80,$81),($82,$83,$84,$85,$86,$87,$88,$89,$90)\n        on conflict (detail_run_id, detail_source_id) where detail_run_id is not null do nothing\n        returning id::text",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_run_targets t set\n          state = v.state, fetched_at = v.fetched_at::timestamptz, committed_at = clock_timestamp(),\n          error_code = $1, error_summary = $2, next_attempt_at = $3, lease_expires_at = $4\n        from (values ($5,$6,$7,$8,$9,$10,$11::timestamptz),($12,$13,$14,$15,$16,$17,$18::timestamptz)) v(run_id, source_id, job_id, owner, generation, state, fetched_at)\n        where t.run_id = v.run_id::uuid and t.source_id = v.source_id\n          and t.state = $19 and t.lease_job_id = v.job_id::uuid\n          and t.lease_owner = v.owner and t.lease_generation = v.generation\n          and t.lease_expires_at > clock_timestamp()\n          and exists (select $20 from social.scrape_jobs j where j.id = v.job_id::uuid\n            and j.detail_dispatch_token = v.owner and j.status = $21\n            and j.detail_dispatch_expires_at > clock_timestamp())\n        returning t.run_id::text, t.source_id",
+      "calls": 1,
+      "category": "legacy_target_lifecycle"
+    },
+    {
+      "query": "insert into social.instagram_post_payloads (\n          post_id, raw_data, asset_manifest, child_posts_data, payload_updated_at\n        ) values ($1,$2,$3,$4,$5::timestamptz),($6,$7,$8,$9,$10::timestamptz),($11,$12,$13,$14,$15::timestamptz),($16,$17,$18,$19,$20::timestamptz),($21,$22,$23,$24,$25::timestamptz),($26,$27,$28,$29,$30::timestamptz),($31,$32,$33,$34,$35::timestamptz),($36,$37,$38,$39,$40::timestamptz),($41,$42,$43,$44,$45::timestamptz),($46,$47,$48,$49,$50::timestamptz)\n        on conflict (post_id) do update set\n          raw_data = excluded.raw_data,\n          asset_manifest = excluded.asset_manifest,\n          child_posts_data = excluded.child_posts_data,\n          payload_updated_at = case\n            when (\n              social.instagram_post_payloads.raw_data,\n              social.instagram_post_payloads.asset_manifest,\n              social.instagram_post_payloads.child_posts_data\n            ) is distinct from (\n              excluded.raw_data,\n              excluded.asset_manifest,\n              excluded.child_posts_data\n            ) then now()\n            else social.instagram_post_payloads.payload_updated_at\n          end\n        returning post_id::text, payload_updated_at",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select\n              p.shortcode,\n              coalesce(p.views, $1)::bigint as views,\n              coalesce(s.raw_data, p.raw_data, $2::jsonb) as raw_data,\n              coalesce(s.child_posts_data, p.child_posts_data, $3::jsonb) as child_posts_data,\n              coalesce(s.asset_manifest, p.asset_manifest, $4::jsonb) as asset_manifest,\n              coalesce(p.media_urls, $5::jsonb) as media_urls,\n              nullif(p.thumbnail_url, $6) as thumbnail_url\n            from social.instagram_posts p\n            left join social.instagram_post_payloads s on s.post_id = p.id\n            where p.shortcode = any(ARRAY[$7,$8])",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "INSERT INTO social.instagram_posts (shortcode, media_id, username, user_id, caption, media_type, media_urls, thumbnail_url, likes, comments_count, views, posted_at, scraped_at, raw_data, source_account, job_id, post_format, profile_tags, collaborators, hashtags, mentions, duration_seconds, metadata_source, metadata_scraped_at, metadata_last_attempted_at, metadata_last_failed_at, metadata_consecutive_failures, metadata_error, tagged_users_detail, collaborators_detail, owner_profile_pic_url, owner_full_name, owner_is_verified, product_type, video_play_count, alt_text, width, height, is_comments_disabled, source_input_url, source_post_id, permalink, caption_id, caption_is_edited, caption_has_translation, owner_user_id, owner_username, owner_profile_pic_url_hd, location_id, location_name, location_raw, original_width, original_height, like_and_view_counts_disabled, comments_disabled, commenting_disabled_for_viewer, is_paid_partnership, is_advertisement, can_viewer_reshare, has_audio, audio_url, music_info, video_duration, child_posts_data, media_mirror_status, media_mirror_error, profile_pic_mirror_status, profile_pic_mirror_error)\n        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::timestamptz,$13::timestamptz,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::timestamptz,$25::timestamptz,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68),($69,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$80::timestamptz,$81::timestamptz,$82,$83,$84,$85,$86,$87,$88,$89,$90,$91,$92::timestamptz,$93::timestamptz,$94,$95,$96,$97,$98,$99,$100,$101,$102,$103,$104,$105,$106,$107,$108,$109,$110,$111,$112,$113,$114,$115,$116,$117,$118,$119,$120,$121,$122,$123,$124,$125,$126,$127,$128,$129,$130,$131,$132,$133,$134,$135,$136),($137,$138,$139,$140,$141,$142,$143,$144,$145,$146,$147,$148::timestamptz,$149::timestamptz,$150,$151,$152,$153,$154,$155,$156,$157,$158,$159,$160::timestamptz,$161::timestamptz,$162,$163,$164,$165,$166,$167,$168,$169,$170,$171,$172,$173,$174,$175,$176,$177,$178,$179,$180,$181,$182,$183,$184,$185,$186,$187,$188,$189,$190,$191,$192,$193,$194,$195,$196,$197,$198,$199,$200,$201,$202,$203,$204),($205,$206,$207,$208,$209,$210,$211,$212,$213,$214,$215,$216::timestamptz,$217::timestamptz,$218,$219,$220,$221,$222,$223,$224,$225,$226,$227,$228::timestamptz,$229::timestamptz,$230,$231,$232,$233,$234,$235,$236,$237,$238,$239,$240,$241,$242,$243,$244,$245,$246,$247,$248,$249,$250,$251,$252,$253,$254,$255,$256,$257,$258,$259,$260,$261,$262,$263,$264,$265,$266,$267,$268,$269,$270,$271,$272),($273,$274,$275,$276,$277,$278,$279,$280,$281,$282,$283,$284::timestamptz,$285::timestamptz,$286,$287,$288,$289,$290,$291,$292,$293,$294,$295,$296::timestamptz,$297::timestamptz,$298,$299,$300,$301,$302,$303,$304,$305,$306,$307,$308,$309,$310,$311,$312,$313,$314,$315,$316,$317,$318,$319,$320,$321,$322,$323,$324,$325,$326,$327,$328,$329,$330,$331,$332,$333,$334,$335,$336,$337,$338,$339,$340),($341,$342,$343,$344,$345,$346,$347,$348,$349,$350,$351,$352::timestamptz,$353::timestamptz,$354,$355,$356,$357,$358,$359,$360,$361,$362,$363,$364::timestamptz,$365::timestamptz,$366,$367,$368,$369,$370,$371,$372,$373,$374,$375,$376,$377,$378,$379,$380,$381,$382,$383,$384,$385,$386,$387,$388,$389,$390,$391,$392,$393,$394,$395,$396,$397,$398,$399,$400,$401,$402,$403,$404,$405,$406,$407,$408),($409,$410,$411,$412,$413,$414,$415,$416,$417,$418,$419,$420::timestamptz,$421::timestamptz,$422,$423,$424,$425,$426,$427,$428,$429,$430,$431,$432::timestamptz,$433::timestamptz,$434,$435,$436,$437,$438,$439,$440,$441,$442,$443,$444,$445,$446,$447,$448,$449,$450,$451,$452,$453,$454,$455,$456,$457,$458,$459,$460,$461,$462,$463,$464,$465,$466,$467,$468,$469,$470,$471,$472,$473,$474,$475,$476),($477,$478,$479,$480,$481,$482,$483,$484,$485,$486,$487,$488::timestamptz,$489::timestamptz,$490,$491,$492,$493,$494,$495,$496,$497,$498,$499,$500::timestamptz,$501::timestamptz,$502,$503,$504,$505,$506,$507,$508,$509,$510,$511,$512,$513,$514,$515,$516,$517,$518,$519,$520,$521,$522,$523,$524,$525,$526,$527,$528,$529,$530,$531,$532,$533,$534,$535,$536,$537,$538,$539,$540,$541,$542,$543,$544),($545,$546,$547,$548,$549,$550,$551,$552,$553,$554,$555,$556::timestamptz,$557::timestamptz,$558,$559,$560,$561,$562,$563,$564,$565,$566,$567,$568::timestamptz,$569::timestamptz,$570,$571,$572,$573,$574,$575,$576,$577,$578,$579,$580,$581,$582,$583,$584,$585,$586,$587,$588,$589,$590,$591,$592,$593,$594,$595,$596,$597,$598,$599,$600,$601,$602,$603,$604,$605,$606,$607,$608,$609,$610,$611,$612),($613,$614,$615,$616,$617,$618,$619,$620,$621,$622,$623,$624::timestamptz,$625::timestamptz,$626,$627,$628,$629,$630,$631,$632,$633,$634,$635,$636::timestamptz,$637::timestamptz,$638,$639,$640,$641,$642,$643,$644,$645,$646,$647,$648,$649,$650,$651,$652,$653,$654,$655,$656,$657,$658,$659,$660,$661,$662,$663,$664,$665,$666,$667,$668,$669,$670,$671,$672,$673,$674,$675,$676,$677,$678,$679,$680)\n        ON CONFLICT (shortcode) DO UPDATE SET media_id = EXCLUDED.media_id, username = EXCLUDED.username, user_id = EXCLUDED.user_id, caption = EXCLUDED.caption, media_type = EXCLUDED.media_type, media_urls = EXCLUDED.media_urls, thumbnail_url = EXCLUDED.thumbnail_url, likes = EXCLUDED.likes, comments_count = EXCLUDED.comments_count, views = EXCLUDED.views, posted_at = EXCLUDED.posted_at, scraped_at = EXCLUDED.scraped_at, raw_data = EXCLUDED.raw_data, source_account = EXCLUDED.source_account, job_id = EXCLUDED.job_id, post_format = EXCLUDED.post_format, profile_tags = EXCLUDED.profile_tags, collaborators = EXCLUDED.collaborators, hashtags = EXCLUDED.hashtags, mentions = EXCLUDED.mentions, duration_seconds = EXCLUDED.duration_seconds, metadata_source = EXCLUDED.metadata_source, metadata_scraped_at = EXCLUDED.metadata_scraped_at, metadata_last_attempted_at = EXCLUDED.metadata_last_attempted_at, metadata_last_failed_at = EXCLUDED.metadata_last_failed_at, metadata_consecutive_failures = EXCLUDED.metadata_consecutive_failures, metadata_error = EXCLUDED.metadata_error, tagged_users_detail = EXCLUDED.tagged_users_detail, collaborators_detail = EXCLUDED.collaborators_detail, owner_profile_pic_url = EXCLUDED.owner_profile_pic_url, owner_full_name = EXCLUDED.owner_full_name, owner_is_verified = EXCLUDED.owner_is_verified, product_type = EXCLUDED.product_type, video_play_count = EXCLUDED.video_play_count, alt_text = EXCLUDED.alt_text, width = EXCLUDED.width, height = EXCLUDED.height, is_comments_disabled = EXCLUDED.is_comments_disabled, source_input_url = EXCLUDED.source_input_url, source_post_id = EXCLUDED.source_post_id, permalink = EXCLUDED.permalink, caption_id = EXCLUDED.caption_id, caption_is_edited = EXCLUDED.caption_is_edited, caption_has_translation = EXCLUDED.caption_has_translation, owner_user_id = EXCLUDED.owner_user_id, owner_username = EXCLUDED.owner_username, owner_profile_pic_url_hd = EXCLUDED.owner_profile_pic_url_hd, location_id = EXCLUDED.location_id, location_name = EXCLUDED.location_name, location_raw = EXCLUDED.location_raw, original_width = EXCLUDED.original_width, original_height = EXCLUDED.original_height, like_and_view_counts_disabled = EXCLUDED.like_and_view_counts_disabled, comments_disabled = EXCLUDED.comments_disabled, commenting_disabled_for_viewer = EXCLUDED.commenting_disabled_for_viewer, is_paid_partnership = EXCLUDED.is_paid_partnership, is_advertisement = EXCLUDED.is_advertisement, can_viewer_reshare = EXCLUDED.can_viewer_reshare, has_audio = EXCLUDED.has_audio, audio_url = EXCLUDED.audio_url, music_info = EXCLUDED.music_info, video_duration = EXCLUDED.video_duration, child_posts_data = EXCLUDED.child_posts_data, media_mirror_status = EXCLUDED.media_mirror_status, media_mirror_error = EXCLUDED.media_mirror_error, profile_pic_mirror_status = EXCLUDED.profile_pic_mirror_status, profile_pic_mirror_error = EXCLUDED.profile_pic_mirror_error\n        RETURNING *",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz],\n                    probe_token = $3, probe_expires_at = $4 where identity_key = $5",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "insert into social.social_posts (platform, source_id, owner_handle, owner_handle_norm, owner_id, canonical_url, body, media_type, posted_at, like_count, comment_count, share_count, view_count, last_seen_at, last_scraped_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::timestamptz,$10,$11,$12,$13,$14::timestamptz,$15::timestamptz),($16,$17,$18,$19,$20,$21,$22,$23,$24::timestamptz,$25,$26,$27,$28,$29::timestamptz,$30::timestamptz),($31,$32,$33,$34,$35,$36,$37,$38,$39::timestamptz,$40,$41,$42,$43,$44::timestamptz,$45::timestamptz),($46,$47,$48,$49,$50,$51,$52,$53,$54::timestamptz,$55,$56,$57,$58,$59::timestamptz,$60::timestamptz),($61,$62,$63,$64,$65,$66,$67,$68,$69::timestamptz,$70,$71,$72,$73,$74::timestamptz,$75::timestamptz),($76,$77,$78,$79,$80,$81,$82,$83,$84::timestamptz,$85,$86,$87,$88,$89::timestamptz,$90::timestamptz),($91,$92,$93,$94,$95,$96,$97,$98,$99::timestamptz,$100,$101,$102,$103,$104::timestamptz,$105::timestamptz),($106,$107,$108,$109,$110,$111,$112,$113,$114::timestamptz,$115,$116,$117,$118,$119::timestamptz,$120::timestamptz),($121,$122,$123,$124,$125,$126,$127,$128,$129::timestamptz,$130,$131,$132,$133,$134::timestamptz,$135::timestamptz),($136,$137,$138,$139,$140,$141,$142,$143,$144::timestamptz,$145,$146,$147,$148,$149::timestamptz,$150::timestamptz)\n        on conflict (platform, source_id) do update set owner_handle = coalesce(excluded.owner_handle, social.social_posts.owner_handle), owner_handle_norm = coalesce(excluded.owner_handle_norm, social.social_posts.owner_handle_norm), owner_id = coalesce(excluded.owner_id, social.social_posts.owner_id), canonical_url = coalesce(excluded.canonical_url, social.social_posts.canonical_url), body = coalesce(excluded.body, social.social_posts.body), media_type = coalesce(excluded.media_type, social.social_posts.media_type), posted_at = coalesce(excluded.posted_at, social.social_posts.posted_at), like_count = case when excluded.like_count > coalesce(social.social_posts.like_count, $151) then excluded.like_count else coalesce(social.social_posts.like_count, excluded.like_count, $152) end, comment_count = case when excluded.comment_count > coalesce(social.social_posts.comment_count, $153) then excluded.comment_count else coalesce(social.social_posts.comment_count, excluded.comment_count, $154) end, share_count = case when excluded.share_count > coalesce(social.social_posts.share_count, $155) then excluded.share_count else coalesce(social.social_posts.share_count, excluded.share_count, $156) end, view_count = case when excluded.view_count > coalesce(social.social_posts.view_count, $157) then excluded.view_count else coalesce(social.social_posts.view_count, excluded.view_count, $158) end, last_seen_at = greatest(social.social_posts.last_seen_at, excluded.last_seen_at), last_scraped_at = greatest(social.social_posts.last_scraped_at, excluded.last_scraped_at), updated_at = now()\n        returning id::text, source_id",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz],\n                    probe_token = $5, probe_expires_at = $6 where identity_key = $7",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz],\n                    probe_token = $9, probe_expires_at = $10 where identity_key = $11",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz],\n                    probe_token = $11, probe_expires_at = $12 where identity_key = $13",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz],\n                    probe_token = $2, probe_expires_at = $3 where identity_key = $4",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "insert into social.instagram_post_payloads (\n          post_id, raw_data, asset_manifest, child_posts_data, payload_updated_at\n        ) values ($1,$2,$3,$4,$5::timestamptz),($6,$7,$8,$9,$10::timestamptz)\n        on conflict (post_id) do update set\n          raw_data = excluded.raw_data,\n          asset_manifest = excluded.asset_manifest,\n          child_posts_data = excluded.child_posts_data,\n          payload_updated_at = case\n            when (\n              social.instagram_post_payloads.raw_data,\n              social.instagram_post_payloads.asset_manifest,\n              social.instagram_post_payloads.child_posts_data\n            ) is distinct from (\n              excluded.raw_data,\n              excluded.asset_manifest,\n              excluded.child_posts_data\n            ) then now()\n            else social.instagram_post_payloads.payload_updated_at\n          end\n        returning post_id::text, payload_updated_at",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz],\n                    probe_token = $10, probe_expires_at = $11 where identity_key = $12",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "insert into social.social_post_observations\n        (platform, post_id, source_table, source_pk, source_url, raw_payload, normalized_payload,\n         detail_run_id, detail_source_id)\n        values ($1,$2,$3,$4,$5,$6,$7,$8,$9),($10,$11,$12,$13,$14,$15,$16,$17,$18)\n        on conflict (detail_run_id, detail_source_id) where detail_run_id is not null do nothing\n        returning id::text",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz],\n                    probe_token = $7, probe_expires_at = $8 where identity_key = $9",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "INSERT INTO social.instagram_posts (shortcode, media_id, username, user_id, caption, media_type, media_urls, thumbnail_url, likes, comments_count, views, posted_at, scraped_at, raw_data, source_account, job_id, post_format, profile_tags, collaborators, hashtags, mentions, duration_seconds, metadata_source, metadata_scraped_at, metadata_last_attempted_at, metadata_last_failed_at, metadata_consecutive_failures, metadata_error, tagged_users_detail, collaborators_detail, owner_profile_pic_url, owner_full_name, owner_is_verified, product_type, video_play_count, alt_text, width, height, is_comments_disabled, source_input_url, source_post_id, permalink, caption_id, caption_is_edited, caption_has_translation, owner_user_id, owner_username, owner_profile_pic_url_hd, location_id, location_name, location_raw, original_width, original_height, like_and_view_counts_disabled, comments_disabled, commenting_disabled_for_viewer, is_paid_partnership, is_advertisement, can_viewer_reshare, has_audio, audio_url, music_info, video_duration, child_posts_data, media_mirror_status, media_mirror_error, profile_pic_mirror_status, profile_pic_mirror_error)\n        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::timestamptz,$13::timestamptz,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::timestamptz,$25::timestamptz,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68),($69,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$80::timestamptz,$81::timestamptz,$82,$83,$84,$85,$86,$87,$88,$89,$90,$91,$92::timestamptz,$93::timestamptz,$94,$95,$96,$97,$98,$99,$100,$101,$102,$103,$104,$105,$106,$107,$108,$109,$110,$111,$112,$113,$114,$115,$116,$117,$118,$119,$120,$121,$122,$123,$124,$125,$126,$127,$128,$129,$130,$131,$132,$133,$134,$135,$136)\n        ON CONFLICT (shortcode) DO UPDATE SET media_id = EXCLUDED.media_id, username = EXCLUDED.username, user_id = EXCLUDED.user_id, caption = EXCLUDED.caption, media_type = EXCLUDED.media_type, media_urls = EXCLUDED.media_urls, thumbnail_url = EXCLUDED.thumbnail_url, likes = EXCLUDED.likes, comments_count = EXCLUDED.comments_count, views = EXCLUDED.views, posted_at = EXCLUDED.posted_at, scraped_at = EXCLUDED.scraped_at, raw_data = EXCLUDED.raw_data, source_account = EXCLUDED.source_account, job_id = EXCLUDED.job_id, post_format = EXCLUDED.post_format, profile_tags = EXCLUDED.profile_tags, collaborators = EXCLUDED.collaborators, hashtags = EXCLUDED.hashtags, mentions = EXCLUDED.mentions, duration_seconds = EXCLUDED.duration_seconds, metadata_source = EXCLUDED.metadata_source, metadata_scraped_at = EXCLUDED.metadata_scraped_at, metadata_last_attempted_at = EXCLUDED.metadata_last_attempted_at, metadata_last_failed_at = EXCLUDED.metadata_last_failed_at, metadata_consecutive_failures = EXCLUDED.metadata_consecutive_failures, metadata_error = EXCLUDED.metadata_error, tagged_users_detail = EXCLUDED.tagged_users_detail, collaborators_detail = EXCLUDED.collaborators_detail, owner_profile_pic_url = EXCLUDED.owner_profile_pic_url, owner_full_name = EXCLUDED.owner_full_name, owner_is_verified = EXCLUDED.owner_is_verified, product_type = EXCLUDED.product_type, video_play_count = EXCLUDED.video_play_count, alt_text = EXCLUDED.alt_text, width = EXCLUDED.width, height = EXCLUDED.height, is_comments_disabled = EXCLUDED.is_comments_disabled, source_input_url = EXCLUDED.source_input_url, source_post_id = EXCLUDED.source_post_id, permalink = EXCLUDED.permalink, caption_id = EXCLUDED.caption_id, caption_is_edited = EXCLUDED.caption_is_edited, caption_has_translation = EXCLUDED.caption_has_translation, owner_user_id = EXCLUDED.owner_user_id, owner_username = EXCLUDED.owner_username, owner_profile_pic_url_hd = EXCLUDED.owner_profile_pic_url_hd, location_id = EXCLUDED.location_id, location_name = EXCLUDED.location_name, location_raw = EXCLUDED.location_raw, original_width = EXCLUDED.original_width, original_height = EXCLUDED.original_height, like_and_view_counts_disabled = EXCLUDED.like_and_view_counts_disabled, comments_disabled = EXCLUDED.comments_disabled, commenting_disabled_for_viewer = EXCLUDED.commenting_disabled_for_viewer, is_paid_partnership = EXCLUDED.is_paid_partnership, is_advertisement = EXCLUDED.is_advertisement, can_viewer_reshare = EXCLUDED.can_viewer_reshare, has_audio = EXCLUDED.has_audio, audio_url = EXCLUDED.audio_url, music_info = EXCLUDED.music_info, video_duration = EXCLUDED.video_duration, child_posts_data = EXCLUDED.child_posts_data, media_mirror_status = EXCLUDED.media_mirror_status, media_mirror_error = EXCLUDED.media_mirror_error, profile_pic_mirror_status = EXCLUDED.profile_pic_mirror_status, profile_pic_mirror_error = EXCLUDED.profile_pic_mirror_error\n        RETURNING *",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.social_posts (platform, source_id, owner_handle, owner_handle_norm, owner_id, canonical_url, body, media_type, posted_at, like_count, comment_count, share_count, view_count, last_seen_at, last_scraped_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::timestamptz,$10,$11,$12,$13,$14::timestamptz,$15::timestamptz),($16,$17,$18,$19,$20,$21,$22,$23,$24::timestamptz,$25,$26,$27,$28,$29::timestamptz,$30::timestamptz)\n        on conflict (platform, source_id) do update set owner_handle = coalesce(excluded.owner_handle, social.social_posts.owner_handle), owner_handle_norm = coalesce(excluded.owner_handle_norm, social.social_posts.owner_handle_norm), owner_id = coalesce(excluded.owner_id, social.social_posts.owner_id), canonical_url = coalesce(excluded.canonical_url, social.social_posts.canonical_url), body = coalesce(excluded.body, social.social_posts.body), media_type = coalesce(excluded.media_type, social.social_posts.media_type), posted_at = coalesce(excluded.posted_at, social.social_posts.posted_at), like_count = case when excluded.like_count > coalesce(social.social_posts.like_count, $31) then excluded.like_count else coalesce(social.social_posts.like_count, excluded.like_count, $32) end, comment_count = case when excluded.comment_count > coalesce(social.social_posts.comment_count, $33) then excluded.comment_count else coalesce(social.social_posts.comment_count, excluded.comment_count, $34) end, share_count = case when excluded.share_count > coalesce(social.social_posts.share_count, $35) then excluded.share_count else coalesce(social.social_posts.share_count, excluded.share_count, $36) end, view_count = case when excluded.view_count > coalesce(social.social_posts.view_count, $37) then excluded.view_count else coalesce(social.social_posts.view_count, excluded.view_count, $38) end, last_seen_at = greatest(social.social_posts.last_seen_at, excluded.last_seen_at), last_scraped_at = greatest(social.social_posts.last_scraped_at, excluded.last_scraped_at), updated_at = now()\n        returning id::text, source_id",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz],\n                    probe_token = $12, probe_expires_at = $13 where identity_key = $14",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "select\n              p.shortcode,\n              coalesce(p.views, $1)::bigint as views,\n              coalesce(s.raw_data, p.raw_data, $2::jsonb) as raw_data,\n              coalesce(s.child_posts_data, p.child_posts_data, $3::jsonb) as child_posts_data,\n              coalesce(s.asset_manifest, p.asset_manifest, $4::jsonb) as asset_manifest,\n              coalesce(p.media_urls, $5::jsonb) as media_urls,\n              nullif(p.thumbnail_url, $6) as thumbnail_url\n            from social.instagram_posts p\n            left join social.instagram_post_payloads s on s.post_id = p.id\n            where p.shortcode = any(ARRAY[$7,$8,$9,$10,$11,$12,$13,$14,$15,$16])",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz],\n                    probe_token = $4, probe_expires_at = $5 where identity_key = $6",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz],\n                    probe_token = $8, probe_expires_at = $9 where identity_key = $10",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "INSERT INTO social.social_post_legacy_refs (platform, post_id, legacy_schema, legacy_table, legacy_pk, legacy_source_id)\n        VALUES ($1,$2,$3,$4,$5,$6),($7,$8,$9,$10,$11,$12)\n        ON CONFLICT (platform, legacy_table, legacy_pk) DO UPDATE SET post_id = EXCLUDED.post_id, legacy_schema = EXCLUDED.legacy_schema, legacy_source_id = EXCLUDED.legacy_source_id\n        RETURNING post_id",
+      "calls": 1,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "SELECT pg_stat_statements_reset()",
+      "calls": 1,
+      "category": "measurement_reset"
+    }
+  ],
+  "candidate": [
+    {
+      "query": "COMMIT",
+      "calls": 220,
+      "category": "transaction_control_raw"
+    },
+    {
+      "query": "BEGIN",
+      "calls": 220,
+      "category": "transaction_control_raw"
+    },
+    {
+      "query": "select * from social.instagram_ingestion_runs\n            where run_id=$1 and account=$2 for update",
+      "calls": 206,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "select target_key from social.instagram_ingestion_targets\n                where run_id=$1 and stage=$2 and target_key=$3 and owner_token=$4\n                and owner_started_at is not null and owner_expires_at>clock_timestamp()\n                and outcome=$5 for update",
+      "calls": 96,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "insert into social.social_post_observations\n                (platform,post_id,source_table,source_pk,source_url,scrape_run_id,observed_at,raw_payload,normalized_payload)\n                values ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9)",
+      "calls": 24,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select *, now() as current_time\n                    from social.instagram_detail_request_lanes where identity_key = $1 for update",
+      "calls": 24,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "select d.*,t.outcome,t.owner_token as current_token,t.owner_expires_at,t.owner_started_at\n                from social.instagram_ingestion_dispatches d join social.instagram_ingestion_targets t\n                using(run_id,stage,target_key) where d.owner_token=$1 for update of d,t",
+      "calls": 24,
+      "category": "dispatch_lifecycle"
+    },
+    {
+      "query": "insert into social.\"social_post_legacy_refs\" (\"platform\",\"post_id\",\"legacy_schema\",\"legacy_table\",\"legacy_pk\",\"legacy_source_id\") values ($1,$2,$3,$4,$5,$6) on conflict (\"platform\",\"legacy_table\",\"legacy_pk\") do update set \"post_id\"=excluded.\"post_id\",\"legacy_schema\"=excluded.\"legacy_schema\",\"legacy_source_id\"=excluded.\"legacy_source_id\" returning *",
+      "calls": 24,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_ingestion_dispatches set state=$1,remote_identity=$2,\n                updated_at=clock_timestamp() where owner_token=$3",
+      "calls": 24,
+      "category": "dispatch_lifecycle"
+    },
+    {
+      "query": "select * from social.instagram_ingestion_partitions\n                where execution_id=$1 for update",
+      "calls": 14,
+      "category": "scheduler_journal"
+    },
+    {
+      "query": "select decision from social.instagram_ingestion_decisions\n                where execution_id=$1 and ordinal=$2",
+      "calls": 13,
+      "category": "scheduler_journal"
+    },
+    {
+      "query": "insert into social.instagram_ingestion_decisions(execution_id,ordinal,decision)\n                values($1,$2,$3::jsonb)",
+      "calls": 13,
+      "category": "scheduler_journal"
+    },
+    {
+      "query": "update social.instagram_ingestion_runs set state=$1,\n                updated_at=clock_timestamp() where run_id=$2",
+      "calls": 13,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "select m.* from social.instagram_ingestion_manifests m\n                where run_id=$1 and (not discovery_complete or exists (\n                    select $2 from social.instagram_ingestion_targets t where t.run_id=m.run_id\n                    and t.stage=m.stage and outcome=$3)) order by case stage when $4 then $5 when $6 then $7 when $8 then $9 else $10 end limit $11",
+      "calls": 13,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "select * from social.\"social_posts\" where \"platform\"=$1 and \"source_id\"=$2 for update",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select captured_at from social.instagram_ingestion_evidence\n                    where evidence_id=$1 and run_id=$2 and stage=$3 and target_key=$4",
+      "calls": 12,
+      "category": "source_evidence"
+    },
+    {
+      "query": "update social.instagram_ingestion_targets set owner_token=$1,\n                owner_generation=owner_generation+$2,owner_expires_at=clock_timestamp()+make_interval(secs => $3),\n                owner_started_at=$4 where run_id=$5 and stage=$6 and target_key=$7\n                and outcome=$8 and blocked_reason is null and attempts<max_attempts\n                and (next_attempt_at is null or next_attempt_at<=clock_timestamp())\n                and (owner_expires_at is null or owner_expires_at<=clock_timestamp()) returning *",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "select d.state,t.outcome,t.owner_started_at,t.owner_expires_at,\n                t.owner_token as current_token, exists(select $1 from social.instagram_ingestion_receipts r\n                    where r.owner_token=d.owner_token and r.run_id=d.run_id and r.stage=d.stage\n                    and r.target_key=d.target_key) as receipt\n                from social.instagram_ingestion_dispatches d join social.instagram_ingestion_targets t\n                using(run_id,stage,target_key) where d.owner_token=$2 and d.run_id=$3 and d.generation=$4",
+      "calls": 12,
+      "category": "dispatch_lifecycle"
+    },
+    {
+      "query": "select * from social.\"instagram_account_catalog_post_payloads\" where \"catalog_post_id\"=$1 for update",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.instagram_ingestion_receipts\n                (receipt_id,run_id,stage,target_key,owner_token,owner_generation,evidence_id,\n                 observed_at,outcome,canonical_identity) values($1,$2,$3,$4,$5,$6,$7,$8::timestamptz,$9,$10::jsonb) returning *",
+      "calls": 12,
+      "category": "business_receipts"
+    },
+    {
+      "query": "insert into social.social_post_entities (\"platform\",\"post_id\",\"entity_type\",\"entity_key\",\"entity_key_norm\",\"entity_payload\",\"last_seen_at\") values ($1,$2,$3,$4,$5,$6,$7::timestamptz),($8,$9,$10,$11,$12,$13,$14::timestamptz)\n            on conflict(platform,entity_type,entity_key_norm,post_id) do update set \"entity_key\"=excluded.\"entity_key\",\"entity_payload\"=excluded.\"entity_payload\",\"last_seen_at\"=excluded.\"last_seen_at\"",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.\"social_post_media_assets\" (\"platform\",\"post_id\",\"position\",\"media_type\",\"width\",\"height\",\"source_url\",\"media_payload\",\"thumbnail_url\") values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (\"platform\",\"post_id\",\"position\") do update set \"media_type\"=excluded.\"media_type\",\"width\"=excluded.\"width\",\"height\"=excluded.\"height\",\"source_url\"=excluded.\"source_url\",\"media_payload\"=excluded.\"media_payload\",\"thumbnail_url\"=excluded.\"thumbnail_url\" returning *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.\"instagram_account_catalog_posts\" (\"source_account\",\"posted_at\",\"permalink\",\"caption\",\"media_type\",\"media_urls\",\"thumbnail_url\",\"hashtags\",\"mentions\",\"likes\",\"comments_count\",\"raw_data\",\"owner_username\",\"source_id\",\"last_backfill_run_id\",\"last_seen_at\",\"updated_at\",\"first_seen_at\") values ($1,$2::timestamptz,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::timestamptz,$17::timestamptz,$18::timestamptz) on conflict (\"source_id\") do update set \"source_account\"=excluded.\"source_account\",\"posted_at\"=excluded.\"posted_at\",\"permalink\"=excluded.\"permalink\",\"caption\"=excluded.\"caption\",\"media_type\"=excluded.\"media_type\",\"media_urls\"=excluded.\"media_urls\",\"thumbnail_url\"=excluded.\"thumbnail_url\",\"hashtags\"=excluded.\"hashtags\",\"mentions\"=excluded.\"mentions\",\"likes\"=excluded.\"likes\",\"comments_count\"=excluded.\"comments_count\",\"raw_data\"=excluded.\"raw_data\",\"owner_username\"=excluded.\"owner_username\",\"last_backfill_run_id\"=excluded.\"last_backfill_run_id\",\"last_seen_at\"=excluded.\"last_seen_at\",\"updated_at\"=excluded.\"updated_at\" returning *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select * from social.instagram_ingestion_receipts\n                where run_id=$1 and stage=$2 and target_key=$3 and owner_token=$4",
+      "calls": 12,
+      "category": "business_receipts"
+    },
+    {
+      "query": "delete from social.instagram_account_catalog_post_collaborators where catalog_post_id=$1",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set blocked = $1,\n                    last_error_code = $2, consecutive_failures = $3, cooldown_until = $4,\n                    failure_generation = failure_generation + $5, blocked_fingerprint = $6,\n                    probe_token = $7, probe_expires_at = $8 where identity_key = $9",
+      "calls": 12,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "insert into social.\"instagram_post_payloads\" (\"post_id\",\"raw_data\",\"child_posts_data\",\"payload_updated_at\",\"asset_manifest\") values ($1,$2,$3,$4::timestamptz,$5) on conflict (\"post_id\") do update set \"raw_data\"=excluded.\"raw_data\",\"child_posts_data\"=excluded.\"child_posts_data\",\"payload_updated_at\"=excluded.\"payload_updated_at\",\"asset_manifest\"=excluded.\"asset_manifest\" returning *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.\"instagram_account_catalog_post_payloads\" (\"catalog_post_id\",\"raw_data\",\"child_posts_data\",\"payload_updated_at\") values ($1,$2,$3,$4::timestamptz) on conflict (\"catalog_post_id\") do update set \"raw_data\"=excluded.\"raw_data\",\"child_posts_data\"=excluded.\"child_posts_data\",\"payload_updated_at\"=excluded.\"payload_updated_at\" returning *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select decision from social.instagram_ingestion_decisions\n                    where execution_id=$1 and ordinal=$2 for update",
+      "calls": 12,
+      "category": "scheduler_journal"
+    },
+    {
+      "query": "select * from social.social_post_media_assets\n                where platform=$1 and post_id=$2 and position=any(ARRAY[$3]) for update",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.instagram_ingestion_evidence\n                (evidence_id,run_id,stage,target_key,source_identity,captured_at,expires_at,\n                 content_hash,parser_version,schema_version,payload)\n                values($1,$2,$3,$4,$5,$6::timestamptz,$7::timestamptz,$8,$9,$10,$11)",
+      "calls": 12,
+      "category": "source_evidence"
+    },
+    {
+      "query": "select * from social.instagram_ingestion_targets\n                where run_id=$1 and stage=$2 and target_key=$3 and owner_token=$4\n                and owner_expires_at>clock_timestamp() and owner_started_at is not null\n                and outcome=$5 for update",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "insert into social.\"social_posts\" (\"platform\",\"source_id\",\"owner_handle\",\"owner_handle_norm\",\"owner_id\",\"canonical_url\",\"body\",\"media_type\",\"posted_at\",\"last_seen_at\",\"last_scraped_at\",\"first_seen_at\",\"updated_at\",\"like_count\",\"comment_count\",\"share_count\",\"view_count\") values ($1,$2,$3,$4,$5,$6,$7,$8,$9::timestamptz,$10::timestamptz,$11::timestamptz,$12::timestamptz,$13::timestamptz,$14,$15,$16,$17) on conflict (\"platform\",\"source_id\") do update set \"owner_handle\"=excluded.\"owner_handle\",\"owner_handle_norm\"=excluded.\"owner_handle_norm\",\"owner_id\"=excluded.\"owner_id\",\"canonical_url\"=excluded.\"canonical_url\",\"body\"=excluded.\"body\",\"media_type\"=excluded.\"media_type\",\"posted_at\"=excluded.\"posted_at\",\"last_seen_at\"=excluded.\"last_seen_at\",\"last_scraped_at\"=excluded.\"last_scraped_at\",\"updated_at\"=excluded.\"updated_at\",\"like_count\"=excluded.\"like_count\",\"comment_count\"=excluded.\"comment_count\",\"share_count\"=excluded.\"share_count\",\"view_count\"=excluded.\"view_count\" returning *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "insert into social.instagram_ingestion_dispatches\n                (owner_token,run_id,generation,stage,target_key) values($1,$2,$3,$4,$5) returning *",
+      "calls": 12,
+      "category": "dispatch_lifecycle"
+    },
+    {
+      "query": "select d.*,t.owner_expires_at,t.owner_started_at,t.outcome from\n                social.instagram_ingestion_dispatches d join social.instagram_ingestion_targets t\n                using(run_id,stage,target_key) where d.run_id=$1 and d.generation=$2 and d.stage=$3\n                and d.target_key=$4 and d.owner_token=t.owner_token and t.outcome=$5\n                and (t.owner_expires_at>clock_timestamp() or d.state=$6)",
+      "calls": 12,
+      "category": "dispatch_lifecycle"
+    },
+    {
+      "query": "update social.instagram_ingestion_targets set outcome=$1,observed_at=$2::timestamptz,\n                committed_at=clock_timestamp(),owner_expires_at=$3 where run_id=$4 and stage=$5 and target_key=$6",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "select * from social.\"instagram_posts\" where \"shortcode\"=$1 for update",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_ingestion_decisions\n            set decision=decision || $1::jsonb where execution_id=$2 and ordinal=$3",
+      "calls": 12,
+      "category": "scheduler_journal"
+    },
+    {
+      "query": "update social.instagram_ingestion_targets set requests=requests+$1\n                    where run_id=$2 and stage=$3 and target_key=$4",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "insert into social.instagram_detail_request_lanes(identity_key)\n                    values ($1) on conflict do nothing",
+      "calls": 12,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "select pg_advisory_xact_lock(hashtextextended($1, $2))",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "update social.instagram_ingestion_runs set last_committed_at=clock_timestamp(),\n                updated_at=clock_timestamp() where run_id=$1",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "insert into social.\"instagram_posts\" (\"source_post_id\",\"hashtags\",\"likes\",\"scraped_at\",\"comments_count\",\"media_type\",\"owner_username\",\"caption\",\"posted_at\",\"owner_user_id\",\"raw_data\",\"media_id\",\"media_urls\",\"thumbnail_url\",\"width\",\"source_account\",\"height\",\"permalink\",\"username\",\"shortcode\",\"mentions\") values ($1,$2,$3,$4::timestamptz,$5,$6,$7,$8,$9::timestamptz,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) on conflict (\"shortcode\") do update set \"source_post_id\"=excluded.\"source_post_id\",\"hashtags\"=excluded.\"hashtags\",\"likes\"=excluded.\"likes\",\"scraped_at\"=excluded.\"scraped_at\",\"comments_count\"=excluded.\"comments_count\",\"media_type\"=excluded.\"media_type\",\"owner_username\"=excluded.\"owner_username\",\"caption\"=excluded.\"caption\",\"posted_at\"=excluded.\"posted_at\",\"owner_user_id\"=excluded.\"owner_user_id\",\"raw_data\"=excluded.\"raw_data\",\"media_id\"=excluded.\"media_id\",\"media_urls\"=excluded.\"media_urls\",\"thumbnail_url\"=excluded.\"thumbnail_url\",\"width\"=excluded.\"width\",\"source_account\"=excluded.\"source_account\",\"height\"=excluded.\"height\",\"permalink\"=excluded.\"permalink\",\"username\"=excluded.\"username\",\"mentions\"=excluded.\"mentions\" returning *",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select * from social.instagram_ingestion_targets\n                where run_id=$1 and stage=$2 and target_key=$3 and owner_token=$4\n                and owner_expires_at>clock_timestamp() and outcome=$5",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "update social.instagram_ingestion_targets\n                set owner_started_at=clock_timestamp(),attempts=attempts+$1\n                where run_id=$2 and stage=$3 and target_key=$4 and owner_token=$5\n                and owner_expires_at>clock_timestamp() and owner_started_at is null\n                and outcome=$6 and attempts<max_attempts returning *",
+      "calls": 12,
+      "category": "owner_target_phase"
+    },
+    {
+      "query": "select * from social.\"instagram_account_catalog_posts\" where \"source_id\"=$1 for update",
+      "calls": 12,
+      "category": "canonical_models_preservation"
+    },
+    {
+      "query": "select t.stage,t.target_key,d.owner_token as dispatch_token,d.state\n                        from social.instagram_ingestion_targets t\n                        left join social.instagram_ingestion_dispatches d on d.owner_token=t.owner_token\n                            and d.run_id=t.run_id and d.generation=$1\n                        where t.run_id=$2 and t.stage=$3 and t.outcome=$4\n                            and ($5::text[] is null or t.target_key=any($6))\n                            and ((d.state=$7 and (t.owner_expires_at is null or t.owner_expires_at<=$8::timestamptz)) or (\n                                (t.owner_expires_at is null or t.owner_expires_at<=$9::timestamptz)\n                                and t.blocked_reason is null and t.attempts<t.max_attempts\n                                and (t.next_attempt_at is null or t.next_attempt_at<=$10::timestamptz)))\n                        order by t.target_key limit $11",
+      "calls": 12,
+      "category": "dispatch_lifecycle"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz],\n                    probe_token = $8, probe_expires_at = $9 where identity_key = $10",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz],\n                    probe_token = $7, probe_expires_at = $8 where identity_key = $9",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz],\n                    probe_token = $12, probe_expires_at = $13 where identity_key = $14",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz],\n                    probe_token = $3, probe_expires_at = $4 where identity_key = $5",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz],\n                    probe_token = $4, probe_expires_at = $5 where identity_key = $6",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "SELECT count(*) FROM social.instagram_ingestion_receipts WHERE run_id=$1",
+      "calls": 1,
+      "category": "assertion_selects"
+    },
+    {
+      "query": "update social.instagram_ingestion_partitions set completed_at=coalesce(\n                completed_at,clock_timestamp()),next_execution_id=$1 where execution_id=$2",
+      "calls": 1,
+      "category": "scheduler_journal"
+    },
+    {
+      "query": "update social.scrape_runs set status=$1 where id=$2",
+      "calls": 1,
+      "category": "final_run_status"
+    },
+    {
+      "query": "SELECT count(*),sum(attempts),sum(requests) FROM social.instagram_ingestion_targets WHERE run_id=$1 AND outcome=$2",
+      "calls": 1,
+      "category": "assertion_selects"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz],\n                    probe_token = $6, probe_expires_at = $7 where identity_key = $8",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz,$12::timestamptz],\n                    probe_token = $13, probe_expires_at = $14 where identity_key = $15",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz],\n                    probe_token = $5, probe_expires_at = $6 where identity_key = $7",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "SELECT pg_stat_statements_reset()",
+      "calls": 1,
+      "category": "measurement_reset"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz],\n                    probe_token = $9, probe_expires_at = $10 where identity_key = $11",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz],\n                    probe_token = $11, probe_expires_at = $12 where identity_key = $13",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz],\n                    probe_token = $2, probe_expires_at = $3 where identity_key = $4",
+      "calls": 1,
+      "category": "shared_request_gate"
+    },
+    {
+      "query": "update social.instagram_detail_request_lanes set request_times = ARRAY[$1::timestamptz,$2::timestamptz,$3::timestamptz,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz],\n                    probe_token = $10, probe_expires_at = $11 where identity_key = $12",
+      "calls": 1,
+      "category": "shared_request_gate"
+    }
+  ]
+}

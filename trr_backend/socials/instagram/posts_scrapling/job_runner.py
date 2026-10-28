@@ -270,6 +270,9 @@ def _public_scraper_runtime_metadata(scraper: Any | None = None) -> dict[str, An
     return {
         "scrape_mode": "public_first",
         "auth_state": "public",
+        "http_client": retrieval_meta.get("http_client"),
+        "browser_used": bool(retrieval_meta.get("browser_used", False)),
+        "scrapling_fetcher_class": None,
         "proxy_state": "none",
         "selected_proxy_fingerprint": "none",
         "proxy_session_mode": "none",
@@ -539,7 +542,11 @@ async def _rotate_after_auth_block(
         browser_account_id=browser_account_id,
         rotation_generation=rotation_generation,
     )
-    new_proxy_config = select_posts_proxy(session_key=new_proxy_session_key or account_handle)
+    new_proxy_config = (
+        None
+        if _posts_anonymous_enabled(config)
+        else select_posts_proxy(session_key=new_proxy_session_key or account_handle)
+    )
 
     identity_rotated = False
     advance_identity = rotation_generation > _posts_per_identity_session_rotation_budget()
@@ -628,7 +635,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
         if public_first_enabled:
             from trr_backend.socials.instagram.scraper import InstagramScraper
 
-            scraper = InstagramScraper(cookies={}, browser_account_id=None, attach_auth_session=False)
+            scraper = InstagramScraper(
+                cookies={}, browser_account_id=None, attach_auth_session=False, strict_public_credentials=True
+            )
             auth_metadata = {
                 "source": "public",
                 "browser_account_id": None,
@@ -923,7 +932,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             browser_account_id=session.browser_account_id if session is not None else None,
             rotation_generation=rotation_generation,
         )
-        proxy_config = select_posts_proxy(session_key=proxy_session_key or account_handle)
+        proxy_config = (
+            None if anonymous_enabled else select_posts_proxy(session_key=proxy_session_key or account_handle)
+        )
         # A3: identity-pool seam. None when SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED
         # is off (or only one identity exists), in which case rotate_session only
         # swaps the proxy sticky session. Acquired at session-resolve.
@@ -954,7 +965,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             nonlocal listing_duration_ms, persistence_duration_ms
 
             reverse_proxy_session_key = f"{proxy_session_key}:reverse"
-            reverse_proxy_config = select_posts_proxy(session_key=reverse_proxy_session_key)
+            reverse_proxy_config = (
+                None if anonymous_enabled else select_posts_proxy(session_key=reverse_proxy_session_key)
+            )
             reverse_fetcher = InstagramPostsScraplingFetcher(
                 cookies=[] if anonymous_enabled else active_session.cookies,
                 raw_cookies={} if anonymous_enabled else active_session.auth_session.cookies,
@@ -967,7 +980,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 await reverse_fetcher.apply_warmup_snapshot(snapshot)
                 reverse_cursor: str | None = None
                 while True:
-                    if proxy_flags["page_proxy_rotation_enabled"]:
+                    if not anonymous_enabled and proxy_flags["page_proxy_rotation_enabled"]:
                         page_proxy_config = select_posts_proxy(
                             session_key=reverse_proxy_session_key,
                             page_index=reverse_pages_fetched,
@@ -1164,7 +1177,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         phase="pre_page",
                         runtime_metadata=_fetcher_runtime_metadata(),
                     )
-                if proxy_flags["page_proxy_rotation_enabled"]:
+                if not anonymous_enabled and proxy_flags["page_proxy_rotation_enabled"]:
                     page_proxy_config = select_posts_proxy(
                         session_key=proxy_session_key or account_handle,
                         page_index=pages_fetched,

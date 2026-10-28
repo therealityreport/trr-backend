@@ -1,6 +1,6 @@
 # Scrapling Social Jobs
 
-Last reviewed: 2026-06-29
+Last reviewed: 2026-10-19
 
 This note covers shared Scrapling practices for TRR social scraping jobs. It is
 platform-neutral and applies to Instagram, TikTok, Threads, SocialBlade, and any
@@ -15,6 +15,27 @@ future Scrapling-backed social lane unless a lane runbook narrows the behavior.
 - TRR source code and tests decide whether an idea belongs in these lanes.
 - No live scrape is part of a routine readiness check. Live requests still need
   the lane-specific operator gate.
+
+## Scrapling 0.5 compatibility
+
+Runtime and Modal browser inputs require `scrapling[fetchers]>=0.5,<0.6`;
+the separate operator environment pins `scrapling[fetchers]==0.5`. Compile the
+three lockfiles with their recorded Python 3.11/Linux header commands. The
+upgrade requires curl-cffi 0.16.1, Playwright 1.62.0, Patchright 1.62.1,
+cssselect 1.5.0, and apify-fingerprint-datapoints 0.15.0 or newer.
+
+Browser fetches use `StealthyFetcher`; network capture uses its async session
+counterpart, `AsyncStealthySession(record_requests=True)`. SocialBlade records
+TRPC responses, and TikTok records API paths only when
+`SOCIAL_TIKTOK_POSTS_CAPTURE_XHR=1`. Each capture session retains at most 100
+completed requests; `session.network.search(url_pattern=..., limit=None)` reads
+all retained matching responses before the async context closes. This replaces
+removed `capture_xhr` and `response.captured_xhr` APIs. Paths in runtime metadata
+omit query strings. Response bodies and request details stay private.
+
+The Modal image continues to run `scrapling install --force`. Upstream 0.5 still
+supports this command and refreshes Chromium, system dependencies, and TLD data.
+Source checks do not prove browser assets or deployed runtime readiness.
 
 ## Runtime Defaults
 

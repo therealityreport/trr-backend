@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +18,16 @@ from trr_backend.socials.media_url_safety import (
     allowed_hosts_for_platform,
     safe_requests_get,
     validate_media_url,
+)
+from trr_backend.socials.tiktok.parsing.ytdlp import (
+    find_ytdlp_cookie_file as _find_ytdlp_cookie_file,
+)
+from trr_backend.socials.tiktok.parsing.ytdlp import (
+    parse_ytdlp_payload as _parse_ytdlp_payload,
+)
+from trr_backend.socials.tiktok.transports.ytdlp_auth import (
+    build_ytdlp_auth_args,
+    remove_temporary_cookie_file,
 )
 
 _REHYDRATION_RE = re.compile(
@@ -194,101 +205,9 @@ def _first_url(value: Any) -> str:
     return ""
 
 
-def _find_ytdlp_cookie_file() -> str | None:
-    import os
-    from pathlib import Path
-
-    path = (os.getenv("TIKTOK_COOKIES_NETSCAPE_FILE") or "").strip()
-    if path:
-        candidate = Path(path).expanduser()
-        if candidate.is_file():
-            return str(candidate)
-
-    for env_key in ("TIKTOK_COOKIES_FILE", "SOCIAL_TIKTOK_COOKIES_FILE"):
-        json_path = (os.getenv(env_key) or "").strip()
-        if not json_path:
-            continue
-        candidate = Path(json_path).with_name(Path(json_path).stem + "_netscape.txt")
-        if candidate.is_file():
-            return str(candidate)
-
-    default = Path("data/tiktok_cookies_netscape.txt")
-    if default.is_file():
-        return str(default)
-    return None
-
-
-def _parse_ytdlp_payload(payload: dict[str, Any]) -> tuple[list[str], str | None]:
-    urls: list[str] = []
-    primary_url = str(payload.get("url") or "").strip()
-    if primary_url:
-        urls.append(primary_url)
-
-    best_requested_url = ""
-    best_requested_score = (-1, -1)
-    requested_formats = payload.get("requested_formats")
-    if isinstance(requested_formats, list):
-        for fmt in requested_formats:
-            if not isinstance(fmt, dict):
-                continue
-            url = str(fmt.get("url") or "").strip()
-            if not url:
-                continue
-            has_video = str(fmt.get("vcodec") or "").lower() not in {"", "none"}
-            has_audio = str(fmt.get("acodec") or "").lower() not in {"", "none"}
-            height = int(fmt.get("height") or 0)
-            score = (1 if (has_video and has_audio) else (0 if has_video else -1), height)
-            if score > best_requested_score:
-                best_requested_score = score
-                best_requested_url = url
-    if best_requested_url:
-        urls.append(best_requested_url)
-
-    best_format_url = ""
-    best_format_score = (-1, -1, -1)
-    formats = payload.get("formats")
-    if isinstance(formats, list):
-        for fmt in formats:
-            if not isinstance(fmt, dict):
-                continue
-            url = str(fmt.get("url") or "").strip()
-            if not url:
-                continue
-            has_video = str(fmt.get("vcodec") or "").lower() not in {"", "none"}
-            if not has_video:
-                continue
-            has_audio = str(fmt.get("acodec") or "").lower() not in {"", "none"}
-            height = int(fmt.get("height") or 0)
-            tbr = int(fmt.get("tbr") or 0)
-            score = (1 if has_audio else 0, height, tbr)
-            if score > best_format_score:
-                best_format_score = score
-                best_format_url = url
-    if best_format_url:
-        urls.append(best_format_url)
-
-    thumbnail = str(payload.get("thumbnail") or "").strip() or None
-    if not thumbnail:
-        thumbs = payload.get("thumbnails")
-        if isinstance(thumbs, list):
-            best_thumb = ""
-            best_width = -1
-            for item in thumbs:
-                if not isinstance(item, dict):
-                    continue
-                url = str(item.get("url") or "").strip()
-                if not url:
-                    continue
-                width = int(item.get("width") or 0)
-                if width >= best_width:
-                    best_width = width
-                    best_thumb = url
-            thumbnail = best_thumb or None
-
-    return _dedupe_urls(urls)[:1], thumbnail
-
-
-def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str, Any], dict[str, Any]]:
+def _resolve_with_ytdlp(
+    video_url: str, *, cookies: Mapping[str, Any] | None = None
+) -> tuple[list[str], str | None, dict[str, Any], dict[str, Any]]:
     try:
         video_url = validate_media_url(video_url, policy=_TIKTOK_MEDIA_URL_POLICY)
     except UnsafeMediaUrlError as exc:
@@ -325,12 +244,12 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
         "--format",
         "best[ext=mp4]/best",
     ]
-    cookie_file = _find_ytdlp_cookie_file()
-    if cookie_file:
-        cmd.extend(["--cookies", cookie_file])
-    cmd.append(video_url)
-
+    temp_cookie_path: str | None = None
+    auth_meta: dict[str, Any] = {}
     try:
+        auth_args, auth_meta, temp_cookie_path = build_ytdlp_auth_args(cookies, cookie_file=_find_ytdlp_cookie_file())
+        cmd.extend(auth_args)
+        cmd.append(video_url)
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -347,14 +266,16 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 success=False,
                 reason_code="tiktok_ytdlp_failed",
                 selected_url_count=0,
-                error=exc,
-            ),
+                error=RuntimeError(f"yt-dlp subprocess failed ({type(exc).__name__})"),
+            )
+            | auth_meta,
             {},
         )
+    finally:
+        remove_temporary_cookie_file(temp_cookie_path)
 
     if proc.returncode != 0:
-        message = (proc.stderr or proc.stdout or "").strip()
-        error = RuntimeError(message[:240] if message else "yt-dlp exited non-zero")
+        error = RuntimeError(f"yt-dlp exited non-zero (code={proc.returncode})")
         return (
             [],
             None,
@@ -364,13 +285,14 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 reason_code="tiktok_ytdlp_failed",
                 selected_url_count=0,
                 error=error,
-            ),
+            )
+            | auth_meta,
             {},
         )
 
     try:
         payload = json.loads(proc.stdout or "{}")
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         return (
             [],
             None,
@@ -379,8 +301,9 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
                 success=False,
                 reason_code="tiktok_ytdlp_parse_failed",
                 selected_url_count=0,
-                error=exc,
-            ),
+                error=RuntimeError("yt-dlp returned invalid JSON"),
+            )
+            | auth_meta,
             {},
         )
 
@@ -428,7 +351,8 @@ def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str
             success=bool(media_urls),
             reason_code=(None if media_urls else "tiktok_media_not_found"),
             selected_url_count=len(media_urls),
-        ),
+        )
+        | auth_meta,
         {
             "selection_policy": "best_per_asset",
             "source_assets": source_assets,
@@ -694,6 +618,7 @@ def resolve_tiktok_media(
     video_id: str,
     *,
     canonical_url: str | None = None,
+    cookies: Mapping[str, Any] | None = None,
     session: requests.Session | None = None,
     timeout: tuple[int, int] = (10, 45),
     allow_ytdlp: bool = True,
@@ -730,7 +655,7 @@ def resolve_tiktok_media(
         return resolution
 
     if allow_ytdlp:
-        ytdlp_urls, ytdlp_thumb, ytdlp_attempt, ytdlp_meta = _resolve_with_ytdlp(candidate_url)
+        ytdlp_urls, ytdlp_thumb, ytdlp_attempt, ytdlp_meta = _resolve_with_ytdlp(candidate_url, cookies=cookies)
         resolution.attempts.append(ytdlp_attempt)
         if ytdlp_urls:
             if not validate_download_url:

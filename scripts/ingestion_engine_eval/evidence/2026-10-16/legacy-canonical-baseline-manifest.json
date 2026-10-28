@@ -1,0 +1,21 @@
+{
+  "source": "scripts/ingestion_engine_eval/legacy_resource_baseline.py",
+  "source_sha256": "c429607c113cdd3a6ad26f01314750de014c1755911c2fd77b7c44f642022d4f",
+  "runtime": "existing backend .venv Python3.11.15, psycopg2, private PostgreSQL17.10",
+  "baseline": "captured NOW unchanged legacy sinks, not historical before implementation",
+  "scope": "canonical persistence only; not full listing/detail PostActivity/receipt resource gate",
+  "regression": "warm603 vs783 calls per30 =29.8507462686567percent; six extra pertarget attributed",
+  "attribution": {
+    "preservation_reads": 3,
+    "advisory_lock": 1,
+    "entity_write_statements": 3,
+    "canonical_post_writes": -1
+  },
+  "earlier_engine_evidence_unchanged": true,
+  "cleanup": {
+    "postgres_stopped": true
+  },
+  "diagnostic_cleanup": {
+    "postgres_stopped": true
+  }
+}

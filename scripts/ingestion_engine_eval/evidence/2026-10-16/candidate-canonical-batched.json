@@ -1,0 +1,53 @@
+{
+  "status": "PASS",
+  "baseline_capture": "NOW from unchanged legacy path; not before-implementation timing",
+  "scope": "post-normalization DTO to canonical sinks only; excludes full run/target/evidence/receipt orchestration",
+  "parity": {
+    "instagram_posts": true,
+    "instagram_account_catalog_posts": true,
+    "social_posts": true,
+    "social_post_observations_count": true,
+    "social_post_legacy_refs_count": true,
+    "social_post_entities_count": true,
+    "social_post_media_assets_count": true
+  },
+  "source_fixture_hashes": {
+    "trr_backend/socials/instagram/catalog_ingest.py": "0496172d32f82ba38084741f294c237d28ccc2f7528130968adca4784cc2b445",
+    "trr_backend/socials/social_season_analytics_impl.py": "de3a43d13474468dca8b485a808fecce20ed6234521917339891131a25a23b88",
+    "trr_backend/ingestion/canonical.py": "3dc4d313424316be7c234411741070d4a58e9f88c11755e1750a860140cb66b9",
+    "tests/fixtures/ingestion/canonical_capture.json": "4191b6f6b1e0102d0705b55ff5c9775540af5e25f27de90a4cb301d8973117cc",
+    "tests/fixtures/ingestion/canonical_schema.sql": "427f6154ac287ce48838cda3881eb2cbe92b1f7b530d488bd3873ba9807ca586"
+  },
+  "measurements": [
+    {
+      "path": "candidate",
+      "repetition": 0,
+      "seconds": 0.6771737500093877,
+      "statement_calls": 633,
+      "statement_calls_per_committed_target": 21.1,
+      "sampled_peak_worker_sessions": 1,
+      "committed_targets": 30
+    },
+    {
+      "path": "candidate",
+      "repetition": 1,
+      "seconds": 0.593248457997106,
+      "statement_calls": 633,
+      "statement_calls_per_committed_target": 21.1,
+      "sampled_peak_worker_sessions": 1,
+      "committed_targets": 30
+    },
+    {
+      "path": "candidate",
+      "repetition": 2,
+      "seconds": 0.501478458987549,
+      "statement_calls": 633,
+      "statement_calls_per_committed_target": 21.1,
+      "sampled_peak_worker_sessions": 1,
+      "committed_targets": 30
+    }
+  ],
+  "full_ingestion_regression_gate": "UNVERIFIED: legacy listing/detail policy, target claims and accounting not isolated by this sink seam",
+  "retained_legacy_baseline": "/tmp/trr-legacy-baseline-complete-6f437318",
+  "parity_analysis_correction": "Compared retained and current rows through the same JSON timestamp representation; no DB rerun"
+}

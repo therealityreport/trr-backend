@@ -1,0 +1,126 @@
+{
+  "status": "measured_partial_details_phase_parent_acceptance_pending",
+  "targets_per_trial": 12,
+  "repetitions": 3,
+  "baseline": "captured now from unchanged legacy details executor, not a preimplementation timing",
+  "scope": "prepared catalog, frozen manifests and outer ownership -> actual detail transport/parser -> actual canonical and committed target accounting; candidate actual Scheduler/Worker/evidence/receipts",
+  "excluded": [
+    "listing discovery",
+    "comments",
+    "media downloads and storage",
+    "outer command launch and job claim/dispatch",
+    "outer rollup",
+    "Modal API/runtime",
+    "DBOS SDK metadata/history",
+    "live source latency",
+    "production database pooling and network"
+  ],
+  "output_parity": {
+    "committed_targets": 12,
+    "source_requests": 12,
+    "instagram_posts_count_likes_comments": [
+      12,
+      144,
+      48
+    ],
+    "all_three_models_field_parity": false,
+    "review_flag": "Legacy details executor batches post/canonical writes but does not refresh shared catalog; candidate refreshes catalog, its payload, extra refs and observations. Full entity/media payload parity not asserted."
+  },
+  "statement_scope": {
+    "authoritative_counter": "PostgreSQL pg_stat_statements calls; sampler SELECTs excluded; BEGIN/COMMIT included",
+    "raw_legacy_cold": 1302,
+    "raw_legacy_warm": 1187,
+    "raw_candidate_each_trial": 1341,
+    "shared_measurement_exclusion": 3,
+    "shared_measurement_exclusion_detail": "reset SELECT + COMMIT of reset transaction + BEGIN of snapshot transaction",
+    "candidate_assertion_exclusion": 4,
+    "candidate_assertion_exclusion_detail": "two harness verification SELECTs + their BEGIN/COMMIT",
+    "execution_legacy_warm": 1184,
+    "execution_candidate": 1334,
+    "execution_calls_per_target_legacy": 98.66666666666667,
+    "execution_calls_per_target_candidate": 111.16666666666667,
+    "execution_delta": 150,
+    "execution_delta_percent": 12.668918918918926,
+    "raw_groups": {
+      "legacy": {
+        "transaction_control_raw": 680,
+        "legacy_job_run_heartbeat": 277,
+        "legacy_deadline": 56,
+        "shared_request_gate": 60,
+        "legacy_target_lifecycle": 41,
+        "canonical_models_preservation": 72,
+        "measurement_reset": 1
+      },
+      "candidate": {
+        "transaction_control_raw": 440,
+        "owner_target_phase": 412,
+        "canonical_models_preservation": 216,
+        "shared_request_gate": 60,
+        "dispatch_lifecycle": 96,
+        "scheduler_journal": 65,
+        "source_evidence": 24,
+        "business_receipts": 24,
+        "assertion_selects": 2,
+        "final_run_status": 1,
+        "measurement_reset": 1
+      }
+    },
+    "execution_groups": {
+      "legacy": {
+        "transaction_control": 678,
+        "job_run_heartbeat": 277,
+        "deadline": 56,
+        "request_gate": 60,
+        "target_lifecycle": 41,
+        "canonical_models_preservation": 72
+      },
+      "candidate": {
+        "transaction_control": 436,
+        "owner_target_phase": 412,
+        "canonical_models_preservation": 216,
+        "request_gate": 60,
+        "dispatch_lifecycle": 96,
+        "scheduler_journal": 65,
+        "source_evidence": 24,
+        "business_receipts": 24,
+        "final_run_status": 1
+      }
+    }
+  },
+  "resources": {
+    "peak_checked_out_sessions_each_path": 2,
+    "sampled_peak_worker_sessions_each_path": 2,
+    "source_request_checked_out_sessions": 0,
+    "execution_connections_opened_legacy": 339,
+    "execution_connections_opened_candidate": 218,
+    "candidate_raw_connections_opened": 219,
+    "median_raw_elapsed_legacy_seconds": 1.7182090830174275,
+    "median_raw_elapsed_candidate_seconds": 1.455835875007324,
+    "timing_limit": "Raw elapsed includes candidate assertion transaction, fresh local connections and instrumentation; timing descriptive, not causal or deployed pool proof."
+  },
+  "source_hashes": {
+    "trr_backend/ingestion/canonical.py": "3dc4d313424316be7c234411741070d4a58e9f88c11755e1750a860140cb66b9",
+    "trr_backend/ingestion/application.py": "2a46999255834a5477cbc3c30d91f523e637211cbc1d65c8cc06d64b2b77be18",
+    "trr_backend/ingestion/worker.py": "e1d74d36f7b6c577de3e941b1389378e60e3fcea585802054f17c655d71ffbcd",
+    "trr_backend/ingestion/workflow_store.py": "a752376c2927d26b7f3224078a6f6181d52b19d1695d39434eadf5ff97e4ec8d",
+    "trr_backend/ingestion/persistence.py": "4991665b278541845da6c17e5ac49eb1d7f374c6d91e657f6badc4c0274006c7",
+    "trr_backend/ingestion/workflows.py": "97800439daa185b8972ebf8b45ebb28bf754a384c6086f16b021f94acc6434ea",
+    "trr_backend/socials/instagram/catalog_ingest.py": "0496172d32f82ba38084741f294c237d28ccc2f7528130968adca4784cc2b445",
+    "trr_backend/socials/control_plane/instagram_detail_targets.py": "102094a15e3342172c7435d57c091c44e065cb041f4986dacc88890453dea5f0"
+  },
+  "current_hashes_match_recorded": {
+    "trr_backend/ingestion/canonical.py": true,
+    "trr_backend/ingestion/application.py": true,
+    "trr_backend/ingestion/worker.py": true,
+    "trr_backend/ingestion/workflow_store.py": true,
+    "trr_backend/ingestion/persistence.py": true,
+    "trr_backend/ingestion/workflows.py": true,
+    "trr_backend/socials/instagram/catalog_ingest.py": true,
+    "trr_backend/socials/control_plane/instagram_detail_targets.py": true
+  },
+  "source_capture_limit": "Hashes captured at completion; no claim that start/end identity was independently guarded during concurrent work. Current hashes verified when archiving.",
+  "cleanup": {
+    "postgres_stopped": true
+  },
+  "interpretation": "All 150 execution statements categorized: -242 transaction, +144 canonical model/preservation, +38 owner/phase vs legacy guard/deadline/target, +161 dispatch/journal, +48 evidence/receipts,+1 final status. Parent owns necessity/acceptance judgment; no allstage/live resource release claim."
+}

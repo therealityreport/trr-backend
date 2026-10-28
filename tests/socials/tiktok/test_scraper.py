@@ -584,3 +584,129 @@ def test_tiktok_reply_fetch_respects_deadline_cap(monkeypatch) -> None:
     assert comments[0].replies == []
     assert session.reply_requests == 0
     assert scraper.last_comment_fetch_meta["reply_cap_events"][0]["reason"] == "reply_deadline_seconds"
+
+
+def _capture_ytdlp_run(monkeypatch, scraper: TikTokScraper) -> dict[str, Any]:
+    """Patch subprocess.run and record the cmd plus the cookie file contents at call time."""
+    import os
+
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = list(cmd)
+        if "--cookies" in cmd:
+            path = cmd[cmd.index("--cookies") + 1]
+            captured["cookie_path"] = path
+            captured["cookie_mode"] = os.stat(path).st_mode & 0o777
+            with open(path, encoding="utf-8") as handle:
+                captured["cookie_text"] = handle.read()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(scraper_module.subprocess, "run", _fake_run)
+    return captured
+
+
+def test_ytdlp_listing_uses_canonical_cookies_and_cleans_up(monkeypatch) -> None:
+    import os
+
+    monkeypatch.delenv("SOCIAL_TIKTOK_YTDLP_USE_CANONICAL_COOKIES", raising=False)
+    monkeypatch.delenv("SOCIAL_TIKTOK_YTDLP_PROXY_URL", raising=False)
+    scraper = TikTokScraper(cookies={"sessionid": "abc", "sid_tt": "def", "bad\tname": "x", "empty": ""})
+    captured = _capture_ytdlp_run(monkeypatch, scraper)
+
+    scraper._scrape_via_ytdlp(TikTokScrapeConfig(username="bravotv", ytdlp_max_videos_hint=5))  # noqa: SLF001
+
+    text = captured["cookie_text"]
+    assert text.startswith("# Netscape HTTP Cookie File\n")
+    assert "\tsessionid\tabc" in text and "\tsid_tt\tdef" in text
+    assert "bad" not in text and "empty" not in text
+    assert captured["cookie_mode"] == 0o600
+    assert not os.path.exists(captured["cookie_path"])
+    assert "--proxy" not in captured["cmd"]
+    meta = scraper.last_retrieval_meta
+    assert meta["ytdlp_cookie_source"] == "canonical_cookies"
+    assert meta["ytdlp_cookie_file_used"] is True
+    assert meta["auth_mode"] == "ytdlp_cookies"
+    assert "abc" not in str(meta)
+
+
+def test_ytdlp_listing_cleans_up_cookie_file_on_timeout(monkeypatch) -> None:
+    import os
+    import subprocess
+
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    scraper = TikTokScraper(cookies={"sessionid": "abc"})
+    seen: dict[str, str] = {}
+
+    def _timeout(cmd, **_kwargs):
+        seen["path"] = cmd[cmd.index("--cookies") + 1]
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(scraper_module.subprocess, "run", _timeout)
+
+    assert scraper._scrape_via_ytdlp(TikTokScrapeConfig(username="bravotv")) == []  # noqa: SLF001
+    assert scraper.last_retrieval_meta["error_code"] == "ytdlp_timeout"
+    assert not os.path.exists(seen["path"])
+
+
+def test_ytdlp_canonical_cookies_can_be_disabled_and_proxy_is_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_TIKTOK_YTDLP_USE_CANONICAL_COOKIES", "0")
+    monkeypatch.setenv("SOCIAL_TIKTOK_YTDLP_PROXY_URL", "http://user:pass@proxy.example:7000")
+    scraper = TikTokScraper(cookies={"sessionid": "abc"})
+    captured = _capture_ytdlp_run(monkeypatch, scraper)
+
+    scraper._scrape_via_ytdlp(TikTokScrapeConfig(username="bravotv", ytdlp_max_videos_hint=5))  # noqa: SLF001
+
+    assert "--cookies" not in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--proxy") + 1] == "http://user:pass@proxy.example:7000"
+    assert scraper.last_retrieval_meta["ytdlp_proxy_enabled"] is True
+    assert "pass" not in str(scraper.last_retrieval_meta)
+
+
+def test_ytdlp_operator_netscape_file_wins_over_canonical_cookies(monkeypatch, tmp_path) -> None:
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    netscape = tmp_path / "ops_netscape.txt"
+    netscape.write_text("# Netscape HTTP Cookie File\n")
+    scraper = TikTokScraper(cookies={"sessionid": "abc"})
+    captured: list[str] = []
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: str(netscape))
+    monkeypatch.setattr(
+        scraper_module.subprocess,
+        "run",
+        lambda cmd, **_k: captured.extend(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    scraper._scrape_via_ytdlp(TikTokScrapeConfig(username="bravotv", ytdlp_max_videos_hint=5))  # noqa: SLF001
+
+    assert captured[captured.index("--cookies") + 1] == str(netscape)
+    assert netscape.exists()
+    assert scraper.last_retrieval_meta["ytdlp_cookie_source"] == "netscape_file"
+
+
+def test_ytdlp_single_video_metadata_passes_canonical_cookies(monkeypatch) -> None:
+    import json
+    import os
+
+    scraper = TikTokScraper(cookies={"sessionid": "abc"})
+    captured = _capture_ytdlp_run(monkeypatch, scraper)
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = list(cmd)
+        captured["cookie_path"] = cmd[cmd.index("--cookies") + 1]
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"id": "1"}), stderr="")
+
+    monkeypatch.setattr(scraper_module.subprocess, "run", _fake_run)
+
+    assert scraper._ytdlp_get_video_metadata("https://www.tiktok.com/@a/video/1") == {"id": "1"}  # noqa: SLF001
+    assert captured["cmd"][-1] == "https://www.tiktok.com/@a/video/1"
+    assert not os.path.exists(captured["cookie_path"])

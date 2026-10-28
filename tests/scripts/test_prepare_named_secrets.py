@@ -56,6 +56,8 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
             "SOCIAL_INSTAGRAM_WEB_SESSION_ID": "session-fragment",
             "INSTAGRAM_WEB_BLOKS_VERSION_ID": "bloks-version",
             "INSTAGRAM_WEB_X_ASBD_ID": "359341",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "100",
+            "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
         }
     )
 
@@ -64,6 +66,8 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
         "TRR_INTERNAL_ADMIN_SHARED_SECRET": "shared-secret",
     }
     assert social_values == {
+        "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID": "100",
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME": "fixture_ingest_account",
         "SOCIAL_TWITTER_COOKIES_JSON": '{"cookies": []}',
         "SOCIALBLADE_EMAIL": "ops@example.com",
         "SOCIALBLADE_PASSWORD": "secret",
@@ -117,7 +121,7 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: p
     assert result["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
     assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
     assert result["TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"] == "1"
-    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "0"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "1"
     assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
     assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
     assert result["TRR_MODAL_SOCIAL_COMMENTS_JOB_CONCURRENCY_LIMIT"] == "4"
@@ -190,7 +194,7 @@ def test_apply_runtime_overrides_resets_always_on_billing_values_by_default(
     )
 
     assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
-    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "0"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "1"
     assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
 
 

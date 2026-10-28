@@ -55,6 +55,9 @@ def _build_modal_stub_module():
         def run_commands(self, *_args, **_kwargs):
             return self
 
+        def env(self, *_args, **_kwargs):
+            return self
+
     class _ModalSecret:
         @staticmethod
         def from_name(name: str):
@@ -90,6 +93,14 @@ def _build_modal_stub_module():
         App = _ModalApp
 
         @staticmethod
+        def concurrent(**kwargs):
+            def _decorator(func):
+                func._modal_concurrency_options = dict(kwargs)
+                return func
+
+            return _decorator
+
+        @staticmethod
         def asgi_app(*_args, **_kwargs):
             def _decorator(func):
                 return func
@@ -121,7 +132,7 @@ _APP_NAME = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() o
 _TIMEZONE = str(os.getenv("TRR_MODAL_TIMEZONE") or "America/New_York").strip() or "America/New_York"
 _API_FUNCTION_NAME = str(os.getenv("TRR_MODAL_API_FUNCTION") or "serve_backend_api").strip() or "serve_backend_api"
 _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() or "trr-backend-api"
-_API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "0")))
+_API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1")))
 _API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8")))
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")))
 _SOCIAL_COMMENTS_CONCURRENCY_LIMIT = max(
@@ -281,9 +292,8 @@ _SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
 )
 _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
     "playwright install chromium",
-    # P0-2/P0-3: The Scrapling comments lane uses StealthyFetcher (Patchright-
-    # backed in v0.4+). Scrapling v0.4.9 refreshed browsers and fingerprints,
-    # and upstream recommends forcing the asset refresh after upgrades.
+    # Scrapling 0.5 uses Patchright-backed Stealthy browser sessions. Force
+    # the upstream browser/dependency installer after dependency upgrades.
     "scrapling install --force",
 )
 
@@ -467,6 +477,7 @@ _OPERATOR_TUNABLE_RUNTIME_DEFAULT_KEYS: Final[frozenset[str]] = frozenset(
 def _build_lean_image_base(
     *,
     apt_packages: tuple[str, ...] = (),
+    runtime_env: dict[str, str] | None = None,
     image_factory: Any | None = None,
 ):
     factory = image_factory or modal.Image
@@ -474,6 +485,8 @@ def _build_lean_image_base(
     if apt_packages:
         image = image.apt_install(*apt_packages)
     image = image.pip_install_from_requirements(str(_MODAL_LEAN_REQUIREMENTS))
+    if runtime_env:
+        image = image.env(runtime_env)
     image = image.add_local_python_source("api", "trr_backend")
     for local_path, remote_path in _LEAN_IMAGE_LOCAL_FILES:
         image = image.add_local_file(local_path, remote_path=remote_path)
@@ -545,7 +558,15 @@ def modal_completion_evidence_contract() -> dict[str, object]:
     }
 
 
-_image = _build_lean_image_base()
+# Deployment-specific Reddit rollout flag; applies to compatible API readers and workers.
+# Default is off until additive schema and a bounded v2 canary have been verified.
+_image = _build_lean_image_base(
+    runtime_env={
+        "REDDIT_PIPELINE_V2_ENABLED": "1"
+        if os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}
+        else "0"
+    }
+)
 _media_image = _build_media_image_base()
 
 _vision_image = (
@@ -571,6 +592,9 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_admin_operation_v2": _image,
     "run_google_news_sync": _image,
     "run_reddit_refresh": _image,
+    "run_reddit_workflow": _image,
+    "run_reddit_episode_discovery": _image,
+    "dispatch_reddit_capture_work": _image,
     "probe_reddit_refresh_runtime": _image,
     "probe_admin_operation_runtime": _image,
     "probe_google_news_runtime": _image,
@@ -819,6 +843,29 @@ configure_runtime_observability(service_name="trr-backend-modal-jobs")
 app = modal.App(_APP_NAME, image=_image)
 
 
+def _instagram_comment_count_contract() -> dict[str, bool]:
+    """Exercise deployed anonymous comment parsing with synthetic data only."""
+    from trr_backend.socials.instagram.comments_scrapling.counts import reported_reply_count
+    from trr_backend.socials.instagram.comments_scrapling.fetcher import _graphql_comment_to_instagram_comment
+
+    checks = {}
+    for name, fields, expected in (
+        ("missing_is_unknown", {}, None),
+        ("null_is_unknown", {"child_comment_count": None}, None),
+        ("zero_is_known", {"child_comment_count": 0}, 0),
+        ("positive_is_known", {"child_comment_count": 3}, 3),
+    ):
+        comment = _graphql_comment_to_instagram_comment(
+            {"pk": "1", "text": "synthetic probe", "user": {"username": "runtime_probe", "pk": "2"}, **fields},
+            shortcode="runtime_probe",
+            post_url="https://www.instagram.com/p/runtime_probe/",
+        )
+        checks[name] = comment is not None and reported_reply_count(comment) == expected
+    if not all(checks.values()):
+        raise RuntimeError("instagram_reply_count_contract_failed")
+    return checks
+
+
 @app.function(
     name="probe_browser_image_runtime",
     image=_FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"],
@@ -838,7 +885,11 @@ def probe_browser_image_runtime() -> dict[str, object]:
         from playwright.sync_api import sync_playwright
         from scrapling.fetchers import StealthyFetcher
 
+        from trr_backend.socials.instagram.comments_scrapling.fetcher import _post_child_comments_graphql_doc_attempts
+
         _ = StealthyFetcher, patchright_sync_playwright
+        instagram_comment_counts = _instagram_comment_count_contract()
+        child_friendly_name, child_doc_id = _post_child_comments_graphql_doc_attempts()[0]
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
@@ -853,6 +904,8 @@ def probe_browser_image_runtime() -> dict[str, object]:
             "reason": "ok",
             "worker_family": "browser_image",
             "state_free": True,
+            "instagram_comment_counts": instagram_comment_counts,
+            "instagram_child_query": {"friendly_name": child_friendly_name, "doc_id": child_doc_id},
             "timestamp": datetime.now(UTC).isoformat(),
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
             "versions": {
@@ -861,6 +914,8 @@ def probe_browser_image_runtime() -> dict[str, object]:
                 "scrapling": package_version("scrapling"),
                 "playwright": package_version("playwright"),
                 "patchright": package_version("patchright"),
+                "curl-cffi": package_version("curl-cffi"),
+                "apify-fingerprint-datapoints": package_version("apify-fingerprint-datapoints"),
                 "chromium": browser_version,
             },
         }
@@ -882,8 +937,14 @@ def probe_browser_image_runtime() -> dict[str, object]:
     timeout=60 * 60,
     min_containers=_API_MIN_CONTAINERS,
     max_containers=_API_MAX_CONTAINERS,
+    # Keep database round trips within the US; unconstrained placement can land
+    # in Asia and serialize seconds of network delay in the single profile pool.
+    region="us",
     env=_modal_api_runtime_env(),
 )
+# Live-status streams remain open; reserve shared input capacity for API requests
+# without increasing the existing container or database connection limits.
+@modal.concurrent(max_inputs=16, target_inputs=8)
 @modal.asgi_app(label=_API_LABEL, custom_domains=_api_custom_domains())
 def serve_backend_api():
     from api.main import app as fastapi_app
@@ -1355,7 +1416,79 @@ def _reddit_runtime_probe_payload() -> dict[str, object]:
     max_containers=1,
 )
 def probe_reddit_refresh_runtime() -> dict[str, object]:
-    return _reddit_runtime_probe_payload()
+    from trr_backend.repositories.reddit_runtime import probe_health
+
+    configured = _reddit_runtime_probe_payload()
+    if not configured["healthy"]:
+        return configured
+    from trr_backend.repositories.reddit_capture import enabled
+
+    if not enabled():
+        # Compatible reader deploy can precede the additive budget schema.
+        from trr_backend.repositories.reddit_transport import RedditHttpClient
+
+        health = RedditHttpClient(require_oauth=True).token_probe()
+    else:
+        health = probe_health()
+    return {
+        **configured,
+        **health,
+        "healthy": bool(health.get("authenticated") and health.get("reachable") and not health.get("blocked")),
+        "reason": "cooling_down" if health.get("cooling_down") else ("blocked" if health.get("blocked") else "ok"),
+    }
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_reddit_workflow"],
+    secrets=_secrets,
+    retries=0,
+    timeout=30 * 60,
+    max_containers=4,
+)
+def run_reddit_workflow(job_id: str) -> dict[str, object]:
+    from trr_backend.repositories.reddit_runtime import execute_workflow
+
+    try:
+        return execute_workflow(job_id)
+    finally:
+        _close_db_pools_after_worker("reddit_workflow", job_id=job_id)
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_reddit_episode_discovery"],
+    secrets=_secrets,
+    retries=0,
+    timeout=30 * 60,
+    max_containers=2,
+)
+def run_reddit_episode_discovery(job_id: str) -> dict[str, object]:
+    from trr_backend.repositories.reddit_episode_jobs import execute_job
+
+    try:
+        return execute_job(job_id)
+    finally:
+        _close_db_pools_after_worker("reddit_episode", job_id=job_id)
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["dispatch_reddit_capture_work"],
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+    max_containers=1,
+)
+def dispatch_reddit_capture_work() -> dict[str, object]:
+    from trr_backend.modal_dispatch import dispatch_reddit_refresh, dispatch_reddit_workflow
+    from trr_backend.repositories.reddit_runtime import dispatch_tick
+
+    try:
+        return dispatch_tick(
+            lambda run_id: dispatch_reddit_refresh(run_id=run_id),
+            lambda job_id: dispatch_reddit_workflow(job_id=job_id),
+            lambda job_id: dispatch_reddit_workflow(job_id=job_id, episode=True),
+        )
+    finally:
+        _close_db_pools_after_worker("reddit_dispatch")
 
 
 @app.function(
@@ -1623,6 +1756,78 @@ def probe_instagram_public_history(
 
 
 @app.function(
+    name="probe_instagram_authenticated_comment_ids",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=300,
+    max_containers=1,
+)
+def probe_instagram_authenticated_comment_ids() -> dict[str, object]:
+    """One diagnostic, two fixed posts, at most 12 sends; no ingestion writes."""
+    from trr_backend.ingestion.credential_snapshot import CredentialSnapshot
+    from trr_backend.socials.instagram.authenticated_comment_probe import (
+        empty_report,
+        probe_authenticated_comment_ids,
+    )
+
+    try:
+        snapshot = CredentialSnapshot.from_environ()
+    except Exception:
+        result = empty_report()
+        result.update(auth_state="unavailable", stop_reason="credential_snapshot_unavailable")
+    else:
+        result = probe_authenticated_comment_ids(snapshot)
+    return {**result, "execution_backend": "modal", "proxy_state": "none"}
+
+
+@app.function(
+    name="probe_instagram_child_reply_access",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=120,
+    max_containers=1,
+)
+def probe_instagram_child_reply_access(shortcode: str, parent_comment_id: str) -> dict[str, object]:
+    """Anonymous, at most three sends; caller accounts for them before dispatch.
+
+    No schedule, database mutation, pagination, proxy, saved cookies or retry.
+    Only safe response metadata and public reply identifiers leave the worker.
+    """
+    from trr_backend.socials.instagram.child_reply_probe import probe_child_reply_access
+    from trr_backend.socials.instagram.public_probe import (
+        AUTH_ENV_VARS,
+        COOKIE_ENV_VARS,
+        DECODO_ENV_VARS,
+        PROXY_ENV_VARS,
+        PROXY_PROVIDER_ENV_VARS,
+    )
+
+    names = {
+        *AUTH_ENV_VARS,
+        *COOKIE_ENV_VARS,
+        *DECODO_ENV_VARS,
+        *PROXY_ENV_VARS,
+        *PROXY_PROVIDER_ENV_VARS,
+        "TRR_INSTAGRAM_INGESTION_AUTH_USERNAME",
+        "TRR_INSTAGRAM_INGESTION_AUTH_USER_ID",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    }
+    saved = {name: os.environ.pop(name) for name in names if name in os.environ}
+    try:
+        result = probe_child_reply_access(shortcode, parent_comment_id)
+        return {**result, "execution_backend": "modal", "auth_state": "public", "proxy_state": "none"}
+    finally:
+        os.environ.update(saved)
+
+
+@app.function(
     name=str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or "probe_getty_remote_access").strip()
     or "probe_getty_remote_access",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
@@ -1665,12 +1870,24 @@ def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str 
     name=str(os.getenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION") or "run_social_posts_job").strip()
     or "run_social_posts_job",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_posts_job"],
+    region="us-east",
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_CONCURRENCY_LIMIT,
 )
-def run_social_posts_job(job_id: str, dispatch_token: str | None = None) -> dict[str, object]:
+def run_social_posts_job(
+    job_id: str | None = None,
+    dispatch_token: str | None = None,
+    *,
+    ingestion_reservation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if ingestion_reservation is not None:
+        if job_id is not None or dispatch_token is not None:
+            raise ValueError("Legacy job and ingestion reservation are mutually exclusive")
+        return _execute_ingestion_reservation(ingestion_reservation, stages={"listing", "post_details"})
+    if not job_id:
+        raise ValueError("Legacy social post job identity is required")
     return _execute_social_job(job_id, worker_prefix="modal:social-posts", dispatch_token=dispatch_token)
 
 
@@ -1678,12 +1895,23 @@ def run_social_posts_job(job_id: str, dispatch_token: str | None = None) -> dict
     name=str(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION") or "run_social_media_job").strip()
     or "run_social_media_job",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_media_job"],
+    region="us-east",
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_MEDIA_CONCURRENCY_LIMIT,
 )
-def run_social_media_job(job_id: str) -> dict[str, object]:
+def run_social_media_job(
+    job_id: str | None = None,
+    *,
+    ingestion_reservation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if ingestion_reservation is not None:
+        if job_id is not None:
+            raise ValueError("Legacy job and ingestion reservation are mutually exclusive")
+        return _execute_ingestion_reservation(ingestion_reservation, stages={"media"})
+    if not job_id:
+        raise ValueError("Legacy social media job identity is required")
     return _execute_social_job(job_id, worker_prefix="modal:social-media")
 
 
@@ -1691,12 +1919,23 @@ def run_social_media_job(job_id: str) -> dict[str, object]:
     name=str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION") or "run_social_comments_job").strip()
     or "run_social_comments_job",
     image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    region="us-east",
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
     max_containers=_SOCIAL_COMMENTS_CONCURRENCY_LIMIT,
 )
-def run_social_comments_job(job_id: str) -> dict[str, object]:
+def run_social_comments_job(
+    job_id: str | None = None,
+    *,
+    ingestion_reservation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if ingestion_reservation is not None:
+        if job_id is not None:
+            raise ValueError("Legacy job and ingestion reservation are mutually exclusive")
+        return _execute_ingestion_reservation(ingestion_reservation, stages={"comments"})
+    if not job_id:
+        raise ValueError("Legacy social comments job identity is required")
     return _execute_social_job(job_id, worker_prefix="modal:social-comments")
 
 
@@ -1796,51 +2035,82 @@ def _recover_stale_pending_social_catalog_launches(
     }
 
 
+def _execute_ingestion_reservation(reservation: dict[str, object], *, stages: set[str]) -> dict[str, object]:
+    from trr_backend.ingestion.runtime import activity_reservation, run_ingestion_activity
+
+    safe = activity_reservation(reservation)
+    if safe["stage"] not in stages:
+        raise ValueError("Ingestion stage does not match this Modal worker lane")
+    try:
+        return run_ingestion_activity(safe)
+    finally:
+        _close_db_pools_after_worker("instagram_ingestion")
+
+
 @app.function(
     image=_image,
     secrets=_secrets,
     retries=0,
     timeout=15 * 60,
     max_containers=_SOCIAL_RECOVERY_CONCURRENCY_LIMIT,
+    region="us-east",
     **_modal_cron_schedule_kwargs("*/2 * * * *"),
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
-    from trr_backend.socials import social_season_analytics_impl as social_provider
-    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
-
-    register_social_control_plane_providers(social_provider.__dict__)
-    from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
-
-    started_at = _worker_started(
-        "social_recovery",
-        function_name="sweep_social_dispatch_queue",
-    )
+    result = None
     try:
-        result = recover_and_dispatch_due_social_jobs()
-        try:
-            launch_recovery = _recover_stale_pending_social_catalog_launches()
-        except Exception:  # noqa: BLE001 - recovery is best-effort; never fail the sweep
-            logger.warning(
-                "sweep_social_dispatch_queue: pending catalog launch recovery sweep failed",
-                exc_info=True,
-            )
-            launch_recovery = {"status": "error"}
-        result["pending_launch_recovery"] = launch_recovery
-        _worker_finished(
+        from trr_backend.socials import social_season_analytics_impl as social_provider
+        from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+        register_social_control_plane_providers(social_provider.__dict__)
+        from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
+
+        started_at = _worker_started(
             "social_recovery",
-            started_at,
-            result_status=str(result.get("status") or "completed"),
-            recovered=result.get("recovered"),
-            dispatched=result.get("dispatched"),
-            pending_launches_recovered=launch_recovery.get("recovered"),
+            function_name="sweep_social_dispatch_queue",
         )
-        return result
-    except Exception as exc:
-        _worker_failed("social_recovery", started_at, failure_class=type(exc).__name__)
-        raise
+        try:
+            result = recover_and_dispatch_due_social_jobs()
+            try:
+                launch_recovery = _recover_stale_pending_social_catalog_launches()
+            except Exception:  # noqa: BLE001 - recovery is best-effort; never fail the sweep
+                logger.warning(
+                    "sweep_social_dispatch_queue: pending catalog launch recovery sweep failed",
+                    exc_info=True,
+                )
+                launch_recovery = {"status": "error"}
+            result["pending_launch_recovery"] = launch_recovery
+            _worker_finished(
+                "social_recovery",
+                started_at,
+                result_status=str(result.get("status") or "completed"),
+                recovered=result.get("recovered"),
+                dispatched=result.get("dispatched"),
+                pending_launches_recovered=launch_recovery.get("recovered"),
+            )
+            return result
+        except Exception as exc:
+            _worker_failed("social_recovery", started_at, failure_class=type(exc).__name__)
+            raise
     finally:
         _close_db_pools_after_worker("social_recovery")
+        # Dispatch legacy recovery first. Wake v2 even when legacy import,
+        # bootstrap, or recovery fails; the bounded helper reaps its process.
+        try:
+            from trr_backend.ingestion.runtime import run_ingestion_coordinator
+
+            ingestion_coordinator = run_ingestion_coordinator()
+        except Exception as exc:  # noqa: BLE001 - never mask the legacy result/error
+            ingestion_coordinator = {"status": "error", "failure_class": type(exc).__name__}
+        if ingestion_coordinator.get("status") != "disabled":
+            if result is not None:
+                result["instagram_ingestion_coordinator"] = ingestion_coordinator
+            logger.info(
+                "sweep_social_dispatch_queue: ingestion coordinator status=%s failure_class=%s",
+                ingestion_coordinator.get("status"),
+                ingestion_coordinator.get("failure_class"),
+            )
 
 
 @app.function(
@@ -1930,6 +2200,12 @@ def sync_nbcumv_official_images() -> dict[str, object]:
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
     _validate_modal_maintenance_owner_config()
+    # Reuse the existing minute clock; Reddit executes in its own bounded worker.
+    if os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}:
+        try:
+            dispatch_reddit_capture_work.spawn()
+        except Exception:
+            logger.exception("[executor-heartbeat] Reddit dispatcher wake failed")
     from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 

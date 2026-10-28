@@ -94,7 +94,7 @@ def test_anonymous_job_skips_auth_session_and_cooldown(monkeypatch: pytest.Monke
     monkeypatch.setattr(jr, "_raise_if_auth_cooldown_active", lambda **_kwargs: pytest.fail("cooldown read"))
     monkeypatch.setattr(jr.auth_cooldown, "clear_cooldown", lambda *_args, **_kwargs: pytest.fail("cooldown clear"))
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
-    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: pytest.fail("anonymous proxy selected"))
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
     monkeypatch.setattr(repo, "_job_claim_write_scope", lambda *_args, **_kwargs: nullcontext(True))
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)

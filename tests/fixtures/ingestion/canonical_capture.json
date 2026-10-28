@@ -1,0 +1,137 @@
+{
+  "post": {
+    "shortcode": "FixtureA",
+    "pk": "100001",
+    "post_type": "carousel",
+    "date_time": "2026-10-15T12:00:00+00:00",
+    "taken_at": 1792065600,
+    "caption": "A #Premiere with @cast_member",
+    "likes": 12,
+    "comments": 4,
+    "video_views_observed": 101,
+    "username": "fixture_account",
+    "media_urls": [
+      "https://cdn.example/slide1.jpg",
+      "https://cdn.example/slide2.mp4"
+    ],
+    "thumbnail_url": "https://cdn.example/thumb.jpg",
+    "hashtags": [
+      "Premiere"
+    ],
+    "mentions": [
+      "@cast_member"
+    ],
+    "profile_tags": [
+      "cast_member"
+    ],
+    "collaborators": [
+      "partner"
+    ],
+    "owner_detail": {
+      "username": "fixture_account",
+      "user_id": "owner-1",
+      "full_name": "Fixture Owner",
+      "profile_pic_url": "https://cdn.example/avatar.jpg",
+      "is_verified": true
+    },
+    "tagged_users_detail": [
+      {
+        "username": "cast_member",
+        "user_id": "tag-1",
+        "tag_x": 0.2,
+        "tag_y": 0.7
+      }
+    ],
+    "collaborators_detail": [
+      {
+        "username": "partner",
+        "user_id": "partner-1",
+        "full_name": "Fixture Partner"
+      }
+    ],
+    "child_posts_data": [
+      {
+        "id": "child1",
+        "media_type": 1,
+        "display_url": "https://cdn.example/slide1.jpg"
+      },
+      {
+        "id": "child2",
+        "media_type": 2,
+        "video_url": "https://cdn.example/slide2.mp4"
+      }
+    ],
+    "asset_manifest": {
+      "assets": [
+        {
+          "position": 0,
+          "source_url": "https://cdn.example/slide1.jpg"
+        }
+      ]
+    },
+    "width": 1080,
+    "height": 1350,
+    "media_repost_count": 6,
+    "caption_id": "caption-1",
+    "caption_is_edited": false,
+    "location_id": "place1",
+    "location_name": "Fixture Place",
+    "location_raw": {
+      "id": "place1",
+      "name": "Fixture Place"
+    },
+    "music_info": {
+      "song_name": "Fixture Song"
+    },
+    "audio_url": "https://cdn.example/audio.m4a",
+    "is_paid_partnership": true,
+    "facebook_crosspost": {
+      "post_id": "fb1",
+      "post_url": "https://facebook.example/fb1",
+      "comments_count": 2,
+      "likes_count": 5,
+      "is_shared_to_fb": true,
+      "source": "fixture",
+      "observed_at": "2026-10-15T13:00:00+00:00"
+    }
+  },
+  "comment": {
+    "comment_id": "comment1",
+    "text": "A comment",
+    "username": "commenter",
+    "user_id": "user1",
+    "created_at": 1792065600,
+    "likes": 2,
+    "reply_count": 1,
+    "is_ranked": true,
+    "comment_index": 3,
+    "phase": "ranked",
+    "cursor_payload": {
+      "cursor_min_id": "cursor1"
+    },
+    "owner_full_name": "Fixture Commenter",
+    "owner_profile_pic_url": "https://cdn.example/commenter.jpg",
+    "owner_profile_pic_url_hd": "https://cdn.example/commenter-hd.jpg",
+    "owner_is_verified": false,
+    "owner_is_private": false,
+    "owner_fbid_v2": "fb-user1",
+    "comment_url": "https://www.instagram.com/p/FixtureA/c/comment1/",
+    "media_urls": [
+      "https://cdn.example/comment.gif"
+    ],
+    "source_snapshot_type": "full_comments_scrape",
+    "replies": [
+      {
+        "comment_id": "reply1",
+        "text": "A reply",
+        "username": "replier",
+        "user_id": "user2",
+        "created_at": 1792065700,
+        "likes": 0,
+        "reply_count": 0,
+        "phase": "child",
+        "replies": []
+      }
+    ]
+  }
+}

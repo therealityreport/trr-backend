@@ -20,11 +20,14 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -56,13 +59,17 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials.instagram.constants import (
     GRAPHQL_URL,
-    PROFILE_POSTS_DOC_IDS,
     PROFILE_POSTS_FAST_PAGE_SIZE,
-    PROFILE_POSTS_FRIENDLY_NAME,
     PROFILE_POSTS_PAGE_SIZE,
     PROFILE_POSTS_ROOT_FIELD_NAME,
     WEB_X_ASBD_ID,
 )
+from trr_backend.socials.instagram.credential_guard import (
+    CredentialIdentityMismatch,
+    PinnedCookieIdentity,
+    PublicCookieIdentity,
+)
+from trr_backend.socials.instagram.graphql_response import classify_graphql_response
 from trr_backend.socials.instagram.network_policy import (
     default_instagram_network_policy,
     instagram_scrapling_network_kwargs,
@@ -72,6 +79,7 @@ from trr_backend.socials.instagram.posts_scrapling.proxy import (
     build_posts_proxy_identity,
     posts_proxy_feature_flags,
 )
+from trr_backend.socials.instagram.public_response import parse_public_retry_after
 from trr_backend.socials.scrapling_transport import (
     build_stealthy_fetcher,
     resolve_scrapling_fetcher_options,
@@ -87,7 +95,8 @@ logger = logging.getLogger("socials.instagram.posts_scrapling.fetcher")
 # ---------------------------------------------------------------------------
 
 _IG_APP_ID = "936619743392459"
-_FRIENDLY_NAME = PROFILE_POSTS_FRIENDLY_NAME
+_FRIENDLY_NAME = "PolarisProfilePostsTabContentQuery_connection"
+_CONNECTION_DOC_ID_DEFAULT = "39229011733413759"
 _ROOT_FIELD_NAME = PROFILE_POSTS_ROOT_FIELD_NAME
 _POSTS_REQUEST_DELAY_DEFAULT = 0.15
 _USER_AGENT = (
@@ -122,6 +131,9 @@ _SPIN_R_RE = re.compile(r'"__spin_r":(?P<token>\d+)')
 _SPIN_B_RE = re.compile(r'"__spin_b":"(?P<token>[^"]+)"')
 _SPIN_T_RE = re.compile(r'"__spin_t":(?P<token>\d+)')
 _HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
+_HS_RE = re.compile(r'"(?:haste_session|__hs)":"(?P<token>[^"]+)"')
+_DOCUMENT_CONTEXT_MAX_BYTES = 16 * 1024 * 1024
+_DOCUMENT_CONTEXT_MAX_ITEMS = 100_000
 _REDIRECT_LOOP_RE = re.compile(
     r"(?:exceeded\s+\d+\s+redirects|too[ _-]+many[ _-]+redirects|max(?:imum)?[ _-]+redirects)",
     re.IGNORECASE,
@@ -152,6 +164,168 @@ _AUTHENTICATED_COOKIE_NAMES = frozenset({"sessionid", "ds_user_id"})
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
+
+
+class _WarmupAuthForms(HTMLParser):
+    """Inspect actual auth controls, never script strings or document copy."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ignored_depth = 0
+        self.forms: list[dict[str, Any]] = []
+        self.auth_path: str | None = None
+
+    @staticmethod
+    def action_path(value: str) -> str | None:
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return None
+        if parsed.scheme and parsed.scheme not in {"http", "https"}:
+            return None
+        if parsed.netloc and (parsed.hostname or "").lower() not in {"instagram.com", "www.instagram.com"}:
+            return None
+        path = "/" + parsed.path.lower().lstrip("/")
+        if path == "/accounts/login" or path.startswith("/accounts/login/"):
+            return "login"
+        if any(path == root or path.startswith(root + "/") for root in ("/challenge", "/checkpoint")):
+            return "checkpoint"
+        return None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "template", "noscript"}:
+            self.ignored_depth += 1
+        if self.ignored_depth:
+            return
+        data = dict(attrs)
+        if tag == "form":
+            self.forms.append(
+                {
+                    "path": self.action_path(data.get("action") or ""),
+                    "username": False,
+                    "password": False,
+                    "control": False,
+                }
+            )
+        elif tag in {"input", "button"} and self.forms:
+            form = self.forms[-1]
+            form["control"] = True
+            form["username"] |= tag == "input" and (data.get("name") or "").lower() == "username"
+            form["password"] |= tag == "input" and (
+                (data.get("type") or "").lower() == "password" or (data.get("name") or "").lower() == "password"
+            )
+        elif tag == "meta" and (data.get("http-equiv") or "").lower() == "refresh":
+            match = re.fullmatch(
+                r"\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*['\"]?([^'\"]+)['\"]?\s*", data.get("content") or "", re.I
+            )
+            if match and (path := self.action_path(match.group(1).strip())):
+                self.auth_path = path
+
+    def _finish_form(self, form: dict[str, Any]) -> None:
+        if form["path"] == "login" and form["username"] and form["password"]:
+            self.auth_path = self.auth_path or "login"
+        elif form["path"] == "checkpoint" and form["control"]:
+            self.auth_path = "checkpoint"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "template", "noscript"}:
+            self.ignored_depth = max(0, self.ignored_depth - 1)
+        elif not self.ignored_depth and tag == "form" and self.forms:
+            self._finish_form(self.forms.pop())
+
+
+def _warmup_body_auth_path(text: str) -> str | None:
+    """Warmup-only structured evidence; shared GraphQL heuristics stay intact."""
+    if str(text or "").lstrip().startswith("{"):
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("status") == "fail":
+            codes = {payload.get(key) for key in ("message", "error_type") if isinstance(payload.get(key), str)}
+            if codes & {"checkpoint_required", "challenge_required"}:
+                return "checkpoint"
+            if codes & {
+                "login_required",
+                "unauthorized",
+                "forbidden",
+                "redirect_login",
+                "feedback_required",
+                "consent_required",
+                "sentry_block",
+            }:
+                return "login"
+        return None
+    parser = _WarmupAuthForms()
+    try:
+        parser.feed(str(text or ""))
+        parser.close()
+    except (ValueError, AssertionError):
+        return None
+    for form in parser.forms:
+        parser._finish_form(form)
+    return parser.auth_path
+
+
+def _decode_posts_graphql_payload(response: Any) -> dict[str, Any] | None:
+    """Decode JSON plus the two observed/maintained for-loop guard spellings."""
+    try:
+        payload = response.json()
+    except Exception:
+        text = _response_text(response).lstrip("\ufeff \r\n\t")
+        for prefix in ("for (;;);", "for(;;);"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :].lstrip()
+                break
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _posts_graphql_auth_code(payload: dict[str, Any]) -> str | None:
+    # Observed guarded Meta error envelope. This is source rejection, never a
+    # successful empty connection or evidence that posts no longer exist.
+    if type(payload.get("error")) is int and payload["error"] == 1357001:
+        return "login_required"
+    if payload.get("status") != "fail":
+        return None
+    for key in ("message", "error_type", "error_message"):
+        code = payload.get(key)
+        if isinstance(code, str) and code in {
+            "checkpoint_required",
+            "challenge_required",
+            "feedback_required",
+            "login_required",
+            "consent_required",
+            "sentry_block",
+            "unauthorized",
+            "forbidden",
+            "redirect_login",
+        }:
+            return code
+    return None
+
+
+def _valid_posts_connection(connection: Any, *, reverse: bool) -> bool:
+    """Require native node and pagination proof, without inventing post fields."""
+    if not isinstance(connection, dict):
+        return False
+    edges, info = connection.get("edges"), connection.get("page_info")
+    if not isinstance(edges, list) or not isinstance(info, dict):
+        return False
+    for edge in edges:
+        node = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(node, dict) or not node:
+            return False
+    flag = "has_previous_page" if reverse else "has_next_page"
+    cursor = info.get("start_cursor" if reverse else "end_cursor")
+    if type(info.get(flag)) is not bool:
+        return False
+    if cursor is not None and (not isinstance(cursor, str) or not cursor.strip()):
+        return False
+    return not info[flag] or cursor is not None
 
 
 def _is_redirect_loop_exception(exc: BaseException) -> bool:
@@ -221,7 +395,7 @@ def _global_rate_limit_path(key: str) -> str:
 def _global_rate_cooldown_path(key: str) -> str:
     directory = os.path.join(tempfile.gettempdir(), "trr-instagram-posts-rate")
     os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, f"{_safe_rate_limit_key(key)}.cooldown")
+    return os.path.join(directory, f"{_safe_rate_limit_key(key)}.server-retry-after")
 
 
 def _read_monotonic_timestamp(handle: Any) -> float:
@@ -237,16 +411,25 @@ def _read_monotonic_timestamp(handle: Any) -> float:
     return max(0.0, timestamp)
 
 
+def _read_server_retry_deadline(handle: Any) -> float:
+    handle.seek(0)
+    try:
+        value = float(handle.read().strip())
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value >= 0 else 0.0
+
+
 def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
     delay = max(0.0, float(delay_seconds or 0))
-    if delay <= 0:
+    if not math.isfinite(delay) or delay <= 0:
         return
-    cooldown_until = time.monotonic() + delay
+    cooldown_until = time.time() + delay
     path = _global_rate_cooldown_path(key)
     with open(path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            existing_until = _read_monotonic_timestamp(handle)
+            existing_until = _read_server_retry_deadline(handle)
             handle.seek(0)
             handle.truncate()
             handle.write(f"{max(existing_until, cooldown_until):.6f}")
@@ -333,8 +516,8 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]
     with open(cooldown_path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            cooldown_until = _read_monotonic_timestamp(handle)
-            cooldown_remaining = cooldown_until - time.monotonic()
+            cooldown_until = _read_server_retry_deadline(handle)
+            cooldown_remaining = cooldown_until - time.time()
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     if cooldown_remaining > 0:
@@ -379,8 +562,8 @@ def _pace_global_api_request(*, key: str, delay_seconds: float) -> dict[str, Any
     with open(cooldown_path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            cooldown_until = _read_monotonic_timestamp(handle)
-            remaining = cooldown_until - time.monotonic()
+            cooldown_until = _read_server_retry_deadline(handle)
+            remaining = cooldown_until - time.time()
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     if remaining > 0:
@@ -642,12 +825,105 @@ class InstagramPostsWarmupError(RuntimeError):
         self.retryable = retryable
 
 
+class _DocumentJsonScripts(HTMLParser):
+    """Collect document ServerJS JSON without executing scripts or loaders."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.scripts: list[str] = []
+        self.active: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if (
+            tag == "script"
+            and str(attributes.get("type") or "").lower() == "application/json"
+            and "data-sjs" in attributes
+        ):
+            self.active = []
+
+    def handle_data(self, data: str) -> None:
+        if self.active is not None:
+            self.active.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self.active is not None:
+            self.scripts.append("".join(self.active))
+            self.active = None
+
+
+def _extract_document_dtsg(html: str) -> str | None:
+    """Select one direct document definition, excluding nested request data.
+
+    The observed path is root.require[i][3][0].__bbox.define[j]. Wrapper
+    names and unrelated argument fields do not establish selection. Duplicate,
+    malformed or oversized context stays absent rather than guessing a token.
+    """
+    try:
+        if len(html) > _DOCUMENT_CONTEXT_MAX_BYTES or len(html.encode("utf-8")) > _DOCUMENT_CONTEXT_MAX_BYTES:
+            return None
+        parser = _DocumentJsonScripts()
+        parser.feed(html)
+        parser.close()
+        definitions: list[list[Any]] = []
+        visited = 0
+        for script in parser.scripts:
+            root = json.loads(script)
+            if not isinstance(root, dict) or not isinstance(root.get("require"), list):
+                continue
+            for invocation in root["require"]:
+                visited += 1
+                if visited > _DOCUMENT_CONTEXT_MAX_ITEMS:
+                    return None
+                if not (
+                    isinstance(invocation, list)
+                    and len(invocation) >= 4
+                    and isinstance(invocation[3], list)
+                    and invocation[3]
+                    and isinstance(invocation[3][0], dict)
+                ):
+                    continue
+                box = invocation[3][0].get("__bbox")
+                if not isinstance(box, dict) or not isinstance(box.get("define"), list):
+                    continue
+                for definition in box["define"]:
+                    visited += 1
+                    if visited > _DOCUMENT_CONTEXT_MAX_ITEMS:
+                        return None
+                    if isinstance(definition, list) and definition and definition[0] == "DTSGInitialData":
+                        definitions.append(definition)
+                        if len(definitions) > 1:
+                            return None
+    except (ValueError, RecursionError, UnicodeError):
+        return None
+    if len(definitions) != 1:
+        return None
+    definition = definitions[0]
+    if len(definition) < 3 or definition[1] != [] or not isinstance(definition[2], dict):
+        return None
+    token = definition[2].get("token")
+    if (
+        not isinstance(token, str)
+        or not token
+        or token != token.strip()
+        or len(token) > 4096
+        or token.lower() in {"0", "null", "undefined", "none", "token", "placeholder", "na", "n/a"}
+    ):
+        return None
+    try:
+        token.encode("utf-8")
+    except UnicodeError:
+        return None
+    return token
+
+
 def _extract_page_tokens(html: str) -> dict[str, str]:
-    """Extract LSD / bloks_version / spin_r / spin_b / spin_t / hsi from profile HTML.
+    """Extract optional GraphQL context from this profile document.
 
     Returns keys matching the form-data field names used by Instagram's web
     client: ``lsd``, ``bloks_version``, ``__spin_r``, ``__spin_b``, ``__spin_t``,
-    ``hsi``. Missing tokens are simply absent from the result.
+    ``hsi`` (mapped to wire ``__hsi``), ``__hs`` and ``fb_dtsg``. Missing or
+    ambiguous document DTSG is absent; it is never an authentication verdict.
     """
     tokens: dict[str, str] = {}
     if not html:
@@ -689,6 +965,16 @@ def _extract_page_tokens(html: str) -> dict[str, str]:
         if token:
             tokens["hsi"] = token
 
+    hs_match = _HS_RE.search(html)
+    if hs_match:
+        token = str(hs_match.group("token") or "").strip()
+        if token:
+            tokens["__hs"] = token
+
+    dtsg = _extract_document_dtsg(html)
+    if dtsg:
+        tokens["fb_dtsg"] = dtsg
+
     return tokens
 
 
@@ -716,7 +1002,7 @@ def _build_graphql_headers(
     """Build headers for the GraphQL POST.
 
     Self-contained — does not import from scraper.py. Mirrors the header set
-    the Instagram web client sends for the PolarisProfilePostsQuery.
+    the Instagram web client sends for the profile-post connection operation.
     """
     headers: dict[str, str] = {
         "accept": "*/*",
@@ -759,9 +1045,9 @@ def _build_graphql_form_data(
     """Build the x-www-form-urlencoded payload for the GraphQL posts POST.
 
     Shape mirrors what the Instagram web client sends for the
-    PolarisProfilePostsQuery operation. Runtime tokens
-    (``lsd``, ``__spin_r``, ``__spin_b``, ``__spin_t``, ``hsi``) are merged in
-    only when present.
+    PolarisProfilePostsTabContentQuery_connection operation. Runtime tokens
+    are merged only when present. ``jazoest`` is derived from this document's
+    selected DTSG, never from LSD or an unrelated nested definition.
     """
     reverse = str(direction or "").strip().lower() == "reverse"
     variables = {
@@ -777,13 +1063,16 @@ def _build_graphql_form_data(
         "first": None if reverse else page_size,
         "last": page_size if reverse else None,
         "username": username,
-        "__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": True,
-        "__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider": False,
+        "include_multi_captions": True,
+        "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider": True,
+        "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": True,
+        "__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider": False,
+        "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": False,
     }
     data: dict[str, str] = {
         "av": viewer_id,
         "__d": "www",
-        "__user": viewer_id,
+        "__user": "0",
         "__a": "1",
         "__req": "1",
         "__comet_req": "7",
@@ -793,11 +1082,27 @@ def _build_graphql_form_data(
         "server_timestamps": "true",
         "doc_id": doc_id,
     }
-    for key in ("lsd", "__spin_r", "__spin_b", "__spin_t", "hsi"):
+    for key in ("lsd", "__spin_r", "__spin_b", "__spin_t", "__hs", "fb_dtsg"):
         value = str(page_tokens.get(key) or "").strip()
         if value:
             data[key] = value
+    hsi = str(page_tokens.get("hsi") or "").strip()
+    if hsi:
+        data["__hsi"] = hsi
+    if data.get("fb_dtsg"):
+        data["jazoest"] = f"2{sum(ord(char) for char in data['fb_dtsg'])}"
     return data
+
+
+def _connection_doc_ids() -> tuple[str, ...]:
+    """Keep the supported explicit override on this connection variable contract.
+
+    Shared legacy constants retain their own operation/IDs. Empty or invalid
+    overrides use only the current connection default, never obsolete IDs.
+    """
+    raw = str(os.getenv("SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS") or "")
+    chosen = tuple(dict.fromkeys(value.strip() for value in raw.split(",") if value.strip().isdigit()))
+    return chosen or (_CONNECTION_DOC_ID_DEFAULT,)
 
 
 def _requests_fallback_enabled() -> bool:
@@ -853,7 +1158,17 @@ class InstagramPostsScraplingFetcher:
         allow_requests_recovery: bool = True,
         identity_provider: Any | None = None,
         auth_state: str | None = None,
+        before_source_request: Callable[[str], None] | None = None,
+        source_payload_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
+        source_failure_observer: Callable[[str, float | None], None] | None = None,
+        source_diagnostic_observer: Callable[[dict[str, Any]], None] | None = None,
+        consume_credentials_only: bool = False,
     ) -> None:
+        self._before_source_request = before_source_request
+        self._source_payload_observer = source_payload_observer
+        self._source_failure_observer = source_failure_observer
+        self._source_diagnostic_observer = source_diagnostic_observer
+        self._consume_credentials_only = consume_credentials_only
         self._auth_state = _normalize_auth_state(auth_state)
         self._anonymous_mode = self._auth_state in {"anonymous", "public"}
         self._cookies = [] if self._anonymous_mode else list(cookies or [])
@@ -865,21 +1180,31 @@ class InstagramPostsScraplingFetcher:
             if self._anonymous_mode
             else resolved_raw_cookies
         )
-        self._browser_account_id = str(browser_account_id or "").strip() or None
+        self._credential_identity = (
+            PublicCookieIdentity({})
+            if self._anonymous_mode
+            else PinnedCookieIdentity(self._raw_cookies)
+            if consume_credentials_only
+            else None
+        )
+        if self._credential_identity is not None:
+            self._raw_cookies = self._credential_identity.validate_snapshot(self._raw_cookies)
+        self._browser_account_id = None if self._anonymous_mode else str(browser_account_id or "").strip() or None
         # A3: optional zero-arg callable returning the next pool identity as a
         # PostsRotatedIdentity (cookies, raw_cookies, browser_account_id). Injected
         # from session-resolve only when SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED is
         # on. None => single-identity / pool disabled, so rotate_session only
         # swaps the proxy sticky session.
-        self._identity_provider = identity_provider
+        self._identity_provider = None if self._anonymous_mode else identity_provider
         self._identity_rotation_count = 0
+        proxy_config = None if self._anonymous_mode else proxy_config
         self._proxy_config = proxy_config
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._headless = headless if headless is not None else _env_truthy("SOCIAL_INSTAGRAM_POSTS_HEADLESS", True)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._fast_mode = bool(fast_mode)
-        self._allow_requests_recovery = bool(allow_requests_recovery)
+        self._allow_requests_recovery = bool(allow_requests_recovery) and not self._anonymous_mode
         resolved_page_size = int(
             page_size
             if page_size is not None
@@ -925,7 +1250,7 @@ class InstagramPostsScraplingFetcher:
         # tried this run and which one ultimately succeeded. Operators can
         # cross-reference http_400 / non_json_response spikes with rotation
         # events and decide when to update SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS.
-        self._doc_ids_configured: tuple[str, ...] = tuple(PROFILE_POSTS_DOC_IDS)
+        self._doc_ids_configured: tuple[str, ...] = _connection_doc_ids()
         self._doc_ids_attempted: list[str] = []
         self._doc_id_used: str | None = None
         self._doc_id_attempt_counts: dict[str, int] = {}
@@ -970,7 +1295,10 @@ class InstagramPostsScraplingFetcher:
             self._scrapling_fetcher_options.metadata,
             safe_scrapling_proxy_metadata(),
         )
-        self._fetcher = build_stealthy_fetcher()
+        self._fetcher = None if self._anonymous_mode else build_stealthy_fetcher()
+        self._browser_used = False
+        self._http_client_used: str | None = None
+        self._scrapling_fetcher_invoked: str | None = None
 
         # httpx client (for GraphQL POSTs). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
@@ -992,7 +1320,9 @@ class InstagramPostsScraplingFetcher:
             "scrapling_runtime": dict(self._scrapling_runtime_metadata),
             **self._scrapling_fetcher_metadata,
             "auth_state": self._auth_state,
-            "http_client": "httpx",
+            "http_client": self._http_client_used,
+            "browser_used": self._browser_used,
+            "scrapling_fetcher_class": self._scrapling_fetcher_invoked,
             "impersonate": None,
             "cookie_count": len(self._raw_cookies),
             "authenticated_cookie_count": sum(1 for name in self._raw_cookies if name in _AUTHENTICATED_COOKIE_NAMES),
@@ -1038,7 +1368,11 @@ class InstagramPostsScraplingFetcher:
             "bytes_by_host": dict(sorted(self._bytes_by_host.items())),
             "request_count_by_host": dict(sorted(self._request_count_by_host.items())),
             "network_policy": self._network_policy.to_metadata(),
-            "transport": "httpx_after_browser_warmup",
+            "transport": (
+                "httpx_after_browser_warmup"
+                if self._browser_used and self._http_client_used == "httpx"
+                else self._http_client_used or ("browser" if self._browser_used else None)
+            ),
             "requests_fallback": {
                 "active": bool(self._requests_fallback_active),
                 "reason": self._requests_fallback_reason,
@@ -1109,14 +1443,28 @@ class InstagramPostsScraplingFetcher:
         status_code = _status_code(response)
         location = _safe_location(response) if 300 <= status_code < 400 else ""
         _, location_path_class = _safe_url_classes(f"https://www.instagram.com{location}") if location else ("", "")
+        body_auth_path = _warmup_body_auth_path(text)
         if location_path_class in {"login", "checkpoint", "home"}:
             path_class = location_path_class
-        elif _auth_failure_text(text):
-            path_class = (
-                "checkpoint" if any(token in text.lower() for token in ("checkpoint", "challenge")) else "login"
-            )
+        elif path_class not in {"login", "checkpoint", "home"} and body_auth_path:
+            path_class = body_auth_path
         terminal_redirect = path_class in {"login", "checkpoint", "home"}
-        if status_code in {401, 403} or _auth_failure_text(text) or terminal_redirect:
+        self._emit_source_diagnostic(
+            response,
+            phase="browser_warmup",
+            event="warmup_classification",
+            classification_path_class=path_class,
+            auth_body_marker=body_auth_path is not None,
+            classification=(
+                "auth_rejected"
+                if status_code in {401, 403} or body_auth_path is not None or terminal_redirect
+                else "not_rejected"
+            ),
+        )
+        if status_code in {401, 403} or body_auth_path is not None or terminal_redirect:
+            observer = getattr(self, "_source_failure_observer", None)
+            if observer is not None:
+                observer("source_auth_failed", None)
             self._record_warmup_failure(
                 error_code="instagram_posts_warmup_auth_failed",
                 origin_class=origin_class,
@@ -1129,8 +1477,8 @@ class InstagramPostsScraplingFetcher:
                 error_code="instagram_posts_warmup_auth_failed",
                 retryable=False,
             )
-        self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(response)
+        self._page_tokens = _extract_page_tokens(text)
         if (
             not self._anonymous_mode
             and not self._warmup_cookie_delta
@@ -1186,7 +1534,12 @@ class InstagramPostsScraplingFetcher:
         if not isinstance(raw_cookies, dict):
             raw_cookies = snapshot.get(_LEGACY_WARMUP_SNAPSHOT_COOKIE_STATE_KEY)
         page_tokens = snapshot.get("page_tokens")
-        if isinstance(raw_cookies, dict):
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            # A snapshot is complete identity state, not a partial cookie delta.
+            restored = guard.validate_snapshot(raw_cookies)
+            self._raw_cookies = guard.merge(self._raw_cookies, restored)
+        elif isinstance(raw_cookies, dict):
             self._raw_cookies.update({str(key): str(value) for key, value in raw_cookies.items()})
         if isinstance(page_tokens, dict):
             self._page_tokens = {str(key): str(value) for key, value in page_tokens.items() if str(value)}
@@ -1201,7 +1554,7 @@ class InstagramPostsScraplingFetcher:
         await self._rebuild_http_client()
 
     async def _try_apply_warmup_pool_entry(self) -> bool:
-        if not _warmup_pool_enabled():
+        if self._anonymous_mode or not _warmup_pool_enabled():
             self._warmup_pool_metadata.update({"enabled": False, "hit": False, "miss": False})
             return False
         entry = _POSTS_WARMUP_POOL.get(self._warmup_pool_key)
@@ -1246,8 +1599,19 @@ class InstagramPostsScraplingFetcher:
             )
             return False
 
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            try:
+                restored = guard.validate_snapshot(entry.raw_cookies)
+                merged = guard.merge(self._raw_cookies, restored)
+            except CredentialIdentityMismatch:
+                _POSTS_WARMUP_POOL.pop(self._warmup_pool_key, None)
+                self._warmup_pool_metadata.update({"hit": False, "miss": True, "refresh_reason": "identity_mismatch"})
+                return False
+            self._raw_cookies = merged
+        else:
+            self._raw_cookies.update(entry.raw_cookies)
         entry.use_count += 1
-        self._raw_cookies.update(entry.raw_cookies)
         self._page_tokens = dict(entry.page_tokens)
         self._warmup_cookie_delta = {}
         await self._rebuild_http_client()
@@ -1264,7 +1628,10 @@ class InstagramPostsScraplingFetcher:
         return True
 
     def _store_warmup_pool_entry(self) -> None:
-        if not _warmup_pool_enabled():
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            guard.validate_snapshot(self._raw_cookies)
+        if self._anonymous_mode or not _warmup_pool_enabled():
             return
         _POSTS_WARMUP_POOL[self._warmup_pool_key] = _WarmupPoolEntry(
             raw_cookies=dict(self._raw_cookies),
@@ -1284,6 +1651,11 @@ class InstagramPostsScraplingFetcher:
         )
 
     def _activate_requests_fallback(self, reason: str) -> bool:
+        # The legacy fallback can substitute ambient credentials and has sends
+        # outside the explicit source hooks. Durable activities use the observed
+        # browser/httpx path until a fully observed fallback is supplied.
+        if self._anonymous_mode or getattr(self, "_consume_credentials_only", False):
+            return False
         if not _requests_fallback_enabled():
             return False
         if not str(self._raw_cookies.get("sessionid") or "").strip():
@@ -1348,6 +1720,7 @@ class InstagramPostsScraplingFetcher:
                 direction=direction,
             )
 
+        self._http_client_used = "requests"
         payload = scraper.fetch_posts_graphql(
             username,
             cursor=cursor,
@@ -1487,7 +1860,7 @@ class InstagramPostsScraplingFetcher:
     ) -> InstagramPostsFetchResult:
         """Fetch a single page of posts via GraphQL.
 
-        Iterates through ``PROFILE_POSTS_DOC_IDS`` until one returns a populated
+        Iterates through the configured connection document IDs until one returns a populated
         ``xdt_api__v1__feed__user_timeline_graphql_connection``. Returns on
         first success; on full exhaustion returns a failure result carrying
         the last observed reason.
@@ -1534,6 +1907,7 @@ class InstagramPostsScraplingFetcher:
                 referer=referer,
                 data=data,
                 headers=headers,
+                reverse=normalized_direction == "reverse",
             )
             payload = response.get("payload")
             current_reason = response.get("reason")
@@ -1567,9 +1941,8 @@ class InstagramPostsScraplingFetcher:
                 continue
 
             payload_data = payload.get("data") if isinstance(payload, dict) else {}
-            connection = payload_data.get(_ROOT_FIELD_NAME) if isinstance(payload_data, dict) else {}
-            connection = connection or {}
-            if not connection:
+            connection = payload_data.get(_ROOT_FIELD_NAME) if isinstance(payload_data, dict) else None
+            if connection is None or connection == {}:
                 self._record_doc_id_empty(doc_id, "graphql_empty_connection")
                 if not fetch_reason:
                     fetch_reason = "graphql_empty_connection"
@@ -1579,15 +1952,20 @@ class InstagramPostsScraplingFetcher:
                 )
                 continue
 
-            edges = connection.get("edges") or []
-            page_info = connection.get("page_info") or {}
-            posts: list[dict[str, Any]] = []
-            for edge in edges:
-                if not isinstance(edge, dict):
-                    continue
-                node = edge.get("node") or {}
-                if isinstance(node, dict) and node:
-                    posts.append(node)
+            if not _valid_posts_connection(connection, reverse=normalized_direction == "reverse"):
+                self._last_doc_id_failure_reason = "graphql_invalid_connection"
+                return InstagramPostsFetchResult(
+                    posts=[],
+                    fetch_failed=True,
+                    auth_failed=False,
+                    fetch_reason="graphql_invalid_connection",
+                    request_count=self._request_count,
+                    retryable=False,
+                    direction=normalized_direction,
+                )
+            edges = connection["edges"]
+            page_info = connection["page_info"]
+            posts = [edge["node"] for edge in edges]
 
             if not posts and self._is_stale_empty_page(cursor=cursor, page_info=page_info):
                 stale_empty_seen = True
@@ -1702,8 +2080,8 @@ class InstagramPostsScraplingFetcher:
     def _merge_warmup_cookies(self, response: Any) -> None:
         """Record warmup cookie delta and sync future request headers."""
         new_cookies = _extract_response_cookies(response)
-        self._warmup_cookie_delta = dict(new_cookies)
         self._sync_response_cookies(response)
+        self._warmup_cookie_delta = dict(new_cookies)
 
     def _sync_response_cookies(self, response: Any) -> None:
         """Mirror response cookies into the header-building state.
@@ -1712,6 +2090,10 @@ class InstagramPostsScraplingFetcher:
         GraphQL headers read from `self._raw_cookies`. Keep both aligned so a
         rotated `csrftoken` or `ds_user_id` is visible on the next request.
         """
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.merge(self._raw_cookies, _extract_response_cookies(response))
+            return
         for name, value in _extract_response_cookies(response).items():
             normalized_name = str(name or "").strip().lower()
             if self._anonymous_mode and normalized_name in _AUTHENTICATED_COOKIE_NAMES:
@@ -1720,6 +2102,9 @@ class InstagramPostsScraplingFetcher:
 
     async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.validate_snapshot(self._raw_cookies)
         existing_client = self._http_client
         self._http_client = None
         if existing_client is not None:
@@ -1735,8 +2120,30 @@ class InstagramPostsScraplingFetcher:
             trust_env=False,
         )
 
+    async def _ensure_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            await self._rebuild_http_client()
+        client = self._http_client
+        if client is None:
+            raise RuntimeError("Instagram HTTP client was not created")
+        return client
+
+    @staticmethod
+    def _clear_client_auth(client: httpx.AsyncClient) -> None:
+        # httpx stubs reject None for the setter; a no-op Auth flow is the typed equivalent.
+        if getattr(client, "auth", None) is not None:
+            client.auth = httpx.Auth()
+
+    def _require_fetcher(self) -> Any:
+        """Return the browser fetcher, which anonymous runs never construct."""
+        if self._fetcher is None:
+            raise RuntimeError("Browser fetcher is unavailable for anonymous Instagram posts runs")
+        return self._fetcher
+
     async def set_api_proxy_config(self, proxy_config: PostsProxyConfig | None, *, reason: str) -> None:
         """Switch the direct GraphQL proxy route without rerunning browser warmup."""
+        if self._anonymous_mode:
+            return
         current_url = self._api_proxy_url
         next_url = proxy_config.api_proxy_url if proxy_config else None
         if current_url == next_url:
@@ -1762,6 +2169,8 @@ class InstagramPostsScraplingFetcher:
     def _apply_proxy_config(self, proxy_config: PostsProxyConfig | None, *, reason: str) -> None:
         """Set proxy state from a new config (no client rebuild). Force-applies
         even when the URL is unchanged so a session-rotation always re-pins."""
+        if self._anonymous_mode:
+            return
         previous_fingerprint = self._selected_proxy_fingerprint
         self._proxy_config = proxy_config
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
@@ -1794,6 +2203,8 @@ class InstagramPostsScraplingFetcher:
         no-op for the cookies but still swaps the proxy and rebuilds the client,
         and returns False so the caller knows no real identity advance happened.
         """
+        if self._anonymous_mode or getattr(self, "_consume_credentials_only", False):
+            return False
         rotated_identity = False
         if self._identity_provider is not None:
             try:
@@ -1844,6 +2255,93 @@ class InstagramPostsScraplingFetcher:
     # Transport: browser (warmup only)
     # -------------------------------------------------------------------
 
+    def _emit_source_diagnostic(
+        self,
+        response: Any,
+        *,
+        phase: str,
+        event: str = "transport_response",
+        classification: str = "unclassified",
+        auth_body_marker: bool | None = None,
+        classification_path_class: str | None = None,
+    ) -> None:
+        """Optional fixed metadata only; observation cannot change the result."""
+        observer = getattr(self, "_source_diagnostic_observer", None)
+        if observer is None:
+            return
+        try:
+            origin, path = _safe_url_classes(getattr(response, "url", None))
+            status = _status_code(response)
+            location = _safe_location(response) if 300 <= status < 400 else ""
+            _, location_path = _safe_url_classes(f"https://www.instagram.com{location}") if location else ("", "none")
+            diagnostic = {
+                "phase": phase if phase in {"browser_warmup", "graphql"} else "unknown",
+                "event": event if event in {"transport_response", "warmup_classification"} else "unknown",
+                "http_status": status if type(status) is int and 100 <= status <= 599 else None,
+                "origin_class": origin,
+                "path_class": path,
+                "classification_path_class": (
+                    classification_path_class
+                    if classification_path_class in {"home", "login", "checkpoint", "profile", "other", "unknown"}
+                    else None
+                ),
+                "location_path_class": location_path,
+                "classification": (
+                    classification if classification in {"unclassified", "auth_rejected", "not_rejected"} else "unknown"
+                ),
+                "auth_body_marker": auth_body_marker if type(auth_body_marker) is bool else None,
+            }
+            try:
+                observer(diagnostic)
+            except BaseException:
+                # This observation hook is not a cancellation/transport guard.
+                # Even an aborting callback cannot replace the source outcome.
+                pass
+        except Exception:
+            # Do not expose callback exceptions, response objects, or secrets.
+            pass
+
+    def _observe_source_failure(self, response: Any, *, warmup: bool = False, graphql: bool = False) -> None:
+        """Optional safe rejection boundary, before legacy retries or fallback.
+
+        Pass only fixed classification and numeric Retry-After, never response
+        content, headers, URLs, or credentials. Default callers are unchanged.
+        """
+        observer = getattr(self, "_source_failure_observer", None)
+        if observer is None:
+            return
+        status = _status_code(response)
+        if warmup and status != 429:
+            # Warmup owns the structured auth decision after the document is
+            # returned. Notify once there, before any GraphQL request/fallback.
+            return
+        if graphql and 200 <= status < 300:
+            # Retain decoded GraphQL source evidence before classifying a body
+            # rejection. HTTP/redirect/rate boundaries remain immediate.
+            return
+        location = _safe_location(response) if 300 <= status < 400 else ""
+        response_path = urlparse(str(getattr(response, "url", "") or "")).path
+        auth_failed = status in {401, 403} or any(
+            token in location or response_path.startswith(token)
+            for token in ("/accounts/login", "/challenge", "/checkpoint")
+        )
+        text = _response_text(response)
+        if not auth_failed and text.lstrip().startswith("{"):
+            try:
+                payload = json.loads(text)
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("status") == "fail":
+                message = " ".join(str(payload.get(key) or "") for key in ("message", "error_type"))
+                auth_failed = _auth_failure_text(message) or "unauthorized" in message.lower()
+        if status == 429:
+            retry_after = self._retry_after_seconds(response)
+            if retry_after is not None and not math.isfinite(retry_after):
+                retry_after = None
+            observer("rate_limited", retry_after)
+        elif auth_failed:
+            observer("source_auth_failed", None)
+
     async def _fetch_page(
         self,
         url: str,
@@ -1854,6 +2352,38 @@ class InstagramPostsScraplingFetcher:
         Emits a document request with stripped-down nav headers so that the
         profile HTML comes back with the runtime tokens intact.
         """
+        if self._anonymous_mode:
+            client = await self._ensure_http_client()
+            anonymous_identity = self._credential_identity
+            if anonymous_identity is None:
+                raise RuntimeError("Anonymous Instagram posts fetch requires a public credential identity")
+            self._raw_cookies = anonymous_identity.prepare_jar(client.cookies, self._raw_cookies)
+            self._clear_client_auth(client)
+            client_headers = getattr(client, "headers", {})
+            for key in tuple(client_headers):
+                if key.lower() in {"cookie", "authorization", "proxy-authorization"}:
+                    client_headers.pop(key, None)
+            observer = getattr(self, "_before_source_request", None)
+            if observer is not None:
+                observer("http_warmup")
+            self._request_count += 1
+            self._http_client_used = "httpx"
+            response = await client.get(url, headers=_build_nav_headers(referer))
+            self._sync_response_cookies(response)
+            self._emit_source_diagnostic(response, phase="http_warmup")
+            self._observe_source_failure(response, warmup=True)
+            self._record_response_bytes(response)
+            return response
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.validate_snapshot(self._raw_cookies)
+            self._cookies = [
+                {"name": name, "value": value, "domain": ".instagram.com", "path": "/"}
+                for name, value in self._raw_cookies.items()
+            ]
+        observer = getattr(self, "_before_source_request", None)
+        if observer is not None:
+            observer("browser_warmup")
         self._request_count += 1
         fetch_kwargs = {
             **self._scrapling_fetcher_options.kwargs,
@@ -1868,10 +2398,14 @@ class InstagramPostsScraplingFetcher:
             "retry_delay": 1.0,
             **instagram_scrapling_network_kwargs(policy=self._network_policy),
         }
-        response = await self._fetcher.async_fetch(
+        self._browser_used = True
+        self._scrapling_fetcher_invoked = "StealthyFetcher"
+        response = await self._require_fetcher().async_fetch(
             url,
             **fetch_kwargs,
         )
+        self._emit_source_diagnostic(response, phase="browser_warmup")
+        self._observe_source_failure(response, warmup=True)
         self._record_response_bytes(response)
         return response
 
@@ -1887,11 +2421,32 @@ class InstagramPostsScraplingFetcher:
         headers: dict[str, str],
     ) -> httpx.Response:
         """Plain HTTP POST via httpx. Used for GraphQL posts-page calls."""
-        if self._http_client is None:
-            await self._rebuild_http_client()
+        client = await self._ensure_http_client()
         await self._pace_api_requests()
+        guard = getattr(self, "_credential_identity", None)
+        if guard is not None:
+            self._raw_cookies = guard.prepare_jar(client.cookies, self._raw_cookies)
+            forbidden = {"cookie", "authorization", "proxy-authorization"}
+            headers = {key: value for key, value in headers.items() if key.lower() not in forbidden}
+            client_headers = getattr(client, "headers", None)
+            if client_headers is not None:
+                for key in tuple(client_headers):
+                    if key.lower() in forbidden:
+                        client_headers.pop(key, None)
+            self._clear_client_auth(client)
+            if self._raw_cookies.get("csrftoken"):
+                headers["x-csrftoken"] = self._raw_cookies["csrftoken"]
+        elif getattr(self, "_consume_credentials_only", False) and self._anonymous_mode:
+            client.cookies.clear()
+            client.cookies.update(self._raw_cookies)
+        observer = getattr(self, "_before_source_request", None)
+        if observer is not None:
+            observer("graphql")
         self._request_count += 1
-        response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
+        self._http_client_used = "httpx"
+        response = await client.post(url, data=data, headers=headers)
+        self._emit_source_diagnostic(response, phase="graphql")
+        self._observe_source_failure(response, graphql=True)
         self._record_proxy_response(response)
         self._sync_response_cookies(response)
         return response
@@ -2000,6 +2555,8 @@ class InstagramPostsScraplingFetcher:
             pass
 
     async def _recover_homepage_redirect(self, *, referer: str) -> bool:
+        if self._anonymous_mode:
+            return False
         recovery_url = str(referer or "").strip() or "https://www.instagram.com/"
         self._record_retry_reason("homepage_redirect_recovery")
         try:
@@ -2013,8 +2570,8 @@ class InstagramPostsScraplingFetcher:
         text = _response_text(recovery_response)
         if status_code >= 400 or 300 <= status_code < 400 or _auth_failure_text(text):
             return False
-        self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(recovery_response)
+        self._page_tokens = _extract_page_tokens(text)
         await self._rebuild_http_client()
         return True
 
@@ -2035,16 +2592,9 @@ class InstagramPostsScraplingFetcher:
     @staticmethod
     def _retry_after_seconds(response: Any) -> float | None:
         headers = getattr(response, "headers", None) or {}
-        raw = None
         try:
-            raw = headers.get("retry-after") if hasattr(headers, "get") else None
-        except Exception:  # noqa: BLE001
-            raw = None
-        if raw is None:
-            return None
-        try:
-            return max(0.0, float(raw))
-        except (TypeError, ValueError):
+            return parse_public_retry_after(headers.get("retry-after"))
+        except (AttributeError, TypeError):
             return None
 
     async def _fetch_json_response(
@@ -2054,6 +2604,7 @@ class InstagramPostsScraplingFetcher:
         referer: str,
         data: dict[str, str],
         headers: dict[str, str],
+        reverse: bool = False,
     ) -> dict[str, Any]:
         """JSON fetch via httpx POST with bounded exponential backoff on
         transient failures (429 / 5xx / transport timeout).
@@ -2081,7 +2632,7 @@ class InstagramPostsScraplingFetcher:
 
             status_code = _status_code(response)
             text = _response_text(response)
-            auth_failed = status_code in {401, 403} or _auth_failure_text(text)
+            auth_failed = status_code in {401, 403} or (status_code >= 400 and _warmup_body_auth_path(text) is not None)
 
             # 3xx: explicit redirect handling.
             if 300 <= status_code < 400:
@@ -2133,10 +2684,9 @@ class InstagramPostsScraplingFetcher:
                     retry_after=retry_after,
                 )
                 if status_code == 429:
-                    _record_global_api_cooldown(
-                        key=self._global_rate_limit_key,
-                        delay_seconds=max(sleep_seconds, self._api_delay_seconds),
-                    )
+                    if retry_after is not None:
+                        _record_global_api_cooldown(key=self._global_rate_limit_key, delay_seconds=retry_after)
+                    sleep_seconds = retry_after or 0.0
                 await asyncio.sleep(sleep_seconds)
                 continue
 
@@ -2154,43 +2704,52 @@ class InstagramPostsScraplingFetcher:
             if text and text.lstrip().startswith("<"):
                 return {
                     "failed": True,
-                    "auth_failed": auth_failed or _auth_failure_text(text),
+                    "auth_failed": auth_failed or _warmup_body_auth_path(text) is not None,
                     "reason": "html_challenge_or_auth_required",
                     "retryable": False,
                     "payload": None,
                 }
 
-            # Parse JSON.
-            try:
-                payload = response.json()
-            except Exception:  # noqa: BLE001
-                try:
-                    payload = json.loads(text)
-                except Exception:  # noqa: BLE001
-                    return {
-                        "failed": True,
-                        "auth_failed": auth_failed,
-                        "reason": "non_json_response",
-                        "retryable": False,
-                        "payload": None,
-                    }
+            payload = _decode_posts_graphql_payload(response)
+            if payload is None:
+                return {
+                    "failed": True,
+                    "auth_failed": auth_failed,
+                    "reason": "non_json_response",
+                    "retryable": False,
+                    "payload": None,
+                }
 
-            # Check IG API-level status.
-            if isinstance(payload, dict):
-                status_value = str(payload.get("status") or "").strip().lower()
-                message = str(payload.get("message") or payload.get("error_message") or "").strip().lower()
-                if status_value and status_value != "ok":
-                    return {
-                        "failed": True,
-                        "auth_failed": auth_failed
-                        or any(
-                            token in f"{status_value} {message}"
-                            for token in ("login", "checkpoint", "challenge", "unauthorized")
-                        ),
-                        "reason": status_value or "api_status_fail",
-                        "retryable": False,
-                        "payload": payload,
-                    }
+            observer = getattr(self, "_source_payload_observer", None)
+            if observer is not None:
+                observer("listing", payload)
+
+            auth_code = _posts_graphql_auth_code(payload)
+            decision = classify_graphql_response(payload, reverse=reverse)
+            if auth_code or decision.auth_failed:
+                rejected = getattr(self, "_source_failure_observer", None)
+                if rejected is not None:
+                    rejected("source_auth_failed", None)
+            elif decision.reason == "rate_limited":
+                rejected = getattr(self, "_source_failure_observer", None)
+                if rejected is not None:
+                    rejected("rate_limited", None)
+
+            # Preserve no-error connection validation/doc fallback in the page
+            # parser. Error-bearing responses require the shared strict policy
+            # before any node can be treated as successful source data.
+            if not decision.accepted and (
+                payload.get("error")
+                or payload.get("errors")
+                or decision.reason not in {"graphql_empty_connection", "graphql_invalid_connection"}
+            ):
+                return {
+                    "failed": True,
+                    "auth_failed": auth_code is not None or decision.auth_failed,
+                    "reason": decision.reason or auth_code or "graphql_error",
+                    "retryable": False,
+                    "payload": payload,
+                }
 
             return {
                 "failed": False,

@@ -1,0 +1,16 @@
+{
+  "command": "PYTHONPATH=. .venv/bin/python scripts/ingestion_engine_eval/details_phase_resource.py --runtime-dir /tmp/trr-details-phase-sealed-6f437318 --targets 12 --repetitions 3",
+  "python": "3.11.15",
+  "postgres": "17.10",
+  "harness_sha256": "924f234ad6ce778ffa6be3fa442d45357975f466b5b8a977b22e280c33f08e92",
+  "artifacts": {
+    "details-phase-resource.json": "efbf54214636d95fa025ceb6e763431f9a6ac8cd99fa7d61f50fe70cda7b918e",
+    "details-phase-resource-query-attribution.json": "227e49059b8339a71ed2300f0d8dff5743a0f00aeaa2baaece3947869bbd8653",
+    "details-phase-resource-measurements.json": "2724555f1799410f93d727a8a6a9263468c0589c48c505911caae4e69312b564",
+    "details-phase-resource-sources.json": "0f4a648693c5029766306dd16936237b8efcda4dadf2381ebc8fea39878d3d5f",
+    "details-phase-resource-queries.tar.gz": "5c19e68cedb2a8ab31ccfd96d886bb5a75d64efed6caf7609394f9c3fc7e4f3b",
+    "details-phase-resource-input.json": "e3d67c432b52f4db4ed8aff9c5b9083f37e6dd30c31e44c27ad67da9cf829ec0",
+    "details-phase-resource-cleanup.json": "feac078853604cd763185c3dc488404546cb52ae3130b3a8df8f2e234019389f"
+  },
+  "runtime_directory": "/tmp/trr-details-phase-sealed-6f437318"
+}

@@ -398,3 +398,48 @@ def test_live_reads_are_monkeypatchable_and_queue_read_stays_summary_only(
     assert calls["queue_status"]["include_stuck_jobs"] is False
     assert calls["queue_status"]["fresh"] is True
     assert calls["active_cooldown"] == ("instagram", ACCOUNT)
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_ingestion_reservations_count_only_after_schema_ready(monkeypatch, ready):
+    from trr_backend.db import pg
+
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_SCHEMA_READY", str(ready).lower())
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_DB_SESSION_WORKER_BUDGET", "10")
+    queries = []
+
+    def fetch(sql, params=None, **kwargs):
+        queries.append(sql)
+        if "instagram_ingestion_targets" in sql:
+            assert "d.state='sending'" in sql
+            assert "'media'" not in sql
+            return [{"owner_token": "reserved"}, {"owner_token": "unacknowledged"}]
+        return []
+
+    monkeypatch.setattr(pg, "fetch_all", fetch)
+    monkeypatch.setattr(
+        budget, "_instagram_db_session_pool_usage", lambda **kwargs: {"available": True, "reserved_sessions": 1}
+    )
+    result = budget.get_instagram_db_session_capacity(requested_workers=1)
+    assert result["active_workers"] == (2 if ready else 0)
+    assert result["remaining_workers"] == (8 if ready else 10)
+    assert len(queries) == (2 if ready else 1)
+
+
+def test_ingestion_capacity_read_failure_is_not_available(monkeypatch):
+    from trr_backend.db import pg
+
+    monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_SCHEMA_READY", "true")
+
+    def fetch(sql, params=None, **kwargs):
+        if "instagram_ingestion_targets" in sql:
+            raise RuntimeError("schema unavailable")
+        return []
+
+    monkeypatch.setattr(pg, "fetch_all", fetch)
+    monkeypatch.setattr(
+        budget, "_instagram_db_session_pool_usage", lambda **kwargs: {"available": True, "reserved_sessions": 1}
+    )
+    result = budget.get_instagram_db_session_capacity(requested_workers=1)
+    assert result["available"] is False
+    assert "schema unavailable" in result["read_error"]

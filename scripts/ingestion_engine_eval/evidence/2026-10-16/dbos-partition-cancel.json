@@ -1,0 +1,21 @@
+{
+  "status": "PASS",
+  "case": "cancel_after_final_receipt_before_continuation",
+  "outcomes_retained": {
+    "targets": 1000,
+    "dispatches": 50,
+    "receipts": 50,
+    "attempts": 50
+  },
+  "business_cursor": 0,
+  "outbox_intents": [
+    [
+      0,
+      false
+    ]
+  ],
+  "successor_created": false,
+  "cancelled_dispatch_selection": null,
+  "engine_continuation_result": null,
+  "seconds": 1.603
+}

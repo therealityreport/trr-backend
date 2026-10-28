@@ -12,7 +12,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from trr_backend.socials.instagram.permalink_metadata import fetch_permalink_metadata
+from trr_backend.socials.instagram.permalink_metadata import (
+    _DEFAULT_HEADERS,
+    fetch_permalink_media_item,
+    parse_permalink_metadata,
+)
+from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
+from trr_backend.socials.instagram.request_client import InstagramRequestClient
 from trr_backend.socials.instagram.scraper import InstagramScraper
 
 PUBLIC_PROBE_VERSION = "2026-06-15.public-instagram-proof-v1"
@@ -46,12 +52,6 @@ AUTH_ENV_VARS = (
     "SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID",
     "SOCIAL_INSTAGRAM_CHROME_PROFILE",
 )
-
-BACKOFF_SECONDS_BY_STATUS = {
-    401: (60 * 60, 4 * 60 * 60, 12 * 60 * 60, 24 * 60 * 60),
-    403: (2 * 60 * 60, 6 * 60 * 60, 24 * 60 * 60),
-    429: (2 * 60 * 60,),
-}
 
 BACKOFF_STOP_REASON_BY_STATUS = {
     401: "public_graphql_401_backoff_required",
@@ -119,6 +119,8 @@ class PublicDetailStatus:
     caption_present: bool = False
     stop_reason: str | None = None
     source: str | None = None
+    http_status: int | None = None
+    response_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -132,6 +134,9 @@ class PublicCommentsStatus:
     terminal_reason: str | None = None
     fallback_source: str | None = None
     stop_reason: str | None = None
+
+    request_limit_reached: bool = False
+    source_exhausted: bool = False
 
 
 @dataclass(slots=True)
@@ -257,8 +262,15 @@ def run_public_probe(
     }
 
     page_index = max(0, int(state.get("pages_recovered") or 0)) + 1
+    pages_this_run = 0
     while True:
+        if config.max_pages is not None and pages_this_run >= config.max_pages:
+            terminal_stop_reason = "page_cap_reached"
+            _update_terminal_state(state, stop_reason=terminal_stop_reason, cursor=cursor, completed=False)
+            _save_state(config.state_file, state)
+            break
         page = fetch_page(account, cursor)
+        pages_this_run += 1
         page_posts = [_post_summary_from_node(node, page_index=page_index) for node in page.posts]
         page_posts = [post for post in page_posts if post.shortcode]
         metadata = dict(page.metadata or {})
@@ -282,7 +294,7 @@ def run_public_probe(
 
         if not page_posts and not page.connection_found:
             terminal_stop_reason = _stop_reason_from_metadata(metadata, after_progress=bool(seen_shortcodes))
-            next_retry_after_seconds = _backoff_seconds_for_stop_reason(terminal_stop_reason, state=state)
+            next_retry_after_seconds = None
             _update_terminal_state(
                 state,
                 stop_reason=terminal_stop_reason,
@@ -473,7 +485,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _default_page_fetcher(config: PublicProbeConfig) -> Callable[[str, str | None], PublicProbePage]:
-    scraper = InstagramScraper(cookies={}, browser_account_id=None, attach_auth_session=False)
+    scraper = InstagramScraper(
+        cookies={}, browser_account_id=None, attach_auth_session=False, strict_public_credentials=True
+    )
 
     def fetch_page(account: str, cursor: str | None) -> PublicProbePage:
         payload = scraper.fetch_posts_graphql(
@@ -495,21 +509,70 @@ def _default_page_fetcher(config: PublicProbeConfig) -> Callable[[str, str | Non
 
 
 def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
+    scraper = InstagramScraper(cookies={}, attach_auth_session=False, strict_public_credentials=True)
+    deadline = time.monotonic() + 15.0
+    response_evidence: dict[str, Any] = {"http_status": None, "response_bytes": 0}
+    response_html = ""
+
+    class PublicPermalinkTransport:
+        def check_deadline(self) -> None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("public_detail_deadline")
+
+        def request(self, url: str, *, text: bool = False) -> Any:
+            self.check_deadline()
+            response = scraper._get(url, headers=_DEFAULT_HEADERS, timeout=(4, 10))
+            nonlocal response_html
+            response_html = response.text or ""
+            response_evidence.update(http_status=response.status_code, response_bytes=len(response.content))
+            scraper._request_cookies()
+            if response.status_code != 200:
+                # Do not let the legacy helper retry alternate routes on a public rejection.
+                raise RuntimeError(f"public_detail_http_{response.status_code}")
+            self.check_deadline()
+            return response.text if text else response.json()
+
     try:
-        metadata = fetch_permalink_metadata(shortcode, cookies={})
+        media = fetch_permalink_media_item(
+            shortcode, session=scraper.session, cookies={}, transport=PublicPermalinkTransport()
+        )
+        if media is None:
+            parsed = parse_public_post_from_html(response_html, shortcode=shortcode)
+            media = parsed.to_raw_media() if parsed is not None else None
+        metadata = parse_permalink_metadata(media) if isinstance(media, dict) else None
     except Exception as exc:  # noqa: BLE001
         return PublicDetailStatus(
             shortcode=shortcode,
             attempted=True,
             succeeded=False,
             stop_reason=f"{exc.__class__.__name__}: {exc}",
+            **response_evidence,
         )
+    finally:
+        scraper.session.close()
     if metadata is None:
         return PublicDetailStatus(
             shortcode=shortcode,
             attempted=True,
             succeeded=False,
-            stop_reason="metadata_not_found",
+            stop_reason=(
+                InstagramRequestClient._html_auth_failure_code(response_html)
+                or ("empty_response" if not response_html.strip() else "metadata_not_found")
+            ),
+            **response_evidence,
+        )
+    caption = (metadata.raw_media or {}).get("caption")
+    caption = caption.get("text") if isinstance(caption, dict) else caption
+    caption_present = bool(str(caption or "").strip())
+    if not (caption_present or metadata.media_urls or metadata.thumbnail_url or metadata.taken_at):
+        # A parsed shell with no caption, media or timestamp is not a detail.
+        return PublicDetailStatus(
+            shortcode=shortcode,
+            attempted=True,
+            succeeded=False,
+            stop_reason="metadata_empty",
+            source="public_permalink_metadata",
+            **response_evidence,
         )
     return PublicDetailStatus(
         shortcode=shortcode,
@@ -519,8 +582,9 @@ def _default_detail_fetcher(shortcode: str) -> PublicDetailStatus:
         media_url_count=len(metadata.media_urls or []),
         thumbnail_present=bool(metadata.thumbnail_url),
         taken_at=metadata.taken_at.isoformat() if metadata.taken_at else None,
-        caption_present=bool(str((metadata.raw_media or {}).get("caption") or "").strip()),
+        caption_present=caption_present,
         source="public_permalink_metadata",
+        **response_evidence,
     )
 
 
@@ -534,15 +598,18 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
             browser_account_id=None,
             proxy_config=None,
             timeout_ms=45_000,
+            public_only=True,
         )
-        fetcher._parser = InstagramScraper(cookies={}, browser_account_id=None, attach_auth_session=False)  # noqa: SLF001
-        result = await fetcher.fetch_comments_for_shortcode(
-            post.shortcode,
-            max_comments=0,
-            fetch_replies=True,
-            expected_comment_count=post.comment_count,
-            load_strategy="public_relay",
-        )
+        try:
+            result = await fetcher.fetch_comments_for_shortcode(
+                post.shortcode,
+                max_comments=5,
+                fetch_replies=False,
+                expected_comment_count=post.comment_count,
+                load_strategy="public_relay",
+            )
+        finally:
+            await fetcher.aclose()
         diagnostic = getattr(result, "diagnostic_metadata", {}) or {}
         is_diag_dict = isinstance(diagnostic, dict)
         public_comments_raw = diagnostic.get("public_comments") if is_diag_dict else {}
@@ -560,6 +627,8 @@ def _default_comments_fetcher(post: PublicPostSummary) -> PublicCommentsStatus:
             advertised_count=_optional_int(public_comments.get("advertised_count")),
             recovered_count=recovered,
             coverage_ratio=_optional_float(public_comments.get("coverage_ratio")),
+            request_limit_reached=public_comments.get("request_limit_reached") is True,
+            source_exhausted=public_comments.get("source_exhausted") is True,
             terminal_reason=str(
                 public_comments.get("terminal_reason") or getattr(result, "fetch_reason", "") or ""
             ).strip()
@@ -590,7 +659,8 @@ def _normalize_mode(value: Any) -> str:
 
 
 def _normalize_max_pages(value: Any) -> int | None:
-    return None
+    pages = int(value or 0)
+    return pages if pages > 0 else None
 
 
 def parse_target_years(value: Any) -> tuple[int, ...]:
@@ -689,6 +759,9 @@ def _public_scraper_runtime_metadata(scraper: Any | None = None) -> dict[str, An
     return {
         "scrape_mode": "public_first",
         "auth_state": "public",
+        "http_client": retrieval_meta.get("http_client"),
+        "browser_used": bool(retrieval_meta.get("browser_used", False)),
+        "scrapling_fetcher_class": None,
         "proxy_state": "none",
         "selected_proxy_fingerprint": "none",
         "transport": retrieval_meta.get("retrieval_transport") or retrieval_meta.get("transport"),
@@ -746,20 +819,45 @@ def _detail_status_from_state(row: Mapping[str, Any]) -> PublicDetailStatus:
         caption_present=bool(row.get("caption_present")),
         stop_reason=str(row.get("stop_reason") or "").strip() or None,
         source=str(row.get("source") or "").strip() or None,
+        http_status=_optional_int(row.get("http_status")),
+        response_bytes=max(0, int(row.get("response_bytes") or 0)),
     )
 
 
 def _comments_status_from_state(row: Mapping[str, Any]) -> PublicCommentsStatus:
+    classification = str(row.get("classification") or "public_blocked")
+    advertised_count = _optional_int(row.get("advertised_count"))
+    recovered_count = max(0, int(row.get("recovered_count") or 0))
+    terminal_reason = str(row.get("terminal_reason") or "").strip() or None
+    request_limit_reached = row.get("request_limit_reached") is True
+    source_exhausted = row.get("source_exhausted") is True
+    # Normalize only pre-flag rows with positive, reliable counts and an
+    # explicit target stop. Keep the retained input row unchanged.
+    if (
+        "request_limit_reached" not in row
+        and "source_exhausted" not in row
+        and classification == "public_complete"
+        and type(row.get("advertised_count")) is int
+        and type(row.get("recovered_count")) is int
+        and advertised_count is not None
+        and 0 < recovered_count < advertised_count
+        and terminal_reason in {"child_comments_target_reached", "graphql_relay_target_reached"}
+    ):
+        classification = "public_partial"
+        request_limit_reached = True
+        source_exhausted = False
     return PublicCommentsStatus(
         shortcode=str(row.get("shortcode") or "").strip(),
         attempted=bool(row.get("attempted")),
-        classification=str(row.get("classification") or "public_blocked"),
-        advertised_count=_optional_int(row.get("advertised_count")),
-        recovered_count=max(0, int(row.get("recovered_count") or 0)),
+        classification=classification,
+        advertised_count=advertised_count,
+        recovered_count=recovered_count,
         coverage_ratio=_optional_float(row.get("coverage_ratio")),
-        terminal_reason=str(row.get("terminal_reason") or "").strip() or None,
+        terminal_reason=terminal_reason,
         fallback_source=str(row.get("fallback_source") or "").strip() or None,
         stop_reason=str(row.get("stop_reason") or "").strip() or None,
+        request_limit_reached=request_limit_reached,
+        source_exhausted=source_exhausted,
     )
 
 
@@ -788,7 +886,6 @@ def _collect_details(
         page_posts,
         mode=config.details_mode,
         per_page=config.sample_details_per_page,
-        all_first_three_pages=True,
     ):
         if post.shortcode not in detail_statuses:
             detail_statuses[post.shortcode] = fetch_detail(post.shortcode)
@@ -805,7 +902,6 @@ def _collect_comments(
         ordered,
         mode=config.comments_mode,
         per_page=config.sample_comments_per_page,
-        all_first_three_pages=False,
     ):
         if post.shortcode not in comment_statuses:
             comment_statuses[post.shortcode] = fetch_comments(post)
@@ -816,14 +912,11 @@ def _select_posts_for_mode(
     *,
     mode: str,
     per_page: int,
-    all_first_three_pages: bool,
 ) -> list[PublicPostSummary]:
     if mode == "all":
         return list(page_posts)
     if not page_posts or per_page <= 0:
         return []
-    if all_first_three_pages and page_posts[0].page_index <= 3:
-        return list(page_posts)
     return list(page_posts[:per_page])
 
 
@@ -834,23 +927,6 @@ def _stop_reason_from_metadata(metadata: Mapping[str, Any], *, after_progress: b
     if after_progress:
         return "public_empty_after_progress_retry_later"
     return "public_empty_initial_page"
-
-
-def _backoff_seconds_for_stop_reason(stop_reason: str, *, state: dict[str, Any]) -> int | None:
-    status = None
-    for candidate_status, reason in BACKOFF_STOP_REASON_BY_STATUS.items():
-        if reason == stop_reason:
-            status = candidate_status
-            break
-    if status is None:
-        return None
-    attempts = state.setdefault("backoff_attempts", {})
-    attempt_index = max(0, int(attempts.get(stop_reason) or 0))
-    schedule = BACKOFF_SECONDS_BY_STATUS.get(status) or ()
-    attempts[stop_reason] = attempt_index + 1
-    if not schedule:
-        return None
-    return int(schedule[min(attempt_index, len(schedule) - 1)])
 
 
 def _update_terminal_state(
@@ -866,6 +942,8 @@ def _update_terminal_state(
     state["completed"] = bool(completed)
     state["partial"] = not completed
     state["updated_at"] = datetime.now(UTC).isoformat()
+    state.pop("next_retry_after_seconds", None)
+    state.pop("backoff_attempts", None)
     if retry_after_seconds is not None:
         state["next_retry_after_seconds"] = retry_after_seconds
 
@@ -890,6 +968,8 @@ def _comments_rollup(statuses: list[PublicCommentsStatus]) -> dict[str, Any]:
         "complete": len(complete),
         "partial": len(partial),
         "blocked": len(blocked),
+        "limit_reached": sum(status.request_limit_reached for status in attempted),
+        "source_exhausted": sum(status.source_exhausted for status in attempted),
     }
 
 

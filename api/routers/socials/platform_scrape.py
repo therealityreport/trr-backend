@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter
 
 from ._shared import *
+from ._shared import _run_admin_repo_call  # explicit: star exports via dynamic __all__ are invisible to Pyright
 from .social_landing import *
 
 if TYPE_CHECKING:
@@ -514,7 +515,10 @@ async def scrape_tiktok(
     def _load_cookies(surface: str) -> Any:
         return _load_social_auth_or_503(platform="tiktok", surface=surface, loader=_load_tiktok_cookies)
 
-    return TikTokScrapeResponse(**run_tiktok_scrape(request, load_cookies=_load_cookies, logger=logger))
+    # The scraper is synchronous and the yt-dlp subprocess can run for minutes;
+    # run it on the threadpool so this async route does not block the event loop.
+    payload = await _run_admin_repo_call(run_tiktok_scrape, request, load_cookies=_load_cookies, logger=logger)
+    return TikTokScrapeResponse(**payload)
 
 
 @router.get("/tiktok/preview/{username}")
@@ -538,7 +542,7 @@ async def preview_tiktok_profile(
     def _load_cookies(surface: str) -> Any:
         return _load_social_auth_or_503(platform="tiktok", surface=surface, loader=_load_tiktok_cookies)
 
-    return run_tiktok_preview(username, load_cookies=_load_cookies, logger=logger)
+    return await _run_admin_repo_call(run_tiktok_preview, username, load_cookies=_load_cookies, logger=logger)
 
 
 @router.post("/twitter/search", response_model=TwitterSearchResponse)

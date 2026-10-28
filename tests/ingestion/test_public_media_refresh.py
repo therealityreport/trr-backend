@@ -1,0 +1,325 @@
+"""Public refresh retains fresh evidence under the media fence; isolated PG."""
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+
+from tests.ingestion.test_media_refresh import (
+    AVATAR_FRESH,
+    AVATAR_OLD,
+    FRESH,
+    SECOND,
+    SECOND_FRESH,
+    SOURCE,
+    avatar_payload,
+    fixture_snapshot,
+    lanes,
+    native_payload,
+    no_ambient_http,
+    row,
+)
+from tests.ingestion.test_media_refresh import (
+    database as database_fixture,
+)
+from tests.ingestion.test_public_transport import SequenceSession, html
+from trr_backend.ingestion.avatar_transport import AvatarProfileSource
+from trr_backend.ingestion.domain import RunIntent, Stage
+from trr_backend.ingestion.media import AvatarSource, MediaIncomplete, source_reference
+from trr_backend.ingestion.media_refresh import MediaRefresh
+from trr_backend.ingestion.public_transport import PublicDetailSource
+
+database = database_fixture
+
+
+def owned_fixture(store):
+    run = store.start(
+        RunIntent(account="bravotv", selected_tasks=(Stage.MEDIA,)),
+        idempotency_key=str(uuid4()),
+        engine="dbos",
+        workflow_version="fixture",
+        initiated_by="fixture",
+    )
+    store.discover(
+        run["run_id"],
+        "bravotv",
+        generation=run["generation"],
+        stage=Stage.MEDIA,
+        target_keys=["AAAABC"],
+        max_attempts=3,
+        cursor_state={},
+        page_id="public-media-seed",
+        expected_cursor_state={},
+        seal=True,
+    )
+    owned = {
+        "run_id": run["run_id"],
+        "account": "bravotv",
+        "generation": run["generation"],
+        "stage": Stage.MEDIA,
+        "target_key": "AAAABC",
+    }
+    reservation = store.reserve(**owned)
+    owned["owner_token"] = str(reservation["owner_token"])
+    store.acquire(**owned)
+    return owned
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_public_native_refresh_has_no_credential_selection_and_preserves_storage_identity(lanes, changed):
+    store, tx = lanes
+    owned = owned_fixture(store)
+    node = native_payload(shortcode="AAAABC")["items"][0]
+    if changed:
+        node["carousel_media"].reverse()
+    envelope = {"data": {"xdt_api__v1__media__shortcode__web_info": {"items": [node]}}}
+    session = SequenceSession([], [{"body": html(envelope), "headers": {"content-type": "text/html"}}])
+    sources = []
+
+    def factory(**kwargs):
+        sources.append(kwargs)
+        return PublicDetailSource(**kwargs, session_factory=lambda: session)
+
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=lambda: pytest.fail("public refresh selected authentication"),
+        public_only=True,
+        public_detail_source_factory=factory,
+    )
+    original = replace(fixture_snapshot(), shortcode="AAAABC")
+    original_keys = (original.post_id, original.canonical_post_id, original.show_id, original.storage_keys())
+    refresh.bind_snapshot(original)
+    callbacks = {
+        "check_cancelled": lambda: store.check_owner(**owned),
+        "on_request": lambda: store.check_owner(**owned, record_request=True),
+    }
+    if changed:
+        with pytest.raises(MediaIncomplete, match="media_refresh_source_invalid"):
+            refresh(source_reference=source_reference(SOURCE), **callbacks)
+    else:
+        assert refresh(source_reference=source_reference(SOURCE), **callbacks) == FRESH
+        assert refresh(source_reference=source_reference(SECOND), **callbacks) == SECOND_FRESH
+    assert len(sources) == len(session.sent) == 1 and session.closed
+    assert sources[0]["gate"].public_only is True
+    assert "Cookie" not in session.sent[0][0].headers and "Authorization" not in session.sent[0][0].headers
+    assert refresh._snapshot is original
+    assert (original.post_id, original.canonical_post_id, original.show_id, original.storage_keys()) == original_keys
+    assert original.media_urls == (SOURCE, SECOND) and original.shortcode == "AAAABC"
+    assert row(
+        tx,
+        "select requests,outcome from social.instagram_ingestion_targets where run_id=%s and stage='media'",
+        (owned["run_id"],),
+    ) == (1, "unresolved")
+    retained = row(
+        tx,
+        "select stage,source_identity,payload from social.instagram_ingestion_evidence where run_id=%s",
+        (owned["run_id"],),
+    )
+    assert retained is not None
+    assert retained[:2] == ("media", "instagram:post:AAAABC")
+    assert "fresh-private-signature" not in retained[2] and "image_versions2" in retained[2]
+    assert row(tx, "select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],)) == (
+        0,
+    )
+
+
+def test_public_post_refresh_accepts_verified_cdn_relocation(lanes):
+    store, tx = lanes
+    owned = owned_fixture(store)
+    old = SOURCE.replace("scontent.cdninstagram.com", "scontent-lax3-1.cdninstagram.com")
+    fresh = FRESH.replace("scontent.cdninstagram.com", "scontent-mia5-1.cdninstagram.com")
+    node = native_payload(urls=(fresh, SECOND_FRESH), shortcode="AAAABC")["items"][0]
+    envelope = {"data": {"xdt_api__v1__media__shortcode__web_info": {"items": [node]}}}
+    session = SequenceSession([], [{"body": html(envelope), "headers": {"content-type": "text/html"}}])
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=lambda: pytest.fail("public refresh selected authentication"),
+        public_only=True,
+        public_detail_source_factory=lambda **kwargs: PublicDetailSource(**kwargs, session_factory=lambda: session),
+    )
+    original = replace(fixture_snapshot(), shortcode="AAAABC", media_urls=(old, SECOND), thumbnail_url=old)
+    refresh.bind_snapshot(original)
+    callbacks = {
+        "check_cancelled": lambda: store.check_owner(**owned),
+        "on_request": lambda: store.check_owner(**owned, record_request=True),
+    }
+    assert refresh(source_reference=source_reference(old), **callbacks) == fresh
+    assert refresh(source_reference=source_reference(old), **callbacks) == fresh
+    assert len(session.sent) == 1 and session.closed
+    assert "Cookie" not in session.sent[0][0].headers and "Authorization" not in session.sent[0][0].headers
+    assert refresh._snapshot is original and original.media_urls == (old, SECOND)
+    retained = row(tx, "select payload from social.instagram_ingestion_evidence where run_id=%s", (owned["run_id"],))
+    assert retained is not None
+    assert "fresh-private-signature" not in retained[0]
+    assert row(
+        tx, "select requests,outcome from social.instagram_ingestion_targets where run_id=%s", (owned["run_id"],)
+    ) == (
+        1,
+        "unresolved",
+    )
+
+
+__all__ = ["lanes", "no_ambient_http"]
+
+
+def test_public_avatar_refresh_uses_anonymous_profile_once_without_credentials(lanes):
+    store, tx = lanes
+    owned = owned_fixture(store)
+    session = SequenceSession([], [{"payload": avatar_payload()}])
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=lambda: pytest.fail("public avatar selected authentication"),
+        public_only=True,
+        avatar_source_factory=lambda **kw: AvatarProfileSource(**kw, session=session),
+    )
+    original = replace(fixture_snapshot(avatars=(AvatarSource("writer", AVATAR_OLD),)), shortcode="AAAABC")
+    refresh.bind_snapshot(original)
+    callbacks = {
+        "check_cancelled": lambda: store.check_owner(**owned),
+        "on_request": lambda: store.check_owner(**owned, record_request=True),
+    }
+    for _ in range(2):
+        assert refresh(source_reference=source_reference(AVATAR_OLD), **callbacks) == AVATAR_FRESH
+    assert len(session.sent) == 1 and session.closed and refresh._snapshot is original
+    assert "Cookie" not in session.sent[0][0].headers
+    retained = row(
+        tx,
+        "select source_identity,payload from social.instagram_ingestion_evidence where run_id=%s",
+        (owned["run_id"],),
+    )
+    assert retained is not None
+    assert retained[0] == "instagram:profile:writer" and "fresh-signature" not in retained[1]
+    assert row(
+        tx,
+        "select requests,outcome from social.instagram_ingestion_targets where run_id=%s and stage='media'",
+        (owned["run_id"],),
+    ) == (1, "unresolved")
+
+
+@pytest.mark.parametrize("lane", ["local", "modal"])
+def test_public_refresh_gates_share_the_run_placement_lane(lanes, lane):
+    import hashlib
+
+    from trr_backend.ingestion.identity_policy import SourceRequestGate
+
+    store, _ = lanes
+    owned = owned_fixture(store)
+    node = native_payload(shortcode="AAAABC")["items"][0]
+    envelope = {"data": {"xdt_api__v1__media__shortcode__web_info": {"items": [node]}}}
+    detail_session = SequenceSession([], [{"body": html(envelope), "headers": {"content-type": "text/html"}}])
+    avatar_session = SequenceSession([], [{"payload": avatar_payload()}])
+    detail_gates, avatar_gates = [], []
+
+    def detail_factory(**kwargs):
+        detail_gates.append(kwargs["gate"])
+        return PublicDetailSource(**kwargs, session_factory=lambda: detail_session)
+
+    def avatar_gate_factory(**kwargs):
+        gate = SourceRequestGate(**kwargs)
+        avatar_gates.append(gate)
+        return gate
+
+    refresh = MediaRefresh(
+        store=store,
+        owned=owned,
+        owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        credential_provider=lambda: pytest.fail("public refresh selected authentication"),
+        public_only=True,
+        public_detail_source_factory=detail_factory,
+        avatar_source_factory=lambda **kw: AvatarProfileSource(**kw, session=avatar_session),
+        avatar_gate_factory=avatar_gate_factory,
+        network_lane=lane,
+    )
+    refresh.bind_snapshot(replace(fixture_snapshot(avatars=(AvatarSource("writer", AVATAR_OLD),)), shortcode="AAAABC"))
+    callbacks = {
+        "check_cancelled": lambda: store.check_owner(**owned),
+        "on_request": lambda: store.check_owner(**owned, record_request=True),
+    }
+    assert refresh(source_reference=source_reference(SOURCE), **callbacks) == FRESH
+    assert refresh(source_reference=source_reference(AVATAR_OLD), **callbacks) == AVATAR_FRESH
+    expected = hashlib.sha256(f"public:{lane}".encode()).hexdigest()
+    assert [gate.identity_key for gate in detail_gates + avatar_gates] == [expected, expected]
+    assert all(gate.network_lane == lane and gate.public_only for gate in detail_gates + avatar_gates)
+
+
+def test_network_lane_requires_public_media_refresh(lanes):
+    store, _ = lanes
+    with pytest.raises(ValueError, match="Network lanes apply only to public media refresh"):
+        MediaRefresh(
+            store=store,
+            owned=owned_fixture(store),
+            owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            credential_provider=lambda: {"raw_cookies": {}},
+            network_lane="local",
+        )
+
+
+@pytest.mark.parametrize("case", ["http_404", "http_500"])
+def test_missing_avatar_refresh_is_neutral_for_the_local_lane(lanes, case):
+    import hashlib
+
+    from trr_backend.ingestion.post_transport import SourceFailure
+    from trr_backend.socials.instagram.request_client import InstagramRequestFailure
+
+    store, tx = lanes
+    key = hashlib.sha256(b"public:local").hexdigest()
+
+    def reset():
+        with tx() as conn, conn.cursor() as cur:
+            cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (key,))
+
+    reset()
+
+    class Missing:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, *, username, pre_source_request):
+            pre_source_request()
+            raise InstagramRequestFailure(
+                "request_failed", status_code=404 if case == "http_404" else 500, retryable=case == "http_500"
+            )
+
+        def close(self):
+            pass
+
+    for _ in range(3):
+        owned = owned_fixture(store)
+        refresh = MediaRefresh(
+            store=store,
+            owned=owned,
+            owner_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            credential_provider=lambda: pytest.fail("public avatar selected authentication"),
+            public_only=True,
+            avatar_source_factory=Missing,
+            network_lane="local",
+        )
+        refresh.bind_snapshot(
+            replace(fixture_snapshot(avatars=(AvatarSource("writer", AVATAR_OLD),)), shortcode="AAAABC")
+        )
+        with pytest.raises((SourceFailure, MediaIncomplete)):
+            refresh(
+                source_reference=source_reference(AVATAR_OLD),
+                check_cancelled=lambda owned=owned: store.check_owner(**owned),
+                on_request=lambda owned=owned: store.check_owner(**owned, record_request=True),
+            )
+    lane = row(
+        tx,
+        "select consecutive_failures,last_error_code,cooldown_until from social.instagram_detail_request_lanes "
+        "where identity_key=%s",
+        (key,),
+    )
+    reset()
+    if case == "http_500":
+        # Shared public policy follows explicit server waits only. A 500 is
+        # counted, but it cannot invent a local cooldown without Retry-After.
+        assert lane == (3, "request_failed", None)
+    else:
+        assert lane == (0, None, None)

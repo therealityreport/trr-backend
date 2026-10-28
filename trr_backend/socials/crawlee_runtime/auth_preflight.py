@@ -81,25 +81,17 @@ def check_platform_auth(
 ) -> AuthPreflightResult:
     normalized_platform = (platform or "").strip().lower()
 
+    # No platform requires a login session: without cookies every platform runs
+    # its logged-out public path, like Facebook and Threads already did.
     if normalized_platform == "instagram":
         if instagram_cookies:
             return _ok(platform=normalized_platform, mode="cookies", source="SOCIAL_INSTAGRAM_COOKIES_*")
-        return _fail(
-            platform=normalized_platform,
-            mode="cookies",
-            missing=("SOCIAL_INSTAGRAM_COOKIES_JSON|SOCIAL_INSTAGRAM_COOKIES_FILE",),
-            reason="instagram_cookies_missing",
-        )
+        return _ok(platform=normalized_platform, mode="public", source="none")
 
     if normalized_platform == "tiktok":
         if tiktok_cookies:
             return _ok(platform=normalized_platform, mode="cookies", source="SOCIAL_TIKTOK_COOKIES_*|TIKTOK_COOKIES_*")
-        return _fail(
-            platform=normalized_platform,
-            mode="cookies",
-            missing=("SOCIAL_TIKTOK_COOKIES_JSON|SOCIAL_TIKTOK_COOKIES_FILE|TIKTOK_COOKIES_*",),
-            reason="tiktok_cookies_missing",
-        )
+        return _ok(platform=normalized_platform, mode="public", source="none")
 
     if normalized_platform == "twitter":
         if twitter_cookies:
@@ -116,16 +108,8 @@ def check_platform_auth(
             )
         if twikit_credentials:
             return _ok(platform=normalized_platform, mode="twikit", source="TWIKIT_*")
-        return _fail(
-            platform=normalized_platform,
-            mode="cookies_or_bearer_or_twikit",
-            missing=(
-                "SOCIAL_TWITTER_COOKIES_JSON|SOCIAL_TWITTER_COOKIES_FILE|TWITTER_COOKIES_*",
-                "SOCIAL_TWITTER_BEARER_TOKEN|TWITTER_BEARER_TOKEN",
-                "TWIKIT_*",
-            ),
-            reason="twitter_auth_missing",
-        )
+        # Logged-out X access uses the scraper's guest token and syndication paths.
+        return _ok(platform=normalized_platform, mode="public", source="none")
 
     if normalized_platform == "youtube":
         # YouTube scraping currently supports public mode in the existing scraper.

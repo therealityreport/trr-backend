@@ -1,0 +1,1744 @@
+# Instagram fixed-post repair and validation — 2026-10-20
+
+## Acceptance status
+
+Implementation passed offline verification and review. All three detail targets
+passed fresh durable retrieval. Full comment and reply retrieval has not passed.
+Full-history launches, resumptions, retries, and dispatch for `bravotv`
+remain gated; v2 ownership remains enabled. No full-history run was started.
+
+The current source cooldown ends at 2026-10-20 22:32:52.871886 UTC
+(6:32:52 p.m. Eastern). The user-authorized instrumented retry completed at
+20:32 UTC and independently captured an HTTP 200 GraphQL rate rejection.
+Three consecutive resumed tranches have now reported `rate_limited` without
+committed progress. Source attempts have stopped and the one-shot follow-up is
+paused. Cooldown expiry alone does not reopen execution or prove access.
+
+| Fixed post | Details retrieval | Parent retrieval | Reply retrieval |
+| --- | --- | --- | --- |
+| Photo `Dd37XeDly4U` | Passed: fresh source receipt | First page retained; continuation not attempted | Pending child-root query rejected in three resumed tranches |
+| Carousel `Dd60pnHl_ux` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
+| Reel `Dd6m4XKDSQ1` | Passed: fresh source receipt | Held by shared cooldown | Not reached |
+
+Catalog identities select September 2026 posts outside the latest twelve. Catalog
+counts and metadata are setup provenance, never fresh retrieval evidence.
+Unavailable, cached, interrupted, or unresolved outcomes do not pass validation.
+Parent acceptance requires multiple pages and native exhaustion on each post.
+Reply acceptance requires actual parent-linked replies and a multi-page child
+lane on at least one qualified thread. Live interruption/resume and a fresh
+anonymous repeat remain required.
+
+## Candidate behavior
+
+- The public detail adapter tries the maintained public HTML extractor on the
+  already fetched response when the permalink parser finds no media. It does
+  not issue another request or manufacture unknown fields.
+- Repeated public cursors become `cursor_stalled` after committing the page.
+  Ordinary retries retain the block. An explicit cancelled-run lane restart
+  records the old lane, its hash, operator reason, source revision and command
+  identity, then starts only that lane at its root with canonical deduplication.
+- `scripts/ingestion/validate_fixed_posts.py` freezes exact catalog identities,
+  uses the production scheduler, worker, public adapters and persistence, and
+  forces fresh detail work. It supports inspection, cancellation, resume,
+  committed-page interruption and audited lane restart.
+- The operator's shared private budget limits a single active stream to 50
+  document/API requests or 15 minutes per tranche and 200 requests per rolling
+  24 hours. All task probes must use that same ledger. Provider cooldowns can
+  impose longer waits. Competing runs or unresolved owners block execution.
+- Optional Scrapling production runtime remains disabled. Browser capture is
+  reserved for bounded diagnosis. No login, proxy or paid provider is introduced.
+
+## Dependency dispositions
+
+| Component | Candidate / local version | Disposition |
+| --- | --- | --- |
+| Homebrew PostgreSQL tools | 17.11_1 | Updated within major 17; temporary test clusters only |
+| Homebrew libpq | 18.6_1 | Updated client tools; no hosted database update |
+| Homebrew Python | 3.11.17 | Updated; new private validation environment |
+| Standalone uv | 0.13.3 | Updated using self-update; previous binaries retained |
+| Playwright / Patchright | 1.64.0 / 1.64.1 | Updated affected locks and private matching Chromium |
+| curl-cffi | 0.16.3 | Updated affected backend and Modal locks |
+| psycopg2-binary | 2.9.13 | Updated affected backend and Modal locks; bundled libpq 17.11 |
+| psycopg / binary | 3.3.6 | Retained; bundled libpq 18.6 verified |
+| Scrapling / Requests / HTTPX | 0.5 / 2.34.2 / 0.28.1 | Retained current compatible versions |
+| DBOS / pytest | 3.3.0 / 9.1.1 | Retained |
+| OpenSSL 3 / ICU | 3.6.3 / 78.3 | Preserved; offered OpenSSL downgrade excluded |
+| Other PostgreSQL/Python majors | Existing versions | Deferred: no active dependency requires their update |
+| Operator-cookie environment | Existing lock | Deferred: separate authenticated workflow outside public-only scope |
+
+Homebrew dependencies also updated ca-certificates, krb5, readline and xz, and
+installed OpenSSL 4 for the updated formula dependencies. Global OpenSSL 3 links
+were restored; Python reports OpenSSL 3.6.3. Python installation used Homebrew's
+`--ignore-dependencies` after verifying every dependency to avoid the offered
+OpenSSL downgrade. Prior kegs and the original backend environment remain.
+No existing database cluster was migrated and no unrelated service was restarted.
+
+## Verification and review
+
+The fixture repair permits only explicitly registered temporary PostgreSQL
+host/port/database/user combinations. Ambient credentials, service overrides,
+unregistered databases and unrelated networking remain blocked.
+
+- Public transport/comment and validation gate tests: 141 passed.
+- Audited parent/child lane restart regressions: 2 passed.
+- Related composition, command, worker and local execution checks: 166 passed;
+  the exact restricted-role lease fixture follow-up passed separately (1 test).
+- Admission tests after bounded-fixture correction, including full-history
+  denial before a capacity probe: 41 passed.
+- App capability/proxy consumers: 31 passed across two files. No production app
+  build was requested or run.
+- New environment dependency check and Python standard-library imports passed.
+  Isolated PostgreSQL tests pass with the updated tools. Scrapling local network
+  fixture and standalone Playwright Chromium launch passed.
+- Harness tests in the updated environment: 21 passed. The unavailable-outcome
+  regression passed again after a result-label clarification.
+- Independent review found one harness false-success defect: generic workflow
+  completion could include unavailable targets. The repair separates workflow
+  state from retrieval validation, checks fresh retained evidence and committed
+  receipts, and returns exit code 2 for a retrieval nonpass. Full capability
+  acceptance remains separate. Fix-only review passed. No other qualifying
+  defect was found in the reviewed batch.
+
+## Source, deployment and rollback
+
+Starting backend revision: `348c9332267074572756c0c66bf4d3e16a7d1076`,
+branch `chore/repo-hygiene-2026-09-25`. Unrelated dirty source was inventoried,
+hashed and preserved privately. Only task-owned paths may enter the release.
+
+Live provider baseline was verified as workspace `admin-56995`, environment
+`main`, app `trr-backend-jobs` (`ap-DkLTRoSvqhbkGO7fHyHxrD`), deployment `v83`,
+tag `ig-public-enabled-e27568bc`. This was the pre-release baseline.
+
+The idle Mac LaunchAgent `com.trr.instagram-local-worker` was stopped and its
+process exit verified before edits. Its prior configuration points at the editable
+checkout; keep it stopped until the reviewed archive and environment are installed.
+Retain the previous plist, environment and runtime for rollback. A provider
+rollback does not restore secret values or configuration changes.
+
+Release requires a committed Git archive, the same explicit Modal environment for
+deployment and readiness, and a Mac launch configuration pointing to a reviewed
+release directory. Core readiness probes were inspected: they do not perform
+Instagram retrieval. Separate source probes must debit the shared request budget.
+
+## Verified Modal release
+
+Backend candidate commit: `98c6604bae5da16bad5091f04836af3c2eac26ce`.
+Workspace contract commit: `a51b77a`. The archive's 2,537 tracked files were
+byte-verified against the backend commit. Archive SHA-256:
+`37f8838ef7beac7bfae5c235c1dde94e6121b86268a33727e46fa16a44244aac`.
+
+The candidate deployed from that archive to the same verified target as **v84**,
+tag `ig-fixed-post-98c6604b`, at 2026-10-20 11:45:41 Eastern. The deployment
+helper's API cold-start canary returned HTTP 200 on its first attempt.
+
+The required `--env main --probe-core-workers --strict-probes` readiness check
+passed before and after deployment. All six core probes were healthy, with no
+missing functions/endpoints or blocking failures. These probes issued no
+Instagram requests. No secrets or provider configuration values were changed.
+The preceding v83 remains in provider history and had fresh passing core readiness
+evidence immediately before this deployment.
+
+The deployed browser probe reports Playwright 1.64.0, Patchright 1.64.1,
+curl-cffi 0.16.3, Scrapling 0.5 and Chromium 156.0.8078.4. Modal's existing
+Python base remains 3.11.12; the explicit Homebrew Python update and rebuilt Mac
+environment use 3.11.17. These are separate runtime identities.
+
+Deployment and its health checks were completed during the existing Mac source
+cooldown. This does not accept any retrieval cell or the full capability matrix.
+
+## Preflight dispatch reconciliation
+
+The final exclusivity check found one accepted dispatch from cancelled Modal run
+`4e3c0cb5-efc3-4038-9708-fd5341db69b5`. Its target had no owner. Modal's call graph
+confirmed `fc-01M5CSBZFBV5VXZAWHGM30MRZJ` was `SUCCESS` with no child calls.
+
+At 15:53:13 UTC, a conditional transaction changed only dispatch owner token
+`93adbd80-e770-4550-b09d-7fd7d0e614aa` from `accepted` to `expired`. The transaction
+required that exact remote identity and generation, a cancelled newer run
+generation, and no target owner. The before/after records were retained.
+The remote identity, cancelled run, source evidence and checkpoints were preserved.
+No source request or run resume occurred during reconciliation.
+
+## First Mac tranche
+
+Run `81127e19-8b72-4e32-9dd2-b12fc53c8101` used the committed release, exact
+manifest hash `03a521624c38ab2d0e25e0a8b3b65938e288027551501af0357c8b36d16e03f9`,
+and intent hash `c756fdf680d1b6ed512c3524041149c0bd594cde2e1dec118c0645c90ec06e17`.
+It was configured to interrupt after a committed parent page.
+
+At 15:57:03 UTC the photo's public document returned HTTP 200, 590,267 bytes,
+with no redirect. Neither maintained parser yielded an acceptable media object.
+Response SHA-256:
+`f0b742dbfebf7fb6a848ef7419af04dfa0908a4cf2db662e8f2ceae3e0dd7878`.
+Safe response metadata was retained privately; raw bootstrap tokens were not logged.
+
+The durable result was `public_detail_unresolved`. The shared request gate
+deferred further sends until 16:12:10 UTC. The other post details and all comments
+were therefore unattempted in that run; they were not independently proven unavailable.
+The CLI returned exit code 2 and `retrieval_not_passed`, then left the run
+cancelled at generation 2 with zero target owners. The shared task ledger counted
+one actual source request, leaving 199 in its rolling 24-hour allowance.
+
+There were zero successful source evidence rows and zero committed comment pages.
+No page existed to exercise the planned interruption/resume proof. Failure
+handling passed for this incomplete document: counted request, retained diagnostic
+metadata, explicit incomplete result, respected cooldown, and safe cancellation.
+Retrieval and recovery acceptance did not pass.
+
+The previous Mac source was separately archived from `348c9332`; SHA-256:
+`8ef35a618ddbf10ccd64025a55fb1150524c4564f67e768d67b2531480b51a44`.
+A private clone of its environment is pinned to the retained Python 3.11.15
+binary and standard library. Imports and dependency consistency passed; it retains
+psycopg2-binary 2.9.12, Playwright 1.62.0 and curl-cffi 0.16.1. This supplements the
+original plist, original configuration, source patch and file-hash inventory.
+Use the explicit cloned Python executable for recovery; its old console-script
+shebangs still reference the original checkout.
+## Transport diagnosis and second release
+
+A bounded anonymous browser diagnosis retrieved the selected photo. Its observed
+navigation headers alone did not repair the Requests response. The same headers
+with curl-cffi's `chrome150` transport retrieved the native photo through the
+production detail parser. This diagnostic result was not used as durable proof.
+No actual comment-pagination operation was observed in the browser capture;
+the load-more click issued `PolarisLoggedOutDynamicDialogQuery`. This alone does
+not establish that a login is required, and no query names were guessed or changed.
+
+Commit `e6fab2ce149423a96a59ba4256ea340c8040d5a6` selects that transport only for
+public detail documents. The existing credential/cookie guard, request gate,
+deadline, zero retries, and disabled redirects remain. Curl exceptions enter the
+redacted failure path. Explicit `CurlOpt.PROXY=""` disables libcurl environment
+proxy inheritance. Listing and comment transports remain unchanged.
+
+The existing detail/refresh checks passed (57 tests), and eight new adapter checks
+passed, including a real curl option boundary intercepted before network I/O.
+Independent review found the environment-proxy gap, which was fixed and verified;
+no other findings remained. Ruff and scoped diff checks passed.
+
+One reviewer probe may have reached a public permalink once because its attempted
+interception was ineffective. No response metadata was retained. One request was
+conservatively charged to the shared ledger; it is not acceptance evidence. The
+reviewer stopped further probes. No response-specific cooldown can be inferred
+from that call. All subsequent source work used the production gate and budget.
+
+The new Git archive contains 2,539 byte-verified tracked files, SHA-256
+`a6487cc10c5d6d1de5155d4c983b985311926bb10920eb9371eaac0625bfea7d`.
+Its isolated Mac environment was synchronized from the unchanged reviewed lock;
+all 155 installed packages passed the dependency check. Matching browser binaries
+were copied into the release. The previous release remains intact for rollback.
+
+The same archive deployed to `admin-56995/main/trr-backend-jobs` as **v85**, tag
+`ig-fixed-curl-e6fab2ce`, at 2026-10-20 12:28:33 Eastern. The API cold-start canary
+returned HTTP 200 on attempt one. The required strict core readiness checks passed
+with all six core probes healthy and no missing or blocking entries. This proves
+runtime health, not public retrieval from Modal's network. v84 and v83 remain in
+provider history. No secret or provider configuration was changed.
+
+## Durable detail success and parent-page interruption
+
+New run `dbc80df9-0df7-43ca-9abc-2f1d1e393056` freezes source `e6fab2ce`, manifest
+hash `f9838e3e7b4ab52f5ec9964baa7bd060e26f1a155402cb6e19c71d21c6df0def`,
+and the unchanged exact September post selection and intent hash. The earlier
+run and its evidence were preserved.
+
+All three detail targets committed fresh evidence and matching source receipts,
+one request each. The photo then committed its first public parent page: 11 native
+comment identities, a non-exhausted `after` cursor, and persisted provenance
+`PolarisPostCommentsPaginationQuery` / document `26297736713236852`. This is live
+proof of that maintained query's first page, not proof of every pagination query.
+The page receipt is `8c0cf24a-4dd2-4632-b458-754a3953de5b`; its content hash is
+`8da696d4c7c06c7e8d78dea7eb64a72f3168fbcadfbf3e9c01267ea9c0a81a61`.
+The harness intentionally cancelled after the committed parent page (generation 2).
+
+The same run resumed at generation 3. Its next comment attempt made two counted
+requests and received a `rate_limited` outcome. The shared public lane deferred all
+further source calls until **2026-10-20 18:30:10.295022 UTC (2:30:10 p.m. Eastern)**.
+The harness preserved the first page and cancelled at generation 4. Resume cursor
+correctness, later pages, native parent/child exhaustion, qualifying multi-page
+replies, and a fresh anonymous repeat remain unverified. Returned parent counts
+were null, not proved zero; unknown reply coverage must remain unresolved.
+
+The ledger now contains 63 charged requests, including the conservative reviewer
+charge, with 137 remaining in the rolling 24-hour allowance. Budget headroom does
+not override the provider cooldown. No Instagram request is permitted by this
+validation workflow before the recorded cooldown expires.
+
+## Mac configuration and remaining gate
+
+The installed LaunchAgent now points at the isolated `e6fab2ce` release and its
+private environment, not the editable checkout. Its installed plist SHA-256 is
+`80fb36aea9f6cd5d55ed24933f9a6716a845666afab9ed7a1a1e1cfa5c8d25b7`.
+The prior plist, environment, source archive and dependency environment are retained.
+The service remains stopped during incomplete validation. No full-history run
+has started, and the admission gate remains closed.
+
+After the provider cooldown, resume the same frozen run with its private state and
+shared account budget. Do not restart from root or overwrite the manifest. Complete
+parent/child native exhaustion and the independent fresh-session repeat before
+accepting the nine-cell matrix or opening full history. The first failed run and
+the first committed parent page are retained as recovery evidence.
+
+## Bounded resume and stop-rule close-out — 18:31 UTC
+
+This section supersedes the preceding instruction to resume after cooldown.
+Validation remains incomplete; this is an operational stop, not capability
+acceptance or proof of permanent logged-out unavailability.
+
+The implementation session verified the original private manifest, state and
+shared ledger, all 2,539 installed release files against the frozen archive/source,
+and the installed LaunchAgent identity. The workspace relocation resolves through
+the existing `/Users/thomashulihan/Projects` symlink; the isolated release and
+private configuration do not depend on the moved checkout. The worker was
+unloaded and no matching worker or harness process was present before execution.
+
+A read-only database snapshot verified project `vwxfvzutyufrkhfgoeaa`, the frozen
+run at generation 4, unchanged manifest/intent, local placement, no pending control
+command, no competing run/owner/uncertain dispatch, and the source cooldown ending
+at 18:30:10.295022 UTC. The original parent-page receipt, evidence hash and eleven
+canonical comment mappings were intact. No full-history run existed.
+
+The parent resumed run `dbc80df9-0df7-43ca-9abc-2f1d1e393056` using source
+`e6fab2ce149423a96a59ba4256ea340c8040d5a6`, the original private files and shared
+ledger, and `--interrupt-after child`. The clean process environment loaded the
+same private release configuration. No manifest, source, query identity,
+transport selection or request limit was changed.
+
+| Resumed generation | First charged request (UTC) | Charged requests | Result | New committed pages |
+| --- | --- | --- | --- | --- |
+| 3, then cancelled at 4 | 16:30:07.610590 | 2 | `rate_limited`; remaining targets held | 0 |
+| 5, then cancelled at 6 | 18:30:37.296826 | 2 | `rate_limited`; remaining targets held | 0 |
+
+The new tranche ended with exit code 2, `retrieval_not_passed`, and
+`cooldown_or_wait`. The production source gate now records two consecutive
+failures and defers requests until 20:30:39.741308 UTC. The shared rolling ledger
+contains 65 charges, with 135 remaining and no open tranche. No retry was made
+inside either rejection's cooldown.
+
+### What the rejection evidence establishes
+
+Both failed resumes reached the same pending child-root query, not the parent's
+saved `after` cursor. The frozen fetcher hydrates pending children before
+continuing parent pagination. Retained evidence identifies
+`PolarisPostChildCommentsQuery` / document `34884685271179117`, root provenance,
+page size 12, popular sort, a matching parent identity, and null request cursor:
+
+- Earlier rejection evidence: `4663ad8b-a300-4ac1-b0d2-51223292700b`,
+  captured at 16:30:09.957407 UTC.
+- New rejection evidence: `b74c7c7d-6942-44ef-be1c-7eaee6423cc1`,
+  captured at 18:30:39.425862 UTC.
+- Both retained payloads have SHA-256
+  `bd80e05e4f86be9af646f14efdf0f4b41fbd330f82a40011ec244469bcf4500e`.
+
+The runtime reported `rate_limited`, but exact HTTP status and the original
+rate-limit marker are not independently recoverable from these sanitized
+payloads. Reclassifying the retained payload yields `source_incomplete`, and
+the safe failure-basis projection contains no retained rate marker. Do not
+describe this as proven HTTP 429, permanent anonymous unavailability, or a
+successfully transmitted parent continuation.
+
+A private Requests metadata observer was checked offline, including logging
+failures, before this tranche. It made no extra requests and did not alter request
+arguments. It captured no comment calls because durable public comments use
+`httpx.AsyncClient`, with `trust_env=False` and `follow_redirects=False`. It
+therefore supplies no wire-level cursor/authentication proof. No replay was made
+to recover telemetry. Anonymous configuration evidence remains the verified
+frozen public adapter with empty credential inputs, no proxy and the production
+credential/request guards; it is distinct from independent wire evidence.
+
+### Preserved state and final acceptance matrix
+
+The post-tranche read-only snapshot confirmed generation 6, cancelled state,
+no target owners, no open budget tranche, and all six account runs cancelled.
+The original page receipt `8c0cf24a-4dd2-4632-b458-754a3953de5b`, its evidence and
+content hash are unchanged. Before/after observation hashes match. All eleven
+native IDs still map to eleven distinct canonical rows with zero identity
+mismatches. No page or identity was lost. This proves preservation through this
+failed resume, not successful continuation or child-page interruption.
+
+| Fixed post | Details | Parents | Replies |
+| --- | --- | --- | --- |
+| Photo `Dd37XeDly4U` | PASS: retained fresh receipt | INCOMPLETE: one page, eleven IDs, saved cursor; continuation untested | BLOCKED: same child-root query failed twice; no committed child page |
+| Carousel `Dd60pnHl_ux` | PASS: retained fresh receipt | NOT REACHED: shared cooldown | NOT REACHED |
+| Reel `Dd6m4XKDSQ1` | PASS: retained fresh receipt | NOT REACHED: shared cooldown | NOT REACHED |
+
+The two consecutive eligible resumes continued the frozen run's pending child
+work and produced no committed progress. They satisfy the accepted stop rule;
+the rule does not establish a pagination-cursor continuation. Automatic source
+attempts stop here. The multi-page parent/child requirements, deliberate committed
+child interruption/resume, and independent anonymous repeat remain unproven.
+No fresh repeat was started and no lane was restarted from root.
+
+The harness still reports `capability_matrix_acceptance: not_evaluated`.
+An additional source-level constraint remains relevant to later work: current
+comment settlement requires a known expected overall count. Unknown reply
+counts can be resolved by native lane/leaf proof, but native exhaustion alone
+does not satisfy an unknown overall count. This was inspected, not changed or
+established as the cause of the live rejection.
+
+The full-history gate remains installed and the general Mac worker remains
+unloaded. The approved stop requires a next-step decision before more source
+attempts; expiration of the new cooldown is not that decision. Any later repair
+must preserve this frozen run and use a new source-labelled validation run.
+
+Two native investigators supplied artifact/runtime checks and evidence mapping.
+Their routing preparations succeeded and both returned results. Router lifecycle
+reconciliation returned `HOST_ERROR: thread not loaded` for both child IDs, so
+router acceptance and exact delivered-instruction matching remain unverified.
+The parent retained their reports and checked the live database/run outcomes.
+
+Only this validation record changed in the repository. No production code, SQL
+schema, dependency, secret, deployment or service configuration changed. Existing
+passing offline checks were reused; the new private observer received an offline
+stub check. Modal remains at the previously recorded v85 identity; no new Modal
+verification or deployment was needed or performed. TRR-APP build is not
+applicable to this validation/documentation close-out.
+
+## HTTPX instrumentation repair and authorized follow-up — 19:38 UTC
+
+The user explicitly authorized subagents to repair the instrumentation, diagnose
+the child-query failure, and make one bounded retry after cooldown while keeping
+full history gated. This is a specific exception to the preceding operational
+stop; it does not authorize repeated resumed tranches or full-history execution.
+
+The source investigator traced the evidence discrepancy. The public comment
+adapter classifies the native response before retaining a sanitized payload.
+Sanitization removes native messages, errors and rate flags; replay of that saved
+projection can therefore report `source_incomplete` while the original runtime
+reported `rate_limited`. Safe diagnostic ContextVar values must be read inside
+the adapter's async callback, because writes inside `asyncio.run()` do not reach
+the outer caller. No classifier repair is supported by the retained evidence.
+
+The maintained child query and its recorded provenance agree. Actual child
+variables contain the logged-in provider flag, `first`, `is_chronological`,
+`media_id`, `parent_comment_id`, and optional `after`. There is no child
+`sort_order` variable; the retained popular-sort label is provenance. A remote
+query change remains possible but unproven. No query or transport was switched.
+
+A private observer now wraps the actual `httpx.AsyncClient.send` boundary. It
+records UTC/sequence, known query and document identity, header/form agreement,
+bounded flags, hashed media/parent/cursor values, prepared credential-presence
+booleans, client environment/redirect settings, exact HTTP status, buffered-body
+size/hash, Retry-After, and the existing safe native failure projection. It
+examines only buffered content inside the coroutine and handles the native
+`for (;;);` JSON prefix. It adds no requests, preserves arguments, response and
+exception identity, and isolates logging failures. Raw bodies, credentials,
+cookies and arbitrary native messages are excluded.
+
+The private one-shot runner preserves source `e6fab2ce`, the original manifest,
+state, run and ledger. It checks the time floor and live public gate, cancelled
+generation 6/local placement, absent competing runs/owners/worker, budget, and
+the original page/mappings before invoking the unchanged CLI with
+`resume --interrupt-after child --apply`. An exclusive persisted marker prevents
+replaying a started or uncertain invocation. The production per-request guards,
+single-stream lock, 50-request/15-minute limit and rolling daily limit still apply.
+
+Ten offline observer tests passed. Four offline runner cases passed: ready,
+blocked gate, changed generation and existing owner. An actual invocation before
+the cooldown was rejected before source or control work. Independent review of
+the complete observer, tests and runner found no blocking issue. Missing telemetry
+must remain unresolved; it cannot be treated as proof of anonymous transmission
+or native failure classification. Router reconciliation again could not load the
+native child identity; routed acceptance/exact instruction matching remain
+unverified, separate from the retained native reports and passing checks.
+
+The app follow-up `instagram-instrumented-retry` is active for one occurrence at
+**2026-10-20 16:32 America/New_York (20:32 UTC)** in this chat. The reviewed runner
+also refuses execution before 20:30:40 UTC and checks the current database gate.
+At this preparation checkpoint, no additional Instagram request or run resume has
+occurred. The expected result is pending, not a retrieval pass.
+
+Scrapling investigation found that the old browser harness uses an older release,
+run and cooldown and cannot be reused unchanged. Prior retained metadata shows
+one load-more click and `PolarisLoggedOutDynamicDialogQuery`, with no actual
+comment pagination request. No retained HTML/HAR is available for useful offline
+Selector analysis. If the instrumented retry still fails, inspect its native-safe
+diagnostics first; any necessary fresh Scrapling capture must use a reviewed,
+anonymous, tightly bounded harness with the same budget and current cooldown.
+Browser evidence remains diagnostic and cannot satisfy durable retrieval cells.
+
+These repairs affect private diagnostic files only. Production source, SQL,
+secrets, deployment and service configuration are unchanged. No Modal deployment
+or app build applies. Full history remains gated and the general worker stays
+unloaded.
+
+## Instrumented retry result — 20:33 UTC
+
+The one authorized retry ran after the recorded cooldown and fresh guarded
+preflight. It resumed the frozen run at generation 7, made two charged requests,
+returned exit code 2 (`retrieval_not_passed`, `cooldown_or_wait`), and cancelled
+at generation 8. No new comment page was committed. The one-shot app follow-up
+is now paused; the durable started marker prevents replay.
+
+| Request time (UTC) | Request | HTTP | Native result |
+| --- | --- | --- | --- |
+| 20:32:50.592066 | Anonymous document bootstrap | 200 | Buffered HTML, 856,158 bytes |
+| 20:32:52.461056 | Pending child-root GraphQL query | 200 | 114-byte JSON, one critical rate error, no data/child connection |
+
+The native-safe projection contains `rate_message_marker` and `legacy_rate_code`,
+with no scan truncation. The unchanged classifier returned `rate_limited`.
+There was no Retry-After. This proves a GraphQL-level rate rejection over HTTP
+200 for this attempt; it is not HTTP 429. The production fallback consequently
+set the two-hour cooldown to **22:32:52.871886 UTC (6:32:52 p.m. Eastern)**.
+It does not prove a permanent access restriction or a login requirement.
+
+The actual child request used `PolarisPostChildCommentsQuery` /
+`34884685271179117`, matching header/form names, `first=12`, logged-in provider
+false, chronological false, and no cursor. Its media hash matches the numeric
+media portion of the frozen photo's composite native ID; its parent hash matches
+the preceding rejected child root. Authorization, proxy-authorization,
+`sessionid` and `ds_user_id` were absent. `trust_env` and redirects were false.
+The response SHA-256 is
+`c6cd01e6d597b1d60b0baa2398ad005a96f0a1f1d0aa9be29bf295d72c01d44e`.
+The native response now explains the runtime classification; sanitized historical
+replay is not grounds to replace the classifier. Current remote query support
+remains unproven because the request was rejected.
+
+Post-run read-only verification against `vwxfvzutyufrkhfgoeaa` found all six
+account runs cancelled, zero target owners, no pending control and no open budget
+tranche. The original page receipt/hash and before/after observation hashes match.
+All eleven canonical mappings remain present and distinct with zero identity
+mismatches. The rolling ledger contains 67 charged requests, with 133 remaining.
+The retry established neither parent continuation nor child retrieval/exhaustion.
+
+An independent source investigator reviewed the safe HTTPX events and confirmed
+the native rejection diagnosis. Scrapling's retained browser evidence still shows
+only the logged-out dialog query, not successful pagination. No fresh Scrapling
+source request was made during the renewed cooldown: the new evidence already
+establishes the rejection, and another transport would introduce a separate
+comparison. No later browser attempt or automatic retry is scheduled. Any future
+comparison must preserve this run and the shared request limits; full history
+remains gated. Decodo was not used in this retry.
+
+Private evidence includes `httpx-retry-20261020.execution.log`, the safe observer
+JSONL, preflight/post-run snapshots, original-state backup and started marker.
+Only this validation record changed in the repository. No backend source, SQL,
+app build, Modal deployment, secret or service configuration change was needed.
+
+## Decodo setup repair and comparison preparation
+
+The user authorized a bounded Decodo comparison of the same photo, carousel and
+reel, including parent comments and nested replies, while keeping full history
+gated. The scheduled direct retry had already completed as recorded above; its
+result remains the direct baseline. It is not replayed by this comparison.
+
+The standalone `trr-decodo-social-backfill` package had a missing package-local
+helper and could report misleading readiness when MCP configuration was absent.
+PLUGINS commit `9de8d3ae` repairs those defects, adds readiness/root-selection
+regressions, and bumps the package to `1.0.1`. Five regression tests and six syntax
+checks passed. Independent review of the complete package batch found no blocking
+issue. A scoped refresh installed `1.0.1` with source/cache parity and preserved
+listed-only registration and disabled MCP configuration. The installed dry-run
+doctor reports eight passes and two warnings for absent managed API credentials
+and MCP configuration; it does not claim an enabled managed API.
+
+The user's existing Decodo dashboard was inspected in the verified Chrome `TRR`
+profile. The configured proxy identity matched the selected TRR account without
+exposing credentials. One provider-only proxy request returned HTTP 200 and JSON;
+no raw response or egress address was retained. It was conservatively charged to
+the shared ledger, bringing the observed total to 68 requests. No Instagram request
+was made during setup. Existing residential allowance is sufficient for this
+bounded test; no purchase, subscription change or new credential was needed.
+
+The comparison uses explicit requests through the existing residential proxy so
+each source request can be counted. Generic managed scraping API retries would
+not provide the same source-request bound. The private runner must use the frozen
+release's pure parsers, a new diagnostic identity, the existing account ledger and
+local source gate, a single sticky anonymous proxy session, and a durable one-shot
+marker. Limits are 24 source requests total, eight per post, ten minutes, 10 MiB of
+decoded responses, zero automatic retries and no redirects. Stop the whole
+comparison on rate/auth/provider rejection. Full history and the general worker
+remain disabled.
+
+One permalink per post supplies detail evidence and fresh bootstrap context. At
+most two parent pages and two child pages for each of two freshly observed parent
+IDs may follow. Inline reply previews do not count as child-page retrieval. Native
+boolean pagination, cursor linkage and duplicate checks must distinguish genuine
+exhaustion from a bounded partial result. Safe comparison evidence is private;
+this diagnostic does not satisfy the production durable capability matrix.
+
+The retained direct baseline has detail receipts for all three posts, one photo
+parent page with eleven canonical mappings, and no retrieved child page. The
+latest direct retry rejected the photo child root before reaching other comment
+targets. These are retained observations from different times, not a simultaneous
+controlled performance comparison. Decodo retrieval remains pending until its
+reviewed runner executes after the live source gate permits it.
+
+The private runner passed sixteen initial offline tests. Complete independent
+review found native retry-delay handling and failure-time evidence-retention
+defects; both were repaired with cross-page identity evidence in one batch. Eight
+focused tests passed, followed by two affected retry tests after their last change.
+Independent fix-only review found no remaining issue. The default plan command
+confirmed no network or database access. These checks establish preparation, not
+live retrieval success.
+
+The one-shot app follow-up `instagram-decodo-bounded-comparison` is scheduled for
+**October 20, 2026, 18:34 America/New_York (22:34 UTC)**. The driver separately
+enforces the live gate, fixed source/state, shared budget and exclusive execution.
+A started marker prevents repeating a started or uncertain attempt. A safe report
+is retained on cleanup or final-verification failure; such a result is nonpassing.
+The already-completed direct follow-up remains paused. No additional Instagram
+request has been made during this preparation.
+
+Browser verification used the user's existing vendor dashboard in Chrome `TRR`;
+no TRR application startup target was needed. Backend/API production code, app
+contracts and SQL are unchanged. TRR-APP build is not applicable. No Modal update
+is needed for the private diagnostic and standalone plugin repair.
+
+### Local limits and historical comparison
+
+The 200-request rolling daily ceiling is a local fixed-validation budget introduced
+by `98c6604b` on October 20, not an Instagram-published quota. No measured basis
+for that specific ceiling has been established. The two-hour rejection fallback
+is also local policy: the durable public lanes adopted it on October 19 from the
+June public probe. The observed upstream response did not specify that duration.
+The daily budget was not exhausted when Instagram rejected the child query.
+
+The June 16 session record reports a public Modal sample with 33 detail results
+and 823 of 1,208 advertised comments, without login, Decodo or a proxy. This is
+historical reported evidence, not a current replay. Source at `cb5efbfe` confirms
+the public configuration and HTTPX transport; a scraper class name did not mean a
+rendered browser was used. Earlier authenticated successes are not a valid basis
+for explaining away this public result.
+
+Concrete differences remain to test: June parent-first requests and child fetches
+shared one anonymous session, while the current resumed run starts pending child
+work after a fresh bootstrap. The earlier default could skip unknown/zero reply
+counts; strict durable validation probes pending unknown topology. Parent query
+selection and local-versus-Modal egress also differ. The first child query ID is
+unchanged. None of these source differences independently proves the cause of the
+current rejection, and the old partial count does not establish complete nested
+reply coverage. A clean-browser diagnostic is a separate transport experiment;
+the current failing direct attempt was not a fresh browser window.
+
+### User-directed direct browser test
+
+The user then directed testing the same three posts without Decodo first and
+explicitly rejected further scheduled tasks. The Decodo follow-up is paused;
+the direct-retry and older canary follow-ups are also confirmed paused. No new
+schedule is authorized for this test.
+
+The immediate diagnostic uses a fresh temporary browser profile, no saved state,
+no login and no proxy. It leaves the durable run and shared database gate unchanged.
+For this explicitly requested isolated test, the unsupported local two-hour
+fallback is not treated as a server instruction. The browser must stop on an
+actual upstream rate rejection, login requirement or challenge. Source-data
+requests use the existing ledger; static scripts have separate explicit caps.
+This is a small diagnostic, not a resumption of full history or a change to the
+production policy. A local-only startup check confirmed an empty initial cookie
+jar and closed the temporary browser without making an Instagram request.
+
+The first immediate browser attempt exposed a diagnostic mistake: its eight-data-
+request per-post ceiling stopped normal initialization of the photo page. It made
+eight document/XHR/fetch requests and sixteen script requests, verified the photo
+detail identity, and clicked no controls. That was a local cap failure, not an
+observed upstream rate rejection. Its started marker and result remain intact.
+
+A corrected isolated attempt used a new output directory and retained all prior
+ledger entries. Its private accounting override kept the shared stream lock and
+tranche lifecycle, while using explicit diagnostic bounds of 100 data requests,
+50 per post, 150 scripts, 75 per post, five minutes, and at most two comment and
+two reply expansion clicks per post. The production accounting class and shared
+source-gate row were not changed. Three focused correction tests passed; prior
+unaffected synthetic checks and the successful browser launch were reused.
+
+The corrected browser attempt reached the photo, verified its expected identity
+and type, and clicked **Load more comments once**. It then stopped on the native
+comment classifier's `source_auth_failed` result. There were 23 document/XHR/fetch
+requests and 23 script requests; all 46 observed HTTP statuses were 200. The
+rejected JSON body was 125 bytes, with one critical error and no child connection.
+Its SHA-256 is
+`fb43ffdc4b0a7a58f2c7c1d4919e0b88e038cbe181027483dfd7bbd0acd42cb3`.
+There was no Retry-After or retained rate marker. No visible login form was
+observed. The safe projection does not retain the exact authentication message;
+this supports an authentication-related application rejection, not a proven
+particular login requirement. No manually constructed GraphQL request was sent.
+The failing event's query name is retained as `other`, so it cannot be attributed
+to a specific parent or child query from this artifact. The classifier checks
+recognized rate conditions before auth conditions; auth-classified does not prove
+that Instagram's underlying internal reason could not involve throttling.
+
+| Target | Fresh browser detail | Parent comment pages | Nested reply pages |
+| --- | --- | --- | --- |
+| `Dd37XeDly4U` photo | Verified | None; expansion caused rejection | None |
+| `Dd60pnHl_ux` carousel | Not attempted after rejection | Not attempted | Not attempted |
+| `Dd6m4XKDSQ1` reel | Not attempted after rejection | Not attempted | Not attempted |
+
+The original run remained cancelled at generation 8 and passed final verification.
+The account ledger contains 99 recorded requests and zero open tranches after
+both diagnostic attempts. Temporary browser contexts were closed. No Decodo or
+saved/login profile was used, no cooldown was imposed by this test, and all
+Instagram follow-ups remain paused. Full history remains gated. These are actual
+partial test results; neither all-three browser success nor comment/reply
+retrieval has been established.
+
+### Completed three-post browser diagnosis and corrected error attribution
+
+The user explicitly requested immediate tests of the remaining carousel and reel
+and the actual native error, rather than stopping at our classifier label. V3
+visited both targets in independent fresh anonymous/no-proxy browser profiles.
+It retained bounded, sanitized native error fields and actual operation names,
+separated ancillary operation errors from comment/document failures, and allowed
+a per-post access error to leave the other post test runnable. Eight distinct
+focused checks passed with unaffected evidence reused. Parent review accepted the
+changed paths before execution. No scheduled task was created or resumed.
+
+The actual repeated error is **code 1675002, `Unauthorized logged out query.`**,
+severity `CRITICAL`, returned over HTTP 200 by
+`QuickPromotionSupportIGSchemaBatchFetchQuery`, document `26673487622279953`,
+at `/api/graphql`. This is an ancillary promotion-support operation, not a
+parent-comment or child-reply pagination operation. The 125-byte response hash
+matches the previous photo failure. Hash equality identifies identical response
+content but alone cannot recover the earlier request's operation name. A final
+photo-only V4 diagnostic using corrected handling directly observed the same
+promotion operation and native error, removing that attribution uncertainty for
+the new photo attempt.
+
+The earlier diagnostic's decision to stop the whole browser test on this ancillary
+auth/access label was wrong. The native error establishes that this particular
+operation rejects logged-out access; it does not establish a comment rate limit,
+a login requirement for all public comments, or a failed comment-pagination call.
+No matching public documentation for the internal error/query was found; the
+captured request identity and native response supply the evidence here.
+
+| Post | Verified native type | Source-reported comments | Source-reported likes | Corrected browser interaction |
+| --- | --- | --- | --- | --- |
+| `Dd37XeDly4U` | Photo, type 1 | 222 | 15,259 | Two load-more clicks; logged-out dialog query |
+| `Dd60pnHl_ux` | Carousel, type 8 | 34 | 1,319 | Login-route document request observed; no completed load-more click |
+| `Dd6m4XKDSQ1` | Reel/video, type 2 | 96 | 3,153 | Two load-more clicks; logged-out dialog query |
+
+These are fresh detail metadata counts, not retrieved comment rows. All three
+detail identity/type checks passed. Photo and reel each returned HTTP 200 for
+`PolarisLoggedOutDynamicDialogQuery` (133-byte body), recorded one visible dialog,
+and showed no visible username/password form. Carousel recorded `redirect_login`,
+but the request frame identity was not retained, so this does not establish a
+top-level login wall. No recognized native parent or child pagination connection
+was returned by the inspected responses. Supported inline/preview shapes were
+also inspected separately; absence of a recognized shape is not proof that every
+possible bootstrap or DOM comment format was absent.
+
+This explains the current zero-page metric: it counts recognized actual comment
+pagination, while these browser interactions produced ancillary/logged-out UI
+operations. The historical June public HTTPX path explicitly sent parent-comment
+queries, then children; it was not this rendered-browser interaction path. The
+older substantial public retrieval remains valid historical evidence. Current
+browser results do not by themselves prove Instagram globally disabled anonymous
+comment retrieval. The separate earlier HTTPX child-root rate error remains a
+different, independently observed failure.
+
+V3 used 56 data requests and 52 scripts; V4 photo used 28 data requests and 25
+scripts. Both diagnostics completed and final guards verified the frozen run
+unchanged. Comments/replies retrieval did not pass. The shared ledger now records
+183 requests in the rolling window and zero open tranches. Temporary contexts
+closed, the shared gate was not modified, no new cooldown was imposed, and all
+Instagram schedules remain paused. Full history stays gated. Safe records are
+`direct-browser-20261020-v3/result.json` and
+`direct-browser-20261020-v4-photo/result.json` under the existing private task base.
+
+### Immediate reproduction of the June anonymous HTTPX procedure
+
+The user requested the earlier public HTTPX path on all three posts, including
+comments and nested replies, without login, Decodo, or schedules. The diagnostic
+used a fresh guest client for each post, direct HTTPX with environment proxy
+discovery disabled, fresh permalink bootstrap values, the June parent-query
+selection order, parent pages before children, and only newly returned cursors.
+The authenticated curl supplied by the user was structural comparison evidence;
+its cookies, tokens, viewer state, and cursors were not replayed or saved.
+
+The earlier parent operation **works anonymously now**. All three posts returned
+verified details and two native parent-comment pages using
+`PolarisPostCommentsPaginationQuery`, document `25516980651312394`, at
+`https://www.instagram.com/graphql/query/`. All nine baseline requests returned
+HTTP 200. No rate error, native access error, or Retry-After was observed.
+
+| Post | Verified type | Parent pages | Unique parent rows | Native more pages |
+| --- | --- | --- | --- | --- |
+| `Dd37XeDly4U` | Image, type 1, product `feed` | 2 | 21 | Yes |
+| `Dd60pnHl_ux` | Carousel, type 8; eight image children | 2 | 30 | Yes |
+| `Dd6m4XKDSQ1` | Video, type 2, product `clips` | 2 | 30 | Yes |
+
+The six pages contain 81 unique parent comments with no overlap. The local page
+bound was reached; this is not exhaustion. The reproduced June selection rule
+found no positive parsed reply counts and therefore sent no child request in this
+first attempt. That is an untested reply path, not evidence that replies are
+absent or inaccessible. A separately labeled bounded reply diagnostic follows.
+
+Three independent fresh-client GETs to `/p/{shortcode}/comments/` each returned
+HTTP 302 to `/accounts/login/`; redirects were not followed. These UI-route
+results do not negate the successful anonymous GraphQL pagination. The supplied
+authenticated request used `/graphql/query` without a trailing slash, a different
+parent document, logged-in viewer state, and mobile-comments route context.
+
+The full diagnostic sent 12 requests, inspected 2,600,599 decoded bytes, and
+verified that the original cancelled run remained unchanged. The source gate
+was not read or changed, no cooldown was imposed, and schedules remain paused.
+The safe record is `public-httpx-june-repro-20261020/result.json` in the private
+task base. Focused transport/protocol checks and the fixes from one review batch
+passed before execution. This is diagnostic evidence, not production deployment
+or full-history acceptance.
+
+### Supplemental anonymous nested-reply probe
+
+Because the user explicitly requested nested replies, a separate diagnostic
+selected up to two freshly returned parent comments even when the parsed reply
+count was zero or unknown. It reused the reviewed direct transport and June child
+queries, with one fresh parent root per post and no repeated `/comments/` checks.
+This deliberately differs from June's positive-count-only selection. A focused
+regression verified that missing and explicit-zero count fixtures both cause real
+child requests, while preserving their distinct raw-field observations.
+
+The photo bootstrap and parent root succeeded again. All 11 parent nodes had
+`child_comment_count: null`; `reply_count`, `edge_threaded_comments`, and
+`preview_child_comments` were absent. The existing converter produced parsed
+reply counts of zero. Thus the zero used by the earlier selector was not a
+source-reported zero for these nodes. This behavior exists in both June and
+current parsing logic and must not be treated as proof of exhausted replies.
+
+The first real child request used `PolarisPostChildCommentsQuery`, document
+`34884685271179117`, with the same fresh guest jar and a parent ID returned by
+that session. Instagram returned HTTP 200 with the actual native error:
+
+```json
+{"code":1675004,"message":"Rate limit exceeded","severity":"CRITICAL"}
+```
+
+The response contained no child connection. Its 114-byte body SHA-256 is
+`c6cd01e6d597b1d60b0baa2398ad005a96f0a1f1d0aa9be29bf295d72c01d44e`.
+No Retry-After was supplied. This is a child-operation rate rejection, distinct
+from the browser's ancillary promotion-query error 1675002. It does not establish
+a numeric daily quota, a two-hour wait, or the exact scope/internal cause of
+Instagram's limit. Parent pagination succeeded immediately before this rejection.
+
+The diagnostic stopped after that actual rate response: three requests total,
+zero child pages, and no child attempts for the carousel or reel. The requested
+all-three nested-reply coverage therefore remains incomplete. No alternate
+query, session rotation, scheduled retry, or new local cooldown followed the
+rejection. The original cancelled run passed final verification unchanged.
+The safe record is `public-httpx-june-repro-20261020-replies/result.json`.
+
+The combined result is **all-three detail and parent-pagination success; nested
+replies blocked at the first child request; full-history acceptance still gated**.
+These changes are private diagnostic scripts plus this evidence record. Backend
+runtime, app, SQL, and Modal deployment were not changed.
+
+### Other two child operations and requested post figures
+
+The next user request explicitly authorized one child test on each remaining
+post and a production repair for unknown reply counts and the working public
+HTTPX path. The controlled comparison used one anonymous HTTPX client across
+all three detail requests and the carousel/reel parent-child pairs. It made
+exactly one child attempt per remaining post, with no retry, alternate child
+query, proxy, login, scheduled follow-up, or session rotation after rejection.
+HTTP-level rejection or an actual Retry-After remained a whole-test stop.
+
+The carousel parent returned 15 rows, its child returned native 1675004, the reel
+parent then returned 15 rows in the same client, and its child also returned
+1675004. Both child bodies were the same 114-byte `Rate limit exceeded` response
+as the earlier photo child. All seven requests returned HTTP 200 and no
+Retry-After was supplied. This demonstrates that the child operation is rejected
+while the parent operation remains available in that same anonymous session;
+it does not identify Instagram's internal admission policy or a numeric quota.
+No authoritative public explanation of this internal code/query was found.
+
+| Post | Reported comments | Unique parent comments scraped in these bounded tests | Child replies scraped | Likes | Reposts | Shares |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Dd37XeDly4U` image | 222 | 21 | 0 | 15,259 | Not exposed | Not exposed |
+| `Dd60pnHl_ux` carousel | 34 | 30 | 0 | 1,319 | Not exposed | Not exposed |
+| `Dd6m4XKDSQ1` reel | 96 | 30 | 0 | 3,153 | Not exposed | Not exposed |
+
+Counts are deduplicated across all three anonymous diagnostic artifacts, not
+summed across repeated pages. The reported comment total is source metadata;
+the scraped figure is actual unique parent rows observed, not exhaustive
+coverage. Repost/share aliases were absent, not zero, and are not independent
+metrics inferred from the existing normalizer's coalesced repost/share field.
+
+- Image: collaborators and tagged accounts `countessluann`, `kylerichards18`;
+  caption hashtag `RHUGT`; no caption mentions found.
+- Carousel: explicit empty coauthor list; no tagged accounts found at post or
+  eight-slide level; caption hashtag `BravoFanFest`; no caption mentions found.
+- Reel: explicit empty coauthor list; tagged account `rhoc_emilysimpson`;
+  caption hashtag `RHOC`; no caption mentions found.
+
+All three captions were observed directly; accessibility text was not used as
+caption evidence. The user spelling `tabs` was interpreted as tags/tagged
+accounts. Safe field-presence records are in
+`public-httpx-other-replies-20261020/result.json`. Final reconciliation verified
+the original run unchanged. No source-gate row or schedule was changed.
+
+### Maintained repair and release candidate
+
+Source revision `9d7baa61dac791b3cdad079749e2a7700b2b4e4c` preserves native
+missing/null reply expectations through DTO conversion and retained-source
+resume reconstruction. Unknown expectations trigger child probing separately
+from explicit-zero probe limits. Fresh public HTTPX parent pagination uses the
+working June query sequence; durable resumes keep their pinned query and cursor.
+Pending parent pages precede child hydration, while an exhausted parent lane
+can resume children directly. Existing rate guards remain in place.
+
+Validation: 28 targeted transport/count/selection/resume tests and three targeted
+Modal probe tests passed; Ruff and diff checks passed. One complete independent
+review found no blockers. Existing app nullable types were inspected; no app
+code or SQL change was required. Workspace contract revision `bddbc0b` records
+these boundaries. Legacy persisted numeric counts remain compatible; retained
+native evidence determines unknown/exhaustion state.
+
+The isolated local release is installed from the committed archive (SHA-256
+`f692a13aa2eff3e46250d30bfa02edf2f97ea38482e21ea0b4b8f485dd54a2be`). Its
+missing/null/zero/positive contract smoke and public query check passed. The
+LaunchAgent points to that release but remains unloaded in both user and GUI
+domains. Previous release `e6fab2ce149423a96a59ba4256ea340c8040d5a6` and the
+prior plist remain available for rollback. The superseded `98c6604b` runnable
+copy was moved to actual Trash after dependency/process checks; its archive
+remains retained. Original fixed-post artifacts and run state were not repinned.
+
+Deployment target is the live-verified `admin-56995/trr-backend-jobs/main`. The
+maintained backend `.env` is selected explicitly through `TRR_MODAL_SOURCE_ENV`.
+Its ownership flags and timezone were checked against the five existing live
+Modal schedules: existing schedules are preserved, and no new retry or follow-up
+is created. Runtime verification is separate from Instagram source acceptance;
+all-three child rejection and the full-history gate remain unresolved.
+
+### Deployed runtime verification
+
+The owner deployment command completed successfully for the exact candidate:
+Modal **v86**, tag `ig-public-httpx-9d7baa61`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, workspace `admin-56995`, environment `main`.
+The API cold-start canary passed. Target-specific strict readiness with
+`--env main --probe-core-workers --strict-probes --json` passed: `ok` and
+`core_ok` true, no missing functions or advisories, and all six runtime probes
+healthy. The deployed browser-image probe asserted all four count checks true:
+missing is unknown, null is unknown, zero is known, positive is known. These
+probes use synthetic data and do not issue Instagram requests.
+
+The dispatch consumer hard-pins the same workspace/environment/app and rejects
+a mismatched handle. All five existing schedules were read again after deploy
+and match their prior cron expressions and America/New_York timezone. Modal
+v85 and local release `e6fab2ce` are retained for rollback. Safe detailed
+evidence is in the private `modal-public-httpx-*` artifacts.
+
+Backend/API and local runtime repair are verified. App code/build and SQL are
+unchanged and need no new build or migration for this internal contract repair.
+The original generation-8 run is unchanged, no worker/backfill was resumed,
+and no login, Decodo call, new schedule, or source retry was used for release
+verification. Successful runtime rollout does not resolve the observed native
+child-operation rejection or establish full-history completion.
+
+## Child contract comparison with June and current Instagram (2026-10-20)
+
+The user requested further immediate diagnosis of child replies, comparison with the working June implementation and current requests, and another test of all three fixed posts. Login, Decodo, scheduled tasks, and full-history execution remain excluded.
+
+Historical evidence now confirms an actual anonymous child retrieval: the June 15 17:27:46 America/New_York run for `CfhVcINpHiY` recorded public mode, `relay_is_logged_in:false`, 45 parents, 46 flattened rows, and one reply fetched and merged through `PolarisPostChildCommentsQuery` / `34884685271179117`. This is stronger than the earlier aggregate 823-comment evidence. It establishes historical success, not current availability or complete historical coverage.
+
+The bounded comparisons produced these results on each fixed post:
+
+| Comparison | Photo `Dd37XeDly4U` | Carousel `Dd60pnHl_ux` | Reel `Dd6m4XKDSQ1` |
+| --- | --- | --- | --- |
+| Primary `348` with June variables | Native 1675004 | Native 1675004 | Native 1675004 |
+| Primary `348` with explicit null cursors/chronological value and first 50 | Native 1675004 | Native 1675004 | Native 1675004 |
+| Primary `348` with June variables through `/api/graphql` | Native 1675004 | Native 1675004 | Native 1675004 |
+| Alternate `362`, four distinct parents per post across two batches | 4 empty native child connections | 4 empty native child connections | 4 empty native child connections |
+
+The primary response is HTTP 200 with native GraphQL code `1675004`, message `Rate limit exceeded`, severity `CRITICAL`, and the same 114-byte response hash previously recorded. There is no server Retry-After. Parent requests continue to succeed in the same client after child errors. This narrows the failure to the child operation/request context; it does not establish an account-wide daily quota or reveal Instagram's internal rejection rule.
+
+The alternate `PolarisPostCommentsChildrenPaginationtQuery` / `36239935742272683` returned native boolean `has_next_page:false` and no edges for 12 distinct parents total. Their native reply counts were null or absent. Zero retrieved children from unknown-count parents does not verify a working reply path or prove no replies exist. The June loop could try this second document after a first-document error; the current strict path stops on a native rate error. Restoring unconditional fallback without a positive child retrieval is not an established repair.
+
+The current official public asset defines parent query `PolarisLoggedOutDesktopWWWPostCommentsPaginationQuery` / `27837656105907150`. Current browser evidence uses `/api/graphql`. A diagnostic initially sent that newer query through the older `/graphql/query` route and received HTTP 403. Correcting the diagnostic route returned HTTP 200 comment data on all three posts. The response uses exact `POLARIS_<native ID>` media IDs and matching image/carousel/video typenames. Strict offline identity correction verified the retained safe projection without repeating the successful source requests.
+
+The current parent response contained 11/15/15 rows; every native `child_comment_count` was null. These values remain unknown. The captured `PolarisLoggedOutDesktopWWWPostChildComments.react` control invokes the logged-out intent dialog rather than dispatching a child query. This establishes that specific UI control's behavior, not universal anonymous API prohibition. An April third-party child document `26914912424764761` returned a distinct document-not-found error on all three posts and is not a current verified replacement.
+
+Existing capabilities remain in maintained source: parent threads, nested replies, comment media, rendered hidden-comment recovery, and Facebook crosspost count accounting. Facebook counts can come from crosspost metadata and do not alone establish fetched Facebook comment bodies. None of these categories was removed by this work.
+
+Private evidence is under `~/.codex/tmp/trr-instagram-repair-01a1599f/child-contract-20261020/`, including `comparison-findings.md`, `june-positive-child-proof.json`, `variant-348-null/result.json`, `variant-362-june/result.json`, `current-api-positive362-v2/result.json`, `primary-child-api348/result.json`, and `secondary362-sample/result.json`. Focused offline request-contract, identity, selection, and stop tests passed before the changed diagnostic branches ran. Every completed live batch retained `original_run_unchanged:true` and `final_guard_status:verified`.
+
+No replacement child contract passed a positive retrieval check. This follow-up changes private diagnostics and this evidence record only. Backend runtime remains the previously verified Modal v86, source `9d7baa61dac791b3cdad079749e2a7700b2b4e4c`, in `admin-56995 / trr-backend-jobs / main`; no new deployment, app build, or SQL change is required. The original run remains cancelled at generation 8, the local worker remains unloaded, and full history remains gated. No schedule, login, or Decodo usage was introduced.
+
+
+## Exact June control recovered a reply (2026-10-20)
+
+The follow-up used the exact historical post `CfhVcINpHiY`, media `2873672329179986072`, and parent `18034559608366960`. Both runs verified the post identity and found that parent in the current 15-row parent page. Each used one fresh anonymous client and exactly three source requests (bootstrap, parent page, child page).
+
+The original primary query `34884685271179117` again returned native error `1675004`. The separately selected alternate `PolarisPostCommentsChildrenPaginationtQuery` / `36239935742272683` returned one actual child, `17928451544257455`, linked to that exact parent, with native `has_next_page:false` and no cursor. This verifies current anonymous child retrieval for the historical thread. The retained June summary does not expose the historical reply ID, so identity with June's reply is not claimed.
+
+The earlier empty alternate results were from different parents with unknown reply counts. They did not test this known positive thread. The new result supports preferring the alternate for fresh child lanes while retaining explicit overrides and saved query/cursor identities. It does not establish a daily quota or full-history coverage.
+
+Evidence: private `child-contract-20261020/june-exact-primary-june/result.json` and private `child-contract-20261020/june-exact-secondary-june/result.json`. Both preserve the original cancelled generation-8 run and report verified final guards. No login, proxy, Decodo call, or schedule was used. Runtime rollout is tracked in the backend validation record.
+
+The maintained repair prefers the proven `36239935742272683` pair for fresh child lanes. Explicit overrides and pinned resume queries/cursors remain unchanged. Five focused fetcher cases and three runtime-probe tests passed, along with Ruff and diff checks. Independent review of the production change found no blockers; the lead reviewed the new fetcher tests. The runtime probe now reports its effective child-query pair without Instagram traffic. Deployment and installed-runtime verification follow below.
+
+
+### Verified child-query release
+
+Committed source `7a1aed419c4f3c71208d018a5b36952bf784c6fe` was deployed from its isolated archive (SHA-256 `eab854ad41edb33f482c7445938dcda5bdb91c54359319f017b777c8ee1ea3e7`) to live-verified `admin-56995 / trr-backend-jobs / main`, app `ap-DkLTRoSvqhbkGO7fHyHxrD`, as **v87**, tag `ig-child362-7a1aed41`, at 20:38:22 Eastern on October 20. The owner deployment command succeeded and the API cold-start canary returned HTTP 200 on its first attempt.
+
+The required `verify_modal_readiness.py --env main --probe-core-workers --strict-probes --json` passed with `ok:true`, `core_ok:true`, no missing functions or advisories, and six healthy runtime probes. The deployed browser-image probe reports `PolarisPostCommentsChildrenPaginationtQuery` / `36239935742272683` as its effective first child pair. Its missing/null/zero/positive count checks still pass. This runtime probe is state-free and sends no Instagram request; the separate live exact-thread control above proves actual anonymous reply retrieval.
+
+The local installed release matches the committed archive, and its imported default pair matches the deployed pair. The LaunchAgent points to this release and remains unloaded in both GUI and user domains. Modal v86, local `9d7baa61` and the prior LaunchAgent plist are retained for rollback. The superseded local `e6fab2ce` runnable copy was moved to actual Trash after process, installed-path and recovery-archive checks; its original diagnostic artifacts remain intact. Exactly two runnable local releases remain.
+
+All five existing schedules match the pre-deployment cron expressions and timezone. No schedule was added or changed, and no login, Decodo call, worker resume or backfill was performed. The original cancelled generation-8 run and full-history gate remain unchanged. Saved child lanes retain their original document/cursor contract; this repair changes the default for fresh lanes. Backend validation and runtime rollout passed. App code/build and SQL are not applicable to this internal query-selection repair. The exact primary query's server-side rejection cause remains unknown; this result does not establish an anonymous daily quota or full-history completeness.
+
+Private rollout evidence: `child-contract-20261020/modal-child-deploy.log`, `modal-child-readiness.json`, pre/post-deployment schedule snapshots, and `local-retirement-result.json`.
+
+
+## 2026-10-20: isolate rejected replies and remove local request-count quotas
+
+The user authorized the anonymous-first repair plan and explicitly removed the
+local 200/day and 50/tranche request-count limits. The shared request ledger,
+exclusive stream, request timeouts, and 15-minute execution boundary remain.
+Newer positive proof above selects the maintained anonymous `362`-first path;
+login and proxy comparisons are conditional diagnostics, not an automatic
+production credential fallback. No login or Decodo request was made by this repair.
+
+Backend source `9eab32f0bd2a50c8128580be16923aa0a92833ef` keeps native
+child `1675004` rejection local to replies, retains failed evidence, continues
+parents, and records durable reply retries at 5, 10, 20, 40, then 60 minutes.
+A longer server delay wins. HTTP 429 and authentication failures retain their
+existing protections. Genuine public rate rejection without a server instruction
+now starts at 60 seconds and doubles up to the configured gate cap. An explicit
+false alternate-trust setting leaves unknown-count empty child results pending.
+
+Independent review found and closed four issues before release: administrative
+retry metadata versus page-receipt equality, native-code digits in ordinary reply
+content, numeric native retry delays, and inconclusive anonymous diagnostics
+incorrectly enabling login. The final affected ingestion batch passed 283 tests;
+the diagnostic batch passed 28. Unchanged passing identity, budget, composition,
+network-lane and Modal scrub checks were reused. Ruff and staged diff checks
+passed. Workspace contract commit: `4d37146`.
+
+The byte-verified 2,543-file source archive has SHA-256
+`e55bf4b34aee3ad665b91714a0b40694fe4289aa8146d605af2df0e7f46340a6`.
+It deployed to live-verified `admin-56995 / trr-backend-jobs / main`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, as **v88**, tag
+`ig-reply-isolation-9eab32f0`, at 21:38:20 Eastern on October 20. The API
+cold-start canary returned HTTP 200 on attempt one. Explicit `--env main
+--probe-core-workers --strict-probes --json` readiness passed with `ok:true`,
+`core_ok:true`, all six runtime probes healthy, and no missing functions or
+blocking failures. The deployed browser probe still reports child query `362`.
+All five existing schedule expressions and timezones matched before and after.
+
+The local installed release matches the same source. Its relocated dependency
+entrypoints, imports, and LaunchAgent plist passed checks; the LaunchAgent remains
+unloaded. Modal v87 and local `7a1aed41`, with the prior plist, remain rollback
+options; provider v86 and its local source archive are also retained. The
+superseded local `9d7baa61` runnable copy moved to actual Trash after process,
+dependency and archive checks, leaving two runnable local releases.
+
+Runtime health does not establish source completeness. At this record boundary,
+a separate active chat owns run `82d0d542-7bbe-4764-879c-d3946af16c83` on
+source `7a1aed41` for the same three posts. This repair has held source requests
+to preserve exclusivity. Its new manifest is labelled `9eab32f0`; final live
+acceptance and the new Modal child-access source smoke remain pending. The
+original run `dbc80df9-0df7-43ca-9abc-2f1d1e393056` was read-only verified
+cancelled at generation 8. No schedule, full-history run, SQL schema or app
+change was introduced. TRR-APP build is not applicable.
+
+Private evidence: `~/.codex/tmp/trr-instagram-replies-01a15c0a/` contains the
+source manifest/archive, deployment log/history/readiness, pre/post schedule
+snapshots, frozen-run baseline, and local installation/retirement records.
+
+
+### Final public quota removal and v89 rollout
+
+The first new-source run exposed a second local request-count gate: the public
+identity policy still enforced 180 requests per 660 seconds. The user had
+explicitly removed local count limits, so source `c38d071757cd511e2440249f69693144a5d73a24`
+removes that gate for explicit public-only identities. Authenticated identities
+retain their existing policy. Public request accounting, source-directed waits,
+request deadlines, exclusive execution and cancellation remain. The affected
+identity/network batch passed 69 tests, and independent review closed the change.
+Workspace contract follow-up: `68531a6`.
+
+The byte-verified archive SHA-256 is
+`aa086f09ec32ee22adee6534d172ea697341d31e419a4407736216c924b7a212`.
+It deployed to `admin-56995 / trr-backend-jobs / main`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, as **v89**, tag `ig-public-noquota-c38d0717`,
+at 21:52:57 Eastern on October 20. The API canary returned HTTP 200 on attempt
+one, and explicit main-environment strict readiness passed all six runtime
+probes. The five existing schedules are unchanged. The local LaunchAgent points
+to the same verified release and remains unloaded. Local `9eab32f0` and Modal
+v88 remain available for rollback. Superseded local `7a1aed41` was moved to
+recoverable Trash after process, dependency and source-archive checks; exactly
+two runnable local releases remain.
+
+Run `c7748974-24ea-47d6-bb55-e5a0d341bf2a` on `9eab32f0` proved an
+intentional child-boundary interruption and resume: 134 parents and the first
+child receipt survived with matching retained evidence and canonical links.
+It later stopped at the now-removed identity count gate and is preserved
+cancelled at generation 6. No old-source run was repointed to new source.
+
+The new Modal child-access diagnostic executed once on v88, with three
+anonymous requests and no retry, login, proxy or ingestion writes. Bootstrap
+returned 200; query 348 returned native 1675004 and query 362 returned native
+1675030. This verifies the deployed diagnostic path, not successful Modal reply
+access. The local anonymous collection path continued to retrieve real replies;
+no authenticated or Decodo escalation was made.
+
+The final c38 validation later paused after 221 successful HTTP responses because
+the local collector waited on a stale libpq connection. A native process sample
+showed `PQexec -> PQgetResult -> pqWait -> poll`; a separate fresh connection
+showed no active server query other than the diagnostic itself. The run was
+fenced by an explicit cancel to generation 2 before its task-owned process was
+terminated. Resume used the same source and manifest with a fresh connection;
+all committed pages were retained. This was a connection recovery, not an
+Instagram rejection or a reset of reply evidence.
+
+The first recovery resume made zero source requests: Admission correctly counted
+the prior unresolved `sending` dispatch. Recovery retained the existing
+600-second cancelled-run drain guard and prepared the maintained
+`set_execution_placement(local -> local)` operator command under the restricted
+coordinator lease. This preserves the journal rather than deleting a dispatch
+or manufacturing a receipt. The guarded recovery is limited to this new run.
+
+The separately completed `7a1aed41` baseline run
+`82d0d542-7bbe-4764-879c-d3946af16c83` returned photo 134 parents/50 replies
+(184 versus fresh reported 222), carousel 34/34, and reel 71 parents/20 replies
+(91 versus fresh reported 96). Its retained-page integrity and canonical
+parent links passed, and all 239 parent reply threads reached native exhaustion.
+User-authorized coordination confirmed that no cause for the two count gaps was
+established. Filtering, inaccessible comments, count semantics and a different
+query issue remain hypotheses; this record does not choose one without evidence.
+
+### Final fixed-three result on c38d0717
+
+Recovery acquired the coordinator lease after its existing finite owner exited,
+expired the drained old dispatch through the maintained guarded API, and resumed
+without changing source or manifest. The final run
+`61fd77ab-bfae-47a7-b721-41effc898a62` is preserved cancelled at generation 6,
+with no collector left running. It made 263 observed anonymous HTTP requests,
+all HTTP 200 with no detected comment-source failure and no authentication
+headers or session cookies. The public run exceeded the removed 180-request gate.
+
+| Post | Parents | Replies | Collected total | Fresh reported total | Coverage |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `Dd37XeDly4U` | 134 | 50 | 184 | 222 | Unresolved; gap 38 |
+| `Dd60pnHl_ux` | 34 | 0 | 34 | 34 | Verified complete |
+| `Dd6m4XKDSQ1` | 71 | 20 | 91 | 96 | Unresolved; gap 5 |
+
+All parent lanes and all 239 queried child lanes reached native exhaustion.
+Retained-page replay, canonical identities and parent links passed on all three;
+there were no unfinished/repeated lanes, per-parent reply-count gaps, unknown
+reply topology proofs or unsupported nested topologies. The fresh run matches
+the prior independent baseline counts exactly. No fixed-post child thread needed
+multiple pages, so the requested live multi-page-child criterion remains
+unverified. Offline pagination and interruption/resume checks do not replace it.
+
+The final verdict is `retrieval_not_passed`, not complete retrieval. The two
+reported-total gaps remain unexplained despite native exhaustion, and were not
+converted into partial committed outcomes. The frozen original run and targets
+still match baseline SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
+The full-history gate remains intact. No schedules, authenticated collection,
+Decodo collection, app code/build, or SQL schema changes were introduced.
+
+Final private evidence: `modal-final-deploy.log`, `modal-final-history.json`,
+`modal-final-readiness.json`, `final-schedules.json`, `local-final-install.json`,
+`local-final-retirement.json`, `frozen-final.json`, `probe/modal.result.json`,
+and `final-validation/audit-generation-6.json`, `transport-summary.json`,
+`drained-dispatch-receipt.json` and the generation-specific execution logs.
+
+
+### Follow-up count-gap investigation (2026-10-21 UTC)
+
+The requested anonymous-first investigation used the deployed c38 source and
+preserved both completed validation runs. Read-only comparison of their retained
+pages found identical comment-ID sets for all three posts. Every native edge was
+represented in the parsed/retained records; no parser, deduplication or storage
+loss was demonstrated. The 222/96 totals come from post detail, while the comment
+connections did not expose a usable per-thread expected reply count.
+
+Three independent anonymous parent views were fully paginated for the two gap
+posts. Each made 19 requests (two bootstraps and 17 comment pages), returned HTTP
+200, reached native exhaustion and produced exactly the baseline parent IDs:
+134 for `Dd37XeDly4U` and 71 for `Dd6m4XKDSQ1`. None added an ID.
+
+| Comparison | Request shape | Result |
+| --- | --- | --- |
+| Current logged-out parent query | Document `27837656105907150`, `/api/graphql`, `first:24` | Same parent IDs; empty geographic-blocking notices |
+| Popular parent ordering | Document `25516980651312394`, `sort_order:popular` | Same parent IDs |
+| Alternate parent document | Document `26113520058347588`, `sort_order:recent` | Same parent IDs |
+
+The current query identifies media as `POLARIS_<numeric media ID>`. The private
+comparison accepted only the exact expected prefixed or numeric identity and
+checked media type, resolving the earlier diagnostic identity rejection. This
+was not a production scraper change and did not recover additional comments.
+All returned current-query parents had `is_covered:false`; this says nothing
+about comments omitted from the response. No exposed counter established a
+Facebook/crosspost, moderation, deletion or visibility explanation.
+
+Two further anonymous comparisons used child document `36239935742272683` on
+the largest positive retained thread for each gap post. Each made four HTTP 200
+requests and changed one variable only. Chronological ordering (`true`, with
+`first:12`) and larger page size (`first:50`, chronology `false`) both returned
+the same 12 photo replies and three reel replies, with no new IDs and native
+`has_next_page:false` without a cursor. Increasing the requested page size did not expose additional replies in that
+sampled photo thread; it does not establish completeness of other threads.
+
+The final anonymous REST child-root comparison made two requests: bootstrap
+HTTP 200, then child endpoint HTTP 302. It stopped at `endpoint_redirect`, did
+not follow the redirect and did not attempt the second subject. No reply data
+was obtained from that endpoint; the redirect destination was not established
+by the safe report.
+
+The investigation made 67 source requests in total, used no authenticated
+cookies or proxy, and performed no canonical ingestion writes. Every completed
+probe retained the frozen original-run hash. Private diagnostics were reviewed
+and verified offline: seven parent-parser tests plus the affected signal test,
+ten child-comparison tests, and three REST tests plus the affected plan test.
+Passing checks on unchanged paths were reused.
+
+No evidence-backed production fix was identified. Coverage remains photo
+184/222 (gap 38), carousel 34/34, and reel 91/96 (gap 5). The full-history gate
+and `retrieval_not_passed` verdict remain intact; expected totals were not
+lowered. A pinned authenticated comparison was not available: all three required
+login snapshot environment fields were absent from the worker/repo configuration.
+No credential values were exposed. Browser inventory exposed no connected
+Chrome profile through the inspected Computer Use surface. These are access
+limits, not evidence that authenticated results would close the gaps.
+
+No backend runtime, app, SQL, schedules or deployment changed during this
+follow-up. Modal v89 and local c38 remain the previously verified runtime.
+Private evidence is under `gap-investigation/`: baseline observations,
+`current-parent/result.json`, `popular/result.json`,
+`alternate-parent/result.json`, `child-order-chronological/result.json`,
+`child-order-page-size/result.json`, and `child-order-rest/result.json`.
+
+
+### Direct signed-in browser check (2026-10-21)
+
+The user requested direct inspection of both posts. The newly connected Chrome
+TRR profile showed Instagram account `thereality.report`. This was a browser UI
+comparison, not a worker credential snapshot or ingestion run. The visible totals
+remained photo 222 and reel 96. Neither comment view exposed an "other comments
+on Facebook" count or a Threads comment count.
+
+Both posts exposed a `Hidden by Instagram` section. The photo section contained
+22 top-level entries: 20 with visible comment permalink IDs and two GIF entries.
+All 20 IDs were already in the retained baseline. The GIF usernames
+Two commenters' handles matched retained native parent records
+`18029668664695097` and `18139996450549826`, respectively. Thus these 22 hidden
+entries were already collected and do not explain the photo's gap of 38.
+
+The reel UI contained 74 parent comment permalink IDs, including all 71 collected
+parents, and its reply controls summed to 22. This reconciles 74 + 22 = 96,
+versus collected 71 + 20 = 91. Its hidden section had 29 parent entries, of which
+27 were already collected. The two missing hidden parents are
+`18134186251755697` and `18071023400572902`. The remaining missing parent,
+`18121868419915733` (`jennifer_lamon`), appeared outside the hidden section and
+had two replies. Expanding that thread directly exposed reply IDs
+`18007584374778421` and `18179727067429364`; all five identified missing IDs
+were absent from the retained collection. The reel's gap is therefore two hidden
+parents plus one ordinary parent and its two replies, not five Facebook comments.
+
+This identifies the reel discrepancy at the UI/collected-ID level; it does not
+fix or validate a production retrieval method. The photo gap remains unresolved.
+No scraper, runtime, worker credentials, schedule or ingestion records changed.
+Full-history ingestion remains gated. Private comparison evidence is
+`gap-investigation/browser-reel-comparison.json`.
+
+### Browser query comparison and photo reply audit (2026-10-21)
+
+The signed-in browser used `PolarisPostCommentsPaginationQuery`, document
+`28915717348095854`, at `/api/graphql`. Its native variables include `after`,
+`before: null`, `first: 10`, `last: null`, numeric media ID, popular order,
+the logged-in Relay provider and the disabled Threads-style provider. Clicking
+`View hidden comments` exposed rows already loaded by ordinary pagination;
+the observed reveal itself did not issue another comment request.
+
+A separate anonymous probe used that exact query with the logged-in provider
+set to false. It stopped at the first photo root with `source_auth_failed`,
+after two requests including bootstrap. It returned no comment page, made no
+canonical writes and left the original frozen run unchanged. Its result is
+`gap-investigation/browser-parent/result.json`. This does not prove that the
+query will succeed with the worker account.
+
+A fresh photo view, with no replies expanded, exposed 131 parent permalinks
+and the two previously identified GIF entries. Every permalink ID was already
+collected. The retained parent `18110958494142733` was not present in that view.
+The 18 reply labels summed to 53. Three labels differed from retained reply
+counts: parent `18133193512661815` advertised 8 but expanded to 7 replies;
+`18049445372813312` advertised 2 but expanded to 1; `17937440769383053`
+advertised 1 but expanded to no reply. All eight exposed reply IDs were already
+collected. This audit found no new photo IDs and does not reconcile 222.
+Evidence is `gap-investigation/browser-photo-comparison.json`.
+
+Authenticated native retrieval remains pending account selection: the connected
+TRR browser is `thereality.report`, while the worker snapshot pins `<ingestion-account>`.
+No browser credentials were copied and no worker identity was changed. Current
+source also requires a distinct authenticated Relay contract and a fresh root
+scan; it cannot safely resume the clean-exhausted public cursor family as an
+authenticated scan. No production scraper or deployment changed in this check.
+Full-history ingestion remains gated on both fixed-post counts matching with
+native evidence.
+
+
+### Authenticated diagnostic deployed; settlement rollout held (2026-10-21)
+
+Diagnostic source `0b6cceebef54a0f74040531900af179f50d97cde` was deployed as
+Modal v90, tag `ig-auth-proof-0b6cceeb`, to verified workspace `admin-56995`,
+app `trr-backend-jobs`, environment `main`. The deployment used an isolated,
+byte-verified archive (SHA-256
+`79191a58c89c56ad65e8b125b7ef2b8eed88583e8fd39bd5d86b5f7aafe7279b`).
+Its production ingestion files match the pre-change source `7435e49a`;
+settlement source and unrelated working-tree changes were excluded.
+API canary returned HTTP 200. Explicit-main strict readiness and all six core
+worker probes passed. All five deployed schedules match the captured baseline.
+Previous Modal v89 (`ig-public-noquota-c38d0717`) remains the recorded rollback.
+
+The single authenticated diagnostic returned `verdict=inconclusive`,
+`auth_state=unavailable`, and `stop_reason=credential_snapshot_unavailable`.
+It made zero Instagram requests and proved none of the six IDs. The shared
+`bravotv` ledger reserved all 12 requests without refund (total 1068 to 1080);
+the diagnostic tranche closed. The pre-existing open tranche
+`0ccb88557fed476cb9dd3991f310fffc` was preserved, so a globally empty tranche
+ledger is not claimed. No browser credentials were copied. The missing
+prerequisite is an available worker CredentialSnapshot for the pinned
+`<ingestion-account>` identity; live identity verification and all six IDs must pass
+before settlement rollout, unless the user explicitly revises that gate.
+
+Settlement candidate `71841b4e` is implemented, tested and committed, but is
+NOT deployed or installed. It adds typed count-parity/public-native-exhaustion
+settlement, ownership-fenced atomic checkpoint and receipt metadata, and
+inspection of the same qualifying fresh receipt. Production remains anonymous.
+Public gap settlement requires version-1 public Relay, durable root-start and
+native exhaustion, complete child lanes, valid counts/topology, and all existing
+source and commit guards. Authenticated REST still requires strict parity.
+`count_gap=max(expected_total-observed_total,0)` preserves observations above
+expected. Legacy receipts may have null settlement; new comment commits record
+basis, expected total, observed total and gap. `is_missing` means absent from a
+qualifying scan's visibility, not proven deleted from Instagram; the observation
+cutoff is unchanged. Residual gaps may reflect visibility differences or
+unresolved count semantics; no cause is assigned without evidence.
+
+Targeted diagnostic/Modal tests passed (115), followed by 19 probe tests after a
+local helper refactor. Settlement checks passed: initial 257 across comments,
+persistence, resume, transport and inspection; after final comments/inspection
+changes, 251 affected tests passed, with unchanged persistence evidence reused.
+Ruff passed for all 13 changed implementation/test files. Independent source
+review found no blocking findings. No SQL migration or app contract changed;
+TRR-APP build is not applicable. These checks establish source readiness only.
+
+No fresh fixed-post validation was started, because the authenticated prerequisite
+failed. No settlement readiness/smoke or runtime acceptance is claimed. Local
+release `c38d0717` remains installed with its LaunchAgent unloaded and rollback
+artifacts retained. The original frozen run and targets retain the full SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`;
+the database project binding was verified as `vwxfvzutyufrkhfgoeaa` before reads.
+The live multi-page child criterion remains unverified and the full-history gate
+remains closed. Historical gaps of 38, 0 and 5 are not fresh-scan requirements.
+Private evidence is retained under
+`~/.codex/tmp/trr-instagram-settlement-01a16023/`, including the diagnostic result,
+source manifest/archive, readiness report, schedule comparison and fingerprints.
+The isolated diagnostic source is retained for reproducible recovery of v90.
+
+
+### Anonymous-only settlement rollout accepted (2026-10-21)
+
+The user explicitly removed the authenticated six-ID prerequisite and authorized
+anonymous-only deployment and fresh fixed-post validation. This supersedes the
+rollout hold above. No login, credential substitution or authenticated source
+request was made. The diagnostic result remains inconclusive and is not used as
+comment-coverage proof. Production stays anonymous; the full-history gate stays
+closed and requires a separate decision.
+
+Current committed backend source
+`c1c159705b36860914817daedc647ef274fa15fd`, containing settlement implementation
+`71841b4e`, was exported and all 2,547 source files were byte-verified. Archive
+SHA-256: `591c1a4f4df7c7ac7d143c63875f9e84ef388040ed4ce5406308af66cffebebb`.
+Unrelated working-tree changes were excluded. The reviewed implementation and
+its passing targeted tests/Ruff checks were unchanged, so their evidence was
+reused rather than rerunning them.
+
+The release deployed to verified `admin-56995 / trr-backend-jobs / main`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD`, as **Modal v91**, tag
+`ig-public-settle-c1c15970`, at 16:48:15 Eastern. API canary returned HTTP 200.
+Explicit-main strict readiness passed with `ok:true`, `core_ok:true`, all six
+core worker probes healthy and no blocking/advisory failures. All five schedule
+expressions and timezones match the predeployment baseline. A state-free smoke
+inside newly deployed container `ta-01M5G3J7NQE2KW0P1XQRTZZ2MR` verified the
+source hashes of comments, persistence, inspection and the validation gate. It
+proved positive-gap public settlement, refusal of rejected replies and missing
+root proof, and a closed full-history gate, without source requests or DB writes.
+Modal v90 (`ig-auth-proof-0b6cceeb`) is the immediate rollback deployment;
+v89 (`ig-public-noquota-c38d0717`) remains the previous anonymous baseline.
+
+The matching local release is installed at the revision-named worker release
+path. All source bytes match the archive. The unchanged dependency environment
+passed `uv pip check` for 155 packages; relocated entrypoints and local settlement
+smoke passed. The LaunchAgent points to this release and remains unloaded in
+both user and GUI domains. Local `c38d0717` and the prior plist are retained for
+rollback. Superseded `9eab32f0` moved to actual recoverable Trash after source
+archive, process, registration and dependency checks, leaving two runnable local
+releases. The source archive and exact private Trash destination are recorded in
+`anonymous-rollout/local-retirement.json`.
+
+Fresh run **`9ab92d4f-578d-4a42-b2d4-153d1ca6a478`**, generation 1, completed
+with **`retrieval_passed`** and CLI exit 0. It used a new manifest and state file,
+the existing shared `bravotv` ledger, and the verified installed source. Manifest
+SHA-256: `22c3019b23dcb69dd8db6d75b8c01b7f432d426b59001fe1e328cff7b03ff010`.
+The approved Supabase binding `vwxfvzutyufrkhfgoeaa` and database candidates were
+verified before reads/writes. All six targets (three post details and three
+comment collections) committed on the first attempt with fresh matching evidence
+and receipts. Every comment checkpoint settlement matches its qualifying fresh
+receipt:
+
+| Post | Expected total | Observed total | Gap | Settlement basis |
+| --- | ---: | ---: | ---: | --- |
+| `Dd37XeDly4U` | 222 | 184 | 38 | `public_native_exhaustion` |
+| `Dd60pnHl_ux` | 34 | 34 | 0 | `count_parity` |
+| `Dd6m4XKDSQ1` | 96 | 91 | 5 | `public_native_exhaustion` |
+
+These are fresh observations, not required historical values. Passing means the
+frozen targets met the public retrieval policy; it does not prove universal
+comment coverage or establish the cause of residual gaps. Strict child-count,
+topology and native-exhaustion checks remain. No rejected lane was accepted to
+force this result. Live multi-page child capability remains unverified and the
+CLI capability matrix remains `not_evaluated`.
+
+The fresh validation used 265 source requests (147/38/77 for comments plus one
+post-detail request per post), in one tranche with one attempt per target. The
+ledger total moved from 1080 to 1345. Its tranche `dad3136de9ed4ff686ef424378359560` closed normally.
+Final checks found zero active target leases and zero uncertain dispatches.
+The pre-existing historical open tranche `0ccb88557fed476cb9dd3991f310fffc`
+remains preserved; it is not this validation's active stream. The original frozen
+run and targets still match full SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
+
+No SQL schema, proxy, schedule or app/API contract changed. TRR-APP build is not
+applicable. No full-history ingestion was enabled. Private evidence is under
+`~/.codex/tmp/trr-instagram-settlement-01a16023/anonymous-rollout/`: source manifest
+and archive, deployment history/readiness, remote and local settlement smoke,
+local installation/retirement, fresh state and command receipt, and
+`final-audit.json`. The isolated source is retained to reproduce the deployed
+release and its verification.
+
+## Bounded anonymous capability acceptance (2026-10-21)
+
+The requested pass covers multi-page replies, older account discovery, and
+media-only comments through mirroring and admin display. It does not authorize
+full-history ingestion. Prior interruption/resume and fresh-repeat evidence is
+reused; this pass did not rerun those checks.
+
+Result: **incomplete; full-history gate remains closed**.
+
+| Capability | Current evidence | Result |
+| --- | --- | --- |
+| Older account discovery | The maintained anonymous `PublicListingSource` sent one bootstrap and one GraphQL request. GraphQL returned HTTP 401; the public policy recorded `public_access_backoff`. No native listing page or cursor was accepted. | Unverified |
+| Multi-page child replies | Saved native payload for `DWNNxnnDM7G` / parent `18041879645540008` reports 169 replies, above the normal 12-item child page size. This is a candidate, not fresh pagination proof. The local public lane cooldown prevented dependent live testing. | Held; no new child requests |
+| Media-only retrieval | `Dd37XeDly4U` comments `18029668664695097` and `18139996450549826` remain active, have no text and one source media URL each, and were last seen in accepted run `9ab92d4f-578d-4a42-b2d4-153d1ca6a478`. | Confirmed saved |
+| Media mirroring | Both comments have zero hosted media URLs. A single-photo media-only plan was prepared but not launched. Review found native media fallback gates use generic `public`, while the active backoff belongs to `public:local`; launching without a local-lane admission guard could miss that backoff. | Not executed; unresolved |
+| Admin display | Started the standard local hybrid stack and opened the TRR Chrome profile. The comments page rendered, but the filtered post read returned HTTP 503 with a database statement timeout. The shared development stack then restarted during inspection, and the browser snapshot timed out. No GIF rendering or hosted playback was verified. | Unverified |
+
+The persisted local public cooldown was `2026-10-21T22:26:25.831544Z`
+(6:26:25 PM Eastern). This is an earliest policy eligibility time, not proof that
+Instagram will accept the next request. No login, proxy substitution, cooldown
+reset, or schedule change was used. The native media lane mismatch is a source
+finding, not a deployed fix. The private media plan was reviewed before any
+application. Its corrected pre-creation local-lane guard was executed and
+returned `held/local_public_lane_cooldown`; no media run, object upload, or media
+canonical write was created. The harness also preserves cleanup/result evidence
+after post-creation failures; offline guard and cleanup checks passed.
+
+Final read-only audit: original frozen run/targets retain SHA-256
+`998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`; zero active
+unresolved target owners and zero uncertain dispatches; full-history intent is
+still rejected by the validation gate. The shared ledger rose from 1,345 to
+1,347 requests. This pass's tranche `9347a17ec51442c89635a943923f3511` is closed.
+The older historical open tranche remains untouched.
+
+Modal v91 and the installed local settlement release were not changed by this
+pass. No schema or app source change was made. No repeated test suite or recovery
+run was needed. Private evidence is in
+`~/.codex/tmp/trr-instagram-settlement-01a16023/bounded-acceptance/`, including
+`listing.result.json`, `reply-candidate.json`, `media.plan.json`, `final-audit.json`,
+and the startup log. The next acceptance attempt must honor the persisted
+public lane, obtain actual native cursor continuation, and verify hosted media
+plus visible admin rendering before claiming these cells passed.
+
+## Repair and bounded rerun (2026-10-21, evening)
+
+The follow-up request was to fix the findings and rerun the bounded acceptance.
+Full-history ingestion remains disabled. The frozen original remains unchanged.
+
+Source repairs:
+
+- Existing commit `9a02149c` fixes media, avatar and profile fallback gates to use
+  the actual local or Modal public network lane. The installed local release
+  `325092c9` already contains the identical media modules. Thirty affected media
+  and pipeline tests passed; no redundant local reinstall was required.
+- `86777542` narrows searched Instagram comment profiles before full hydration and
+  comment aggregation. It preserves the existing rich search matcher, source
+  precedence and comment filter. Ten focused tests and thirteen related checks
+  passed. A live selected-post read returned one row in 26.99 seconds.
+- `f3d26caa` removes whole-row JSON conversion from owner matching and optional
+  fields in unfiltered comment-profile pages. Pagination, counts and sorting
+  remain global. Three focused and six existing checks passed, plus Ruff and
+  independent review. A live unfiltered read returned 25 rows, 8,058 total, in
+  12.73 seconds. These are single observations, not a performance benchmark.
+- Workspace commit `06ad556` replaces the billing guard's Python heredoc with
+  `python -c`, resolving a reproduced Bash 5.3.9 startup hang. Shell syntax,
+  synthetic old/new comparisons and the real guard passed. No billing policy
+  changed. The hybrid stack restarted with its existing hosts-sync opt-out;
+  browser inspection used the verified TRR Chrome profile.
+
+Bounded source results:
+
+| Capability | Fresh result |
+| --- | --- |
+| Multi-page child replies | Passed for `C_aw2xGs-Uf`, parent `17900330799028205`. Fresh traversal proved the parent. Two productive child pages returned 15 and 5 distinct replies under normal page-size-12 query provenance; the second request used the exact first-page cursor and reached native child exhaustion. |
+| Whole-post qualification for that probe | Not claimed. The diagnostic deliberately stopped after the selected child qualified. It used 72 requests/71 native pages, within 101/100 limits, and wrote no canonical or evidence rows. |
+| Older account discovery | Still unresolved. A bounded diagnostic using the maintained anonymous document transport sent bootstrap plus GraphQL; GraphQL returned HTTP 401 and `public_access_backoff`. Zero pages/cursors accepted. No listing transport change was promoted without successful evidence. |
+| Media-only comments | Both selected comments remain saved, active, and without text. Their native source URL is the known Instagram placeholder; no alternate real GIF URL was present in saved native data. |
+| Media mirroring | Run `df99e4c0-eafb-44c9-8085-a4b8f738d90e` executed after the prior cooldown, made 24 operations in one attempt, and ended unresolved with `media_source_placeholder`. It did not commit placeholder media as the real GIF. Hosted counts remain zero. |
+| Admin search | Visibly passed for `Dd37XeDly4U`: 134 parents, 50 replies, reported 222, gap 38. A private screenshot records the rendered row. Real GIF display remains unverified because real hosted assets are unavailable. |
+
+Two earlier reply diagnostics reached their explicit request bounds without
+qualifying the selected child; neither was treated as exhaustion. All new budget
+tranches closed. Final audit found zero active unresolved owners and zero
+uncertain dispatches. The shared ledger totals 1,507 requests. The original full
+hash remains `998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
+No authentication, proxy substitution, cooldown reset, SQL migration or full
+history run was used. Prior passing interruption/resume evidence was reused.
+
+Private evidence: `~/.codex/tmp/trr-instagram-settlement-01a16023/repair-rerun/`,
+including source archives/manifests, focused test and live-query logs, media and
+listing results, `reply-small-expanded/reply.result.json`, `admin-search.png`,
+and `final-audit.json`. Source restrictions and placeholder media remain open
+acceptance limitations; they are not represented as successful retrieval.
+
+The restarted local API also passed the unfiltered admin request with HTTP 200
+in 15.6 seconds. The browser displayed 25 rows and page 1 of 323;
+`admin-unfiltered.png` records this. The task-created browser tab was closed.
+There was no app source change or app build; the verification used the existing
+hybrid dev stack and updated backend source.
+
+Deployment sequence: frozen `86777542` first deployed as v95. Standard hybrid
+startup then reconciled the maintained working tree as v96, including the
+already-present unrelated TikTok changes. Its source-only container smoke
+confirmed the media/search modules, public lane keys, closed full-history gate
+and enabled Reddit v2 flag. The final release freezes `f3d26caa` plus the current
+63 tracked modified files to preserve that maintained deployed source. The
+manifest hashes every overlaid file; it does not treat those unrelated edits as
+this task's commits. Final tag: `ig-acceptance-f3d26caa`, explicitly deployed to
+`admin-56995 / trr-backend-jobs / main`. Deployment and API health canary passed;
+`verify_modal_readiness.py --env main` reported Core ready and Ready. Source
+archives and the preceding deployed version remain available for rollback.
+
+Final runtime identity is **v97**, tag `ig-acceptance-f3d26caa`, app
+`ap-DkLTRoSvqhbkGO7fHyHxrD` in `main`. A container started after that deployment
+matched all six frozen runtime module hashes, including the full analytics
+provider with the preserved overlay. The source-only smoke exited zero and
+confirmed the local/Modal public lane keys, closed full-history gate and enabled
+Reddit v2 flag, with zero source requests or database writes. Safe identity and
+smoke receipts are under `repair-rerun/final-release/`.
+The final live function metadata contains exactly the same five schedules as the
+retained baseline (cron and timezone). Comments, media, posts, recovery, general
+job and API consumers resolve to that same app in `main`. Schedule comparison
+and consumer-target receipts are retained beside the runtime smoke.
+
+## 2026-10-21: offline discovery/GIF repair and scheduled qualification
+
+The user authorized further older-post discovery and real GIF mirroring repairs,
+then chose preparation now and a bounded rerun after the public cooldown. The
+one-shot chat heartbeat `bounded-instagram-discovery-and-gif-rerun` is active for
+October 22 at 00:02 America/New_York (04:02 UTC). It must recheck the shared lane
+and must not bypass a later cooldown. Full-history ingestion remains disabled.
+
+The source candidate adds an **opt-in**, anonymous owner-timeline adapter. It uses
+native profile bootstrap identity and the anonymous continuation contract, with
+normal 12-item pages. Evidence retains the native root, account/profile identity,
+request cursor, and document phase; live parsing and replay reject error flags,
+identity mismatches, and bootstrap evidence presented as a continuation. The
+existing default listing adapter is unchanged until native qualification passes.
+The public transport now decodes both supported native JSON prefixes consistently.
+
+GIF evidence now retains `first_party_cdn_proxied_images`. All three comment media
+extractors select that branch's `fixed_height.url` when the branch is nonnull,
+while retaining both raw metadata branches. Null/missing preferred metadata keeps
+legacy fallback handling. Placeholder-byte rejection remains in force. This fixes
+a confirmed loss of native fields; it does not prove either original GIF is still
+available. Both original comment rows currently have zero hosted media URLs.
+
+Validation: 75 public transport checks passed, including the review regression
+cases; 11 focused GIF selection and empty-text DTO/replay checks passed; the
+existing unavailable-GIF rejection check passed. The 33 listing checks passed
+using their documented isolated-PostgreSQL invocation. An initial invocation
+without that harness was blocked by the global non-live connection guard; no
+production database was used by those tests. Ruff and diff whitespace checks pass.
+Two independent reviews found issues which were fixed and confirmed in fix-only
+reviews. Previously passing unrelated checks were reused.
+
+The prepared listing diagnostic is bounded to three native pages, five requests,
+and a 180-second request-boundary deadline. The scheduled fresh GIF qualification
+is bounded to the original two comment/GIF identities, 64 Instagram requests and
+300 seconds, followed by at most 12 CDN/storage requests and 120 seconds for two
+assets. Shared request budgets, cooldown, frozen-run guards, native cursors and
+immutable storage remain mandatory. Actual source availability, hosted bytes,
+canonical application and deployment must each be reported separately.
+
+No candidate deployment or new Instagram requests occurred during offline
+preparation. The prior verified runtime remains v97 until a later deployment is
+verified. Final preparation audit: frozen original unchanged, full-history gate
+closed, zero active owners, zero uncertain dispatches, budget ledger total 1,509,
+and latest tranche closed. The prior two-request listing diagnostic accounts for
+the increase from 1,507. Private bounded procedure and evidence are retained in
+`discovery-gif-repair/HANDOFF.md` under the existing task evidence directory.
+
+## 2026-10-21: January scope, immediate retry, and parser deployment v103
+
+The user expanded the requested run to BravoTV Instagram posts in January 2026,
+then explicitly instructed skipping the cooldown. The prepared bounded intent is
+2026-01-01 inclusive through 2026-02-01 exclusive UTC, public source profile,
+serial detail/comment workers, and full-history disabled. A read-only inventory
+found 291 existing January catalog entries: 221 with owner `bravotv` and 70 with
+other owners. The canonical owner-filtered query found 221 BravoTV posts with
+hosted media. These counts are existing setup data, not fresh discovery evidence
+or a claim that all January posts were retrieved.
+
+One exclusive local-timer override was applied for the immediate bounded
+anonymous listing diagnostic. It preserved failure counts/generation and request
+accounting and reserved the shared probe; it did not change credentials, egress,
+provider authorization, or persistent retry policy. Instagram returned HTTP 401
+on the first `web_profile_info` GET. The diagnostic stopped after one request,
+zero listing pages and zero canonical writes. The resulting shared lane recorded
+its normal new public-access backoff. No repeated forced request was made. The
+January ingestion run was not started because fresh discovery/access remained
+unresolved. The two original GIF comments still have zero hosted media URLs.
+
+Current runtime inspection found v102, whose isolated release did not contain the
+Instagram parser candidate. The maintained checkout at `127ae455`, including its
+63 tracked worktree overlays, was frozen to preserve the newer deployed Reddit,
+cache and TikTok work. Instagram commit `08f51a1b` was deployed from that snapshot
+as **v103**, tag `ig-parser-08f51a1b-on-127ae455`, to workspace `admin-56995`,
+environment `main`, app `trr-backend-jobs` / `ap-DkLTRoSvqhbkGO7fHyHxrD`.
+
+The standard deployment wrapper's explicit-main readiness and API cold-start
+canary passed (HTTP 200, first attempt). A container started after v103 matched all
+11 expected Instagram module hashes and passed source-free GIF rendition and
+prefixed-JSON smoke checks. The full-history gate rejected the full-history
+intent in that deployed container. All 38 function metadata entries, five
+schedules, and six existing consumer function bindings remained unchanged.
+Rollback is the retained v102 deployment; the exact v103 archive and overlay
+manifest are retained in the task's private `january-2026/release` directory.
+The new anonymous listing adapter remains opt-in pending native success.
+
+Final audit: original frozen run unchanged; full-history gate closed; zero active
+owners and uncertain dispatches; account ledger 1,510, latest tranche closed;
+original GIF hosted counts both zero. This verifies deployment of the parser
+fixes, not successful January ingestion, older discovery, or real GIF mirroring.
+The existing scheduled follow-up now carries the January scope and immediate
+401 evidence; it must not repeat the same rejected endpoint while unchanged.
+TRR-APP build: not applicable (backend parser/deployment only). No schema or SQL
+ownership change was made. Private reports are under the task's `january-2026`
+evidence directory.
+
+## 2026-10-21 evening: dedicated session verified; authenticated comments unresolved
+
+The user authorized dedicated worker access for the bounded January 2026 run and
+both original GIF checks, selected Chrome's `codex` profile, and completed sign-in.
+A native identity response matched both the `<ingestion-account>` username and the
+snapshot's numeric identity. Credentials remain in the private task snapshot;
+no credential values or browser profile files are included in source or evidence.
+
+Authenticated listing returned three native pages with 99 distinct posts. The
+third page was wholly older than the second page; pinned posts explain the first
+page's date outlier. This establishes productive older discovery, not January
+coverage. The prepared January authenticated intent was not launched. The
+read-only setup inventory remains 291 catalog entries and 221 canonical BravoTV
+posts. Its existing REST comment-family intent must not be silently changed to
+another transport family.
+
+Authenticated comment qualification remains unresolved. The REST comment call
+returned non-JSON content. Subsequent Relay diagnostics returned native numeric
+error `1357054`; this is retained as incomplete source data, not proof of a new
+login failure or native exhaustion. The latest corrected WWW request used the
+current native endpoint, document, provider flags and document-derived Relay
+actor, but still returned that error. A later bounded attempt started from the
+native embedded bootstrap instead of requesting pagination without a cursor.
+It stopped after its one GET because bootstrap comment-data validation failed;
+that report does not identify the precise extraction failure. Neither attempt
+wrote canonical data. No cooldown, egress or account bypass was added.
+
+The opt-in diagnostic candidate now includes explicit-cookie WWW page transport
+and a bounded native bootstrap extractor. It preserves authentication/rate
+failures, counts sends through caller guards, rejects malformed pagination,
+prevents a parent root request through the pagination operation, and avoids double
+decoding compressed responses. Native browser preloader metadata confirms the
+container document and no `first` variable: the initial page size is therefore
+recorded as unknown, despite 15 observed browser comments. Pagination requests
+use the native continuation cursor and a requested size of 10.
+
+Independent review findings were repaired. Evidence includes 39 bootstrap tests,
+23 initial client tests plus focused new/error/root regression checks, Ruff, and
+scoped diff checks; unaffected passing checks were reused. These are candidate
+checks. The candidate is not integrated into worker composition or deployed, and
+its live bootstrap/comment qualification has not passed. The last verified
+runtime in this task remains v103; it was not redeployed in this step.
+
+Final audit: frozen original unchanged, full-history gate closed, zero active
+owners or uncertain dispatches, ledger total 1,531 and latest tranche closed.
+Both original GIF comment IDs still have zero hosted media URLs. January
+execution, original GIF retrieval/mirroring/display, and authenticated comment
+integration remain unfinished. Private diagnostics and the verified snapshot are
+under the task's `dedicated-auth` directory. The existing one-time follow-up must
+read that updated handoff and must not repeat an unchanged failing request.
+
+
+## 2026-10-22: both original GIF attachments saved and verified
+
+The two original comments on `Dd37XeDly4U` now have native-proven, hosted GIF
+attachments. The attachment-only run `77da3e31-dc7b-4ee9-8d33-da7b45a858ef`
+committed and reconciled to `completed`. Its receipt is explicitly
+`kind=comment_attachments`; it is not a full post-media or comments-completion
+receipt. The normal complete comment-inventory check remains required.
+
+| Comment ID | Native GIF ID | Bytes | Frames | SHA-256 |
+| --- | --- | ---: | ---: | --- |
+| 18029668664695097 | 1072011872270984 | 1137321 | 43 | 073befce4d4989ff2b52ce238f282c24568c5f18a4efa69b36413b96dc0c3a3e |
+| 18139996450549826 | 1016439864742805 | 971412 | 35 | b9e0c51e13178b126edd4a7285b4cadd39ff83988eed58a80d15f794f64a7bb8 |
+
+Both hosted downloads matched the retained native files byte for byte. Both are
+200-by-200 animated GIFs and do not match the placeholder. TRR's saved-comments
+dialog rendered each hosted image with `complete=true` and natural dimensions
+200-by-200. Private screenshots retain both display checks.
+
+The successful apply used the two cached native assets, two storage HEAD calls,
+and no Instagram or CDN source requests. Verification used two hosted reads.
+All 184 saved comment identities, scrape/last-seen timestamps, last-seen run IDs,
+and missing/deleted states matched the pre-apply inventory. The frozen original
+run remained unchanged, and the account-budget tranche closed.
+
+The maintained implementation adds `CommentAttachmentActivity`, which loads the
+full normal snapshot and then hosts and writes only the selected proof-bearing
+comment attachments. It reuses the comment writer's locked identity, chronology,
+version and compare-and-swap checks. It does not write post or avatar fields.
+Earlier full-media attempts were cancelled: one stopped before media operations
+on a nested database-pool guard, and another stored both GIFs but stopped on an
+unrelated avatar download before canonical commit. Their evidence is retained.
+The private driver now reuses the held transaction for its frozen-run check and
+rejects uncached source URLs.
+
+The final deployed runtime is Modal `v111`, tag
+`ig-attachments-only-4bfc6762`, in workspace `admin-56995`, environment `main`, app
+`trr-backend-jobs` (`ap-DkLTRoSvqhbkGO7fHyHxrD`). Deployment readiness and the API
+cold-start health check passed. All 25 selected live module hashes matched the
+frozen candidate. All 38 function bindings and five schedules were unchanged.
+The matching local source identity is `f06b63c89b9b-overlay-4bfc6762afa1`; all
+2,599 installed file hashes and the same 25-module smoke passed.
+
+An intermediate deployment, v109, used an older base. It was corrected by v110,
+which restored the newer v107 Reddit and v108 summary work. v111 was built from
+that verified v110 source and preserves those changes and the v106 ingestion
+integration. Provider rollback is unavailable on this plan; exact frozen source
+is retained for redeployment. The previous local release
+`f06b63c89b9b-overlay-7867fc631421` is retained for rollback. Obsolete local copies
+were moved to actual Trash, leaving two runnable copies.
+
+Validation reused the prior 75 proof tests and 152 affected checks. After the
+writer extraction, 13 affected integration/inventory tests passed; the new
+attachment-only activity passed 10 focused tests. Scoped Ruff and whitespace
+checks passed. Independent complete-batch review had no remaining findings.
+No app source or SQL schema change was required.
+
+The maintenance window was returned after all repair processes finished. The
+coordinating chat resumed January at generation 5 with its intent and checkpoints
+preserved, and owns that run. Full-history ingestion remains disabled even though
+both original GIF checks now pass. Private release, apply, byte and display
+receipts remain under this task's `attachment-only-release` and
+`dedicated-auth/gif-release` directories; they contain no shared credentials.

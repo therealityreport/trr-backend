@@ -1,4 +1,8 @@
-"""Cross-process account auth cooldown for the social posts-backfill lane.
+"""Cross-process auth failure records and explicit checkpoint blockers.
+
+Instagram never creates or enforces locally imposed timed cooldowns. Other
+platforms retain their existing policy; Instagram checkpoints remain explicit
+authentication blockers rather than timers.
 
 Partition runners execute in SEPARATE Modal containers, so an in-process
 cooldown (a dict, an asyncio lock, a file lock scoped to one container) cannot be
@@ -8,20 +12,13 @@ the cross-process advisory-lock pattern in
 ``social_control`` pool.
 
 Lifecycle:
-    * ``record_auth_block`` — called at the posts-lane auth-block handler when a
-      page fetch classifies a hard 401/403 (or a checkpoint/challenge). UPSERTs
-      the row, increments ``consecutive_auth_failures``, and sets
-      ``cooldown_until = now() + escalating backoff`` via
-      ``exponential_backoff_delay`` keyed on the (post-increment) failure count.
-    * ``get_active_cooldown`` — called before each page request / at job start and
-      in the dispatch guard. Returns the row only when ``cooldown_until`` is in
-      the future; otherwise ``None``.
-    * ``clear_cooldown`` — called on a clean page fetch. Resets the counter and
-      clears ``cooldown_until`` so the account is immediately eligible again.
-      Checkpoint blockers are *non-clearing* (see ``CHECKPOINT_ERROR_CODES``):
-      ``clear_cooldown`` is a no-op while a checkpoint blocker is active so a
-      single lucky public-data fetch cannot mask a session that still needs
-      operator re-auth.
+    * ``record_auth_block`` records and counts failures. Instagram stores no
+      timed penalty; other platforms retain their escalating timer.
+    * ``get_active_cooldown`` returns only explicit checkpoint blockers for
+      Instagram. Other platforms also enforce their existing future deadline.
+    * ``clear_cooldown`` clears an ordinary failure after a clean request.
+      Checkpoint blockers require explicit operator resolution and are not
+      cleared by an incidental public-data success.
 
 All public functions are defensive: any database failure is swallowed and treated
 as "no cooldown" so the reliability layer can never itself wedge the pipeline.
@@ -168,12 +165,11 @@ def record_auth_block(
     account_handle: str,
     error_code: str | None,
 ) -> AccountAuthCooldown | None:
-    """Record an auth block and set/extend an escalating cooldown.
+    """Count an auth failure and preserve explicit checkpoint blockers.
 
-    UPSERT semantics: increments ``consecutive_auth_failures`` and sets
-    ``cooldown_until = now() + cooldown_backoff_seconds(new_count)``. Returns the
-    persisted cooldown snapshot, or ``None`` if the row could not be written
-    (table missing in this environment, DB unavailable, etc.).
+    Instagram stores an immediate deadline with no local timer. Other platforms
+    retain their existing timed policy. Returns the persisted failure snapshot,
+    or None when the record cannot be written.
     """
     normalized_platform = _normalize_platform(platform)
     normalized_handle = _normalize_handle(account_handle)
@@ -230,7 +226,7 @@ def record_auth_block(
             # backoff (reuses exponential_backoff_delay for a single source of
             # truth). Same transaction → the counter and the deadline can never
             # disagree across containers.
-            delay_seconds = cooldown_backoff_seconds(new_count)
+            delay_seconds = 0.0 if normalized_platform == "instagram" else cooldown_backoff_seconds(new_count)
             updated_rows = pg.execute_returning(
                 f"""
                 update {_COOLDOWN_TABLE}
@@ -263,7 +259,7 @@ def record_auth_block(
                 "consecutive_auth_failures": cooldown.consecutive_auth_failures,
                 "blocker_kind": cooldown.blocker_kind,
                 "last_error_code": cooldown.last_error_code,
-                "cooldown_until": cooldown.cooldown_until.isoformat(),
+                "cooldown_until": cooldown.cooldown_until.isoformat() if cooldown.cooldown_until else None,
             },
         )
     return cooldown
@@ -310,8 +306,10 @@ def get_active_cooldown(
             from {_COOLDOWN_TABLE}
             where platform = %s
               and account_handle = %s
-              and cooldown_until is not null
-              and cooldown_until > now()
+              and (
+                (platform = 'instagram' and blocker_kind = 'checkpoint')
+                or (platform <> 'instagram' and cooldown_until > now())
+              )
             """,
             [normalized_platform, normalized_handle],
             pool_name=_COOLDOWN_POOL_NAME,

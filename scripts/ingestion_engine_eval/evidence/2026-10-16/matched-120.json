@@ -1,0 +1,329 @@
+[
+  {
+    "engine": "dbos",
+    "case": "before_dispatch_sigkill_and_duplicate",
+    "status": "PASS",
+    "evidence": {
+      "at_sigkill": {
+        "targets": 3,
+        "dispatches": 0,
+        "receipts": 0,
+        "attempts": 1
+      },
+      "recovered": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "duplicate": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      }
+    },
+    "postgres_statement_calls": 826,
+    "sampled_peak_postgres_sessions": 7,
+    "seconds": 4.765
+  },
+  {
+    "engine": "dbos",
+    "case": "after_dispatch_sigkill_and_duplicate",
+    "status": "PASS",
+    "evidence": {
+      "at_sigkill": {
+        "targets": 3,
+        "dispatches": 1,
+        "receipts": 0,
+        "attempts": 1
+      },
+      "recovered": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "duplicate": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      }
+    },
+    "postgres_statement_calls": 426,
+    "sampled_peak_postgres_sessions": 7,
+    "seconds": 4.886
+  },
+  {
+    "engine": "dbos",
+    "case": "after_commit_sigkill_and_duplicate",
+    "status": "PASS",
+    "evidence": {
+      "at_sigkill": {
+        "targets": 3,
+        "dispatches": 1,
+        "receipts": 1,
+        "attempts": 1
+      },
+      "recovered": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "duplicate": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      }
+    },
+    "postgres_statement_calls": 467,
+    "sampled_peak_postgres_sessions": 7,
+    "seconds": 4.898
+  },
+  {
+    "engine": "dbos",
+    "case": "stale_owner_fence",
+    "status": "PASS",
+    "evidence": {
+      "targets": 2,
+      "dispatches": 2,
+      "receipts": 2,
+      "attempts": 4
+    },
+    "postgres_statement_calls": 162,
+    "sampled_peak_postgres_sessions": 5,
+    "seconds": 0.773
+  },
+  {
+    "engine": "dbos",
+    "case": "durable_cooldown_restart",
+    "status": "PASS",
+    "evidence": {
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "postgres_statement_calls": 391,
+    "sampled_peak_postgres_sessions": 8,
+    "seconds": 5.807
+  },
+  {
+    "engine": "dbos",
+    "case": "cancel_resume",
+    "status": "PASS",
+    "evidence": {
+      "mode": "native_resume",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "postgres_statement_calls": 522,
+    "sampled_peak_postgres_sessions": 11,
+    "seconds": 8.027
+  },
+  {
+    "engine": "dbos",
+    "case": "version_recovery",
+    "status": "PASS",
+    "evidence": {
+      "guard": "DBOS application_version",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 4
+    },
+    "postgres_statement_calls": 452,
+    "sampled_peak_postgres_sessions": 7,
+    "seconds": 8.369
+  },
+  {
+    "engine": "dbos",
+    "case": "bounded_fixture",
+    "status": "PASS",
+    "evidence": {
+      "max_active_adapter_threads": 1,
+      "workflow_payload": "run id and target count; no media/comment body",
+      "targets": 120,
+      "dispatches": 120,
+      "receipts": 120,
+      "attempts": 120
+    },
+    "postgres_statement_calls": 2521,
+    "sampled_peak_postgres_sessions": 6,
+    "seconds": 2.404
+  },
+  {
+    "engine": "temporal",
+    "case": "before_dispatch_sigkill_and_duplicate",
+    "status": "PASS",
+    "evidence": {
+      "at_sigkill": {
+        "targets": 3,
+        "dispatches": 0,
+        "receipts": 0,
+        "attempts": 1
+      },
+      "recovered": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "duplicate": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      }
+    },
+    "postgres_statement_calls": 122,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 16.546
+  },
+  {
+    "engine": "temporal",
+    "case": "after_dispatch_sigkill_and_duplicate",
+    "status": "PASS",
+    "evidence": {
+      "at_sigkill": {
+        "targets": 3,
+        "dispatches": 1,
+        "receipts": 0,
+        "attempts": 1
+      },
+      "recovered": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "duplicate": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      }
+    },
+    "postgres_statement_calls": 105,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 16.103
+  },
+  {
+    "engine": "temporal",
+    "case": "after_commit_sigkill_and_duplicate",
+    "status": "PASS",
+    "evidence": {
+      "at_sigkill": {
+        "targets": 3,
+        "dispatches": 1,
+        "receipts": 1,
+        "attempts": 1
+      },
+      "recovered": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      },
+      "duplicate": {
+        "targets": 3,
+        "dispatches": 3,
+        "receipts": 3,
+        "attempts": 4
+      }
+    },
+    "postgres_statement_calls": 109,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 16.201
+  },
+  {
+    "engine": "temporal",
+    "case": "stale_owner_fence",
+    "status": "PASS",
+    "evidence": {
+      "targets": 2,
+      "dispatches": 2,
+      "receipts": 2,
+      "attempts": 4
+    },
+    "postgres_statement_calls": 62,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 0.592
+  },
+  {
+    "engine": "temporal",
+    "case": "durable_cooldown_restart",
+    "status": "PASS",
+    "evidence": {
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "postgres_statement_calls": 95,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 15.218
+  },
+  {
+    "engine": "temporal",
+    "case": "cancel_resume",
+    "status": "PASS",
+    "evidence": {
+      "mode": "history_reset_new_run",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 3
+    },
+    "postgres_statement_calls": 98,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 5.213
+  },
+  {
+    "engine": "temporal",
+    "case": "version_recovery",
+    "status": "PASS",
+    "evidence": {
+      "guard": "explicit version-specific task queue; deployment pinning unverified",
+      "targets": 3,
+      "dispatches": 3,
+      "receipts": 3,
+      "attempts": 4
+    },
+    "postgres_statement_calls": 98,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 14.985
+  },
+  {
+    "engine": "temporal",
+    "case": "bounded_fixture",
+    "status": "PASS",
+    "evidence": {
+      "max_active_adapter_threads": 2,
+      "workflow_payload": "run id and target count; no media/comment body",
+      "targets": 120,
+      "dispatches": 120,
+      "receipts": 120,
+      "attempts": 120
+    },
+    "postgres_statement_calls": 1457,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 5.704
+  },
+  {
+    "engine": "temporal",
+    "case": "server_restart_history",
+    "status": "PASS",
+    "evidence": {
+      "exit": 0
+    },
+    "postgres_statement_calls": 2,
+    "sampled_peak_postgres_sessions": 0,
+    "seconds": 0.888
+  }
+]

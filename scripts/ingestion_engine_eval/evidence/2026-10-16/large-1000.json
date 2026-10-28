@@ -1,0 +1,45 @@
+[
+  {
+    "engine": "dbos",
+    "case": "bounded_fixture",
+    "status": "PASS",
+    "evidence": {
+      "max_active_adapter_threads": 1,
+      "workflow_payload": "run id and target count; no media/comment body",
+      "targets": 1000,
+      "dispatches": 1000,
+      "receipts": 1000,
+      "attempts": 1000
+    },
+    "postgres_statement_calls": 20727,
+    "sampled_peak_postgres_sessions": 6,
+    "seconds": 16.641
+  },
+  {
+    "engine": "temporal",
+    "case": "bounded_fixture",
+    "status": "PASS",
+    "evidence": {
+      "max_active_adapter_threads": 2,
+      "workflow_payload": "run id and target count; no media/comment body",
+      "targets": 1000,
+      "dispatches": 1000,
+      "receipts": 1000,
+      "attempts": 1000
+    },
+    "postgres_statement_calls": 12017,
+    "sampled_peak_postgres_sessions": 1,
+    "seconds": 58.502
+  },
+  {
+    "engine": "temporal",
+    "case": "server_restart_history",
+    "status": "PASS",
+    "evidence": {
+      "exit": 0
+    },
+    "postgres_statement_calls": 2,
+    "sampled_peak_postgres_sessions": 0,
+    "seconds": 1.464
+  }
+]

@@ -31,6 +31,42 @@ schema, route, payload, stage, worker-lane, or persisted-row changes.
 - `scripts/socials/tiktok/scrape.py` includes experimental comments export paths. Do not treat that CLI as a backend comments persistence contract.
 - Tests named in the approved plan for TikTok posts are `tests/repositories/test_tiktok_posts_scrapling_start.py`, `tests/repositories/test_tiktok_posts_scrapling_worker_lane.py`, `tests/api/routers/test_socials_tiktok_preview.py`, and `tests/api/routers/test_socials_tiktok_scrape.py`.
 
+## TikTok Module Layout
+
+Current status: the TikTok-specific code that used to live in
+`trr_backend/socials/social_season_analytics_impl.py` (76 functions) and the
+3,100-line `trr_backend/socials/tiktok/scraper.py` class now lives in owned
+Modules under `trr_backend/socials/tiktok/`. This was a pure move: every
+monolith function keeps a same-named delegating wrapper, and `TikTokScraper`
+keeps its class name, method names, and signatures.
+
+| Module | Owns |
+| --- | --- |
+| `constants.py` | Stage and worker-lane names, env var names, API URLs, user agent, page sizes, retry and timeout defaults (also re-exported from `http_client.py`; `jobs.py`, `posts_scrapling/fetcher.py`, and the legacy repository import from here). |
+| `models.py`, `errors.py` | `TikTokPost`, `TikTokComment`, `TikTokScrapeConfig`; `TikTokHttpRequestError` and the two posts-Scrapling lane errors (re-exported by `scraper.py`, `http_client.py`, and `posts_scrapling/job_runner.py`). |
+| `parsing/posts.py`, `parsing/comments.py`, `parsing/profile.py`, `parsing/ytdlp.py`, `parsing/sounds.py` | Mixins for post items, comments, profile snapshots, and yt-dlp metadata; `parser.py` re-exports `extract_profile_preview_sections`; `media_resolver.py` imports the shared yt-dlp cookie finder and payload parser; sounds holds the repository sound helpers. |
+| `transports/ytdlp.py`, `transports/web_api.py`, `transports/browser_intercept.py` | The yt-dlp CLI path (including canonical-cookie and proxy arguments), the direct web API path (`_scrape_api`, comments, replies, profile HTML, oembed), and the Playwright intercept path. |
+| `scraper.py` | Facade: composes the transport and parsing mixins into `TikTokScraper`, owns `scrape()` routing, HTTP client composition, retrieval metadata, and path health (under 450 lines). |
+| `cookies.py` | Cookie resolution, validation, refresh, and the canonical cookie-loader adapter; the three cookie state globals stay in the repository and are read through the provider. |
+| `posts/persistence.py`, `posts/ingest.py` | Canonical post upsert, enrichment, anomaly events, sound snapshot persistence, and the `_ingest_tiktok` season stage. |
+| `comments/persistence.py`, `comments/coverage.py`, `comments/media_mirror.py` | Comment-tree upsert and enrichment, comment coverage and gap priority reads, comment media mirror enqueue and stage. |
+| `shared_catalog/context.py`, `config.py`, `discovery.py`, `scrape.py`, `persistence.py` | Shared-account catalog bootstrap, configuration, cursor-partition discovery, hydration and partitioned scrape, and catalog post upsert. |
+| `analytics/week.py`, `filters.py`, `header_stats.py`, `reads.py` | Week detail/summary rows, SQL filter helpers, profile header stats, and the nine `get_tiktok_*` season read models (re-exported by `trr_backend.socials.analytics.read_models`). |
+| `alerts.py`, `lane_start.py` | Single-path topology alerts; `start_tiktok_posts_scrapling_scrape` and the synchronous post-detail refresh. |
+
+Rules for this layout:
+
+- Extracted repository rooms copy `trr_backend/socials/instagram/catalog_ingest.py`: a `LateNamespaceProvider` published by the legacy repository's tail loop, `_sync_core_overrides()` at room entry, `_room_callable` for sibling rooms that tests monkeypatch, and `_core.<name>` for repository-owned state. Room names are declared before the provider so a late `adopt_published` still captures the repository wrappers. `parsing/profile.py` is imported with the package, so its two repository rooms use the lighter `instagram/media_mirror.py`-style provider instead.
+- The repository keeps only delegating wrappers for TikTok, plus the state and types that cannot move yet: `_tiktok_cookie_*` state, `_SharedTikTokCommentFetchTimeoutError` (subclasses the repository YouTube timeout), `_TIKTOK_SINGLE_PATH_TOPOLOGY_DEFAULT`, `FIELD_UNSET`, `TIKTOK_PARTITION_RETRY_DELAYS_SECONDS`, the two media-mirror job-type constants, `_parse_tiktok_time`, and `_resolve_tiktok_media_for_video_id`.
+- `tests/scripts/test_tiktok_import_boundary.py` guards that no module under `trr_backend.socials.tiktok` imports either legacy repository path, in source or transitively at import time, and that every provider-backed leaf exposes `_LOCAL_ROOM_FUNCTIONS`.
+
+## TikTok Audit Follow-ups
+
+- `transports/ytdlp_auth.py` owns cookie/proxy argument construction for the scraper and media resolver. Supplied Netscape files win over canonical cookie maps. Canonical-cookie and proxy settings keep their existing defaults.
+- The media resolver accepts an optional keyword-only cookie map. The backend supplies available cookies without starting a login or refresh flow. Temporary files belong to the creating call and use mode `0600`.
+- yt-dlp dates use UTC. Sound snapshots use `TIKTOK_USER_AGENT`. Subprocess diagnostics retain reason codes without raw command output.
+- Instagram catalog room names must exist before provider adoption. Local builders keep preservation-row batching, and intentional legacy patches retain their compatible call shape.
+
 ## TikTok Comments Contract Status
 
 Current status: blocked for ingestion work. The repo has enough code to fetch or export comments experimentally, but it does not yet have a backend persisted TikTok comments lane.

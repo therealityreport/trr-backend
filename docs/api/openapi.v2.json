@@ -5140,6 +5140,1313 @@
         "title": "IdentityProblemResponse",
         "type": "object"
       },
+      "InstagramEvidenceDiagnosticV2": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "evidence_id": {
+            "format": "uuid",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "parser_version": {
+            "title": "Parser Version",
+            "type": "string"
+          },
+          "pinned": {
+            "title": "Pinned",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_identity": {
+            "title": "Source Identity",
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "listing",
+              "post_details",
+              "comments",
+              "media"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "target_key": {
+            "title": "Target Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "stage",
+          "target_key",
+          "source_identity",
+          "captured_at",
+          "content_hash",
+          "available",
+          "expires_at",
+          "pinned",
+          "parser_version",
+          "schema_version"
+        ],
+        "title": "InstagramEvidenceDiagnosticV2",
+        "type": "object"
+      },
+      "InstagramIngestionCapabilitiesV2": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "disabled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabled Reason"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dbos",
+                  "temporal"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "local_worker_online": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Worker Online"
+          },
+          "replay_apply_enabled": {
+            "default": false,
+            "title": "Replay Apply Enabled",
+            "type": "boolean"
+          },
+          "supported_actions": {
+            "items": {
+              "enum": [
+                "backfill",
+                "sync_recent",
+                "sync_newer",
+                "resume_tail"
+              ],
+              "type": "string"
+            },
+            "title": "Supported Actions",
+            "type": "array"
+          },
+          "workflow_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Version"
+          }
+        },
+        "required": [
+          "enabled",
+          "account"
+        ],
+        "title": "InstagramIngestionCapabilitiesV2",
+        "type": "object"
+      },
+      "InstagramIngestionCommandV2": {
+        "additionalProperties": false,
+        "properties": {
+          "engine": {
+            "enum": [
+              "dbos",
+              "temporal"
+            ],
+            "title": "Engine",
+            "type": "string"
+          },
+          "execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Id"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "running",
+              "blocked",
+              "cancelled",
+              "completed",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "workflow_version": {
+            "minLength": 1,
+            "title": "Workflow Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "state",
+          "engine",
+          "workflow_version",
+          "generation"
+        ],
+        "title": "InstagramIngestionCommandV2",
+        "type": "object"
+      },
+      "InstagramIngestionControlV2": {
+        "additionalProperties": false,
+        "description": "Optional empty command body; supplied unknown fields remain invalid.",
+        "properties": {},
+        "title": "InstagramIngestionControlV2",
+        "type": "object"
+      },
+      "InstagramIngestionDiagnosticsV2": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/InstagramEvidenceDiagnosticV2"
+            },
+            "maxItems": 100,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "evidence_truncated": {
+            "title": "Evidence Truncated",
+            "type": "boolean"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/InstagramTargetDiagnosticV2"
+            },
+            "maxItems": 100,
+            "title": "Targets",
+            "type": "array"
+          },
+          "targets_truncated": {
+            "title": "Targets Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "run_id",
+          "account",
+          "targets",
+          "evidence",
+          "targets_truncated",
+          "evidence_truncated"
+        ],
+        "title": "InstagramIngestionDiagnosticsV2",
+        "type": "object"
+      },
+      "InstagramIngestionLaunchV2": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "backfill",
+            "enum": [
+              "backfill",
+              "sync_recent",
+              "sync_newer",
+              "resume_tail"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "apply_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apply Run Id"
+          },
+          "backfill_scope": {
+            "default": "full_history",
+            "enum": [
+              "full_history",
+              "bounded_window"
+            ],
+            "title": "Backfill Scope",
+            "type": "string"
+          },
+          "comments_enable_media_followups": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comments Enable Media Followups"
+          },
+          "comments_worker_count": {
+            "anyOf": [
+              {
+                "maximum": 24.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comments Worker Count"
+          },
+          "date_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date End"
+          },
+          "date_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Start"
+          },
+          "detail_worker_count": {
+            "anyOf": [
+              {
+                "maximum": 12.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Worker Count"
+          },
+          "enable_cap4_canary": {
+            "default": false,
+            "title": "Enable Cap4 Canary",
+            "type": "boolean"
+          },
+          "execution_placement": {
+            "default": "modal",
+            "enum": [
+              "modal",
+              "local"
+            ],
+            "title": "Execution Placement",
+            "type": "string"
+          },
+          "force_catalog_rediscovery": {
+            "default": false,
+            "title": "Force Catalog Rediscovery",
+            "type": "boolean"
+          },
+          "lookback_days": {
+            "default": 1,
+            "maximum": 30.0,
+            "minimum": 1.0,
+            "title": "Lookback Days",
+            "type": "integer"
+          },
+          "operator_confirmation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Confirmation"
+          },
+          "selected_tasks": {
+            "items": {
+              "enum": [
+                "post_details",
+                "comments",
+                "media"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Selected Tasks",
+            "type": "array"
+          },
+          "source_scope": {
+            "default": "network",
+            "enum": [
+              "bravo",
+              "network",
+              "creator",
+              "community",
+              "news"
+            ],
+            "title": "Source Scope",
+            "type": "string"
+          }
+        },
+        "title": "InstagramIngestionLaunchV2",
+        "type": "object"
+      },
+      "InstagramIngestionProblemResponseV2": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/InstagramIngestionProblemV2"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "InstagramIngestionProblemResponseV2",
+        "type": "object"
+      },
+      "InstagramIngestionProblemV2": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "retry_after_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Ms"
+          },
+          "retryable": {
+            "default": false,
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "status": {
+            "maximum": 599.0,
+            "minimum": 400.0,
+            "title": "Status",
+            "type": "integer"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          }
+        },
+        "required": [
+          "code",
+          "status",
+          "message"
+        ],
+        "title": "InstagramIngestionProblemV2",
+        "type": "object"
+      },
+      "InstagramIngestionProgressV2": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "cancel",
+                "resume",
+                "retry_targets",
+                "replay"
+              ],
+              "type": "string"
+            },
+            "title": "Allowed Actions",
+            "type": "array"
+          },
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "engine": {
+            "enum": [
+              "dbos",
+              "temporal"
+            ],
+            "title": "Engine",
+            "type": "string"
+          },
+          "execution_placement": {
+            "default": "modal",
+            "enum": [
+              "modal",
+              "local"
+            ],
+            "title": "Execution Placement",
+            "type": "string"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "intent": {
+            "$ref": "#/components/schemas/InstagramRunIntentV2"
+          },
+          "intent_hash": {
+            "title": "Intent Hash",
+            "type": "string"
+          },
+          "last_committed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Committed At"
+          },
+          "pinned_evidence_count": {
+            "minimum": 0.0,
+            "title": "Pinned Evidence Count",
+            "type": "integer"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/InstagramStageProgressV2"
+            },
+            "title": "Stages",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "running",
+              "blocked",
+              "cancelled",
+              "completed",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workflow_version": {
+            "title": "Workflow Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "account",
+          "intent",
+          "intent_hash",
+          "engine",
+          "workflow_version",
+          "state",
+          "generation",
+          "last_committed_at",
+          "created_at",
+          "updated_at",
+          "stages",
+          "pinned_evidence_count",
+          "complete",
+          "allowed_actions"
+        ],
+        "title": "InstagramIngestionProgressV2",
+        "type": "object"
+      },
+      "InstagramRecentRunV2": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "engine": {
+            "enum": [
+              "dbos",
+              "temporal"
+            ],
+            "title": "Engine",
+            "type": "string"
+          },
+          "execution_placement": {
+            "default": "modal",
+            "enum": [
+              "modal",
+              "local"
+            ],
+            "title": "Execution Placement",
+            "type": "string"
+          },
+          "intent": {
+            "$ref": "#/components/schemas/InstagramRunIntentV2"
+          },
+          "last_committed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Committed At"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "running",
+              "blocked",
+              "cancelled",
+              "completed",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "workflow_version": {
+            "title": "Workflow Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "account",
+          "state",
+          "intent",
+          "engine",
+          "workflow_version",
+          "created_at",
+          "last_committed_at"
+        ],
+        "title": "InstagramRecentRunV2",
+        "type": "object"
+      },
+      "InstagramRecentRunsV2": {
+        "additionalProperties": false,
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/InstagramRecentRunV2"
+            },
+            "maxItems": 100,
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "InstagramRecentRunsV2",
+        "type": "object"
+      },
+      "InstagramReplayComparisonV2": {
+        "additionalProperties": false,
+        "properties": {
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "current": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "previous": {
+            "$ref": "#/components/schemas/JsonValue"
+          }
+        },
+        "required": [
+          "previous",
+          "current",
+          "changed"
+        ],
+        "title": "InstagramReplayComparisonV2",
+        "type": "object"
+      },
+      "InstagramReplayResultV2": {
+        "additionalProperties": false,
+        "properties": {
+          "capture_parser_version": {
+            "title": "Capture Parser Version",
+            "type": "string"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "comparison": {
+            "$ref": "#/components/schemas/InstagramReplayComparisonV2"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "evidence_id": {
+            "format": "uuid",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry_run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "normalized": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "parser_version": {
+            "title": "Parser Version",
+            "type": "string"
+          },
+          "receipt_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt Id"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_requests": {
+            "const": 0,
+            "default": 0,
+            "title": "Source Requests",
+            "type": "integer"
+          },
+          "stage": {
+            "enum": [
+              "listing",
+              "post_details",
+              "comments",
+              "media"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "target_key": {
+            "title": "Target Key",
+            "type": "string"
+          },
+          "writes": {
+            "minimum": 0.0,
+            "title": "Writes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mode",
+          "evidence_id",
+          "run_id",
+          "stage",
+          "target_key",
+          "captured_at",
+          "content_hash",
+          "capture_parser_version",
+          "parser_version",
+          "schema_version",
+          "normalized",
+          "comparison",
+          "writes"
+        ],
+        "title": "InstagramReplayResultV2",
+        "type": "object"
+      },
+      "InstagramReplayV2": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "default": false,
+            "title": "Apply",
+            "type": "boolean"
+          },
+          "evidence_id": {
+            "format": "uuid",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "parser_version": {
+            "minLength": 1,
+            "title": "Parser Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "parser_version"
+        ],
+        "title": "InstagramReplayV2",
+        "type": "object"
+      },
+      "InstagramRetryTargetsV2": {
+        "additionalProperties": false,
+        "properties": {
+          "stage": {
+            "enum": [
+              "post_details",
+              "comments",
+              "media"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "target_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Target Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stage",
+          "target_keys"
+        ],
+        "title": "InstagramRetryTargetsV2",
+        "type": "object"
+      },
+      "InstagramRunIntentV2": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "maxLength": 30,
+            "minLength": 1,
+            "title": "Account",
+            "type": "string"
+          },
+          "action": {
+            "enum": [
+              "backfill",
+              "sync_recent",
+              "sync_newer",
+              "resume_tail"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "comments_enable_media_followups": {
+            "default": true,
+            "title": "Comments Enable Media Followups",
+            "type": "boolean"
+          },
+          "comments_max_attempts": {
+            "default": 12,
+            "maximum": 12.0,
+            "minimum": 1.0,
+            "title": "Comments Max Attempts",
+            "type": "integer"
+          },
+          "comments_worker_count": {
+            "anyOf": [
+              {
+                "maximum": 24.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comments Worker Count"
+          },
+          "date_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date End"
+          },
+          "date_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Start"
+          },
+          "detail_worker_count": {
+            "anyOf": [
+              {
+                "maximum": 12.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Worker Count"
+          },
+          "enable_cap4_canary": {
+            "default": false,
+            "title": "Enable Cap4 Canary",
+            "type": "boolean"
+          },
+          "force": {
+            "title": "Force",
+            "type": "boolean"
+          },
+          "listing_max_attempts": {
+            "default": 12,
+            "minimum": 1.0,
+            "title": "Listing Max Attempts",
+            "type": "integer"
+          },
+          "media_max_attempts": {
+            "const": 3,
+            "default": 3,
+            "title": "Media Max Attempts",
+            "type": "integer"
+          },
+          "metadata_ttl_days": {
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Metadata Ttl Days",
+            "type": "integer"
+          },
+          "metrics_ttl_hours": {
+            "const": 24,
+            "title": "Metrics Ttl Hours",
+            "type": "integer"
+          },
+          "platform": {
+            "const": "instagram",
+            "title": "Platform",
+            "type": "string"
+          },
+          "policy_version": {
+            "const": 1,
+            "title": "Policy Version",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "full_history",
+              "bounded_window",
+              "recent_window",
+              "head_gap",
+              "frontier_resume"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "selected_tasks": {
+            "items": {
+              "enum": [
+                "post_details",
+                "comments",
+                "media"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Selected Tasks",
+            "type": "array"
+          },
+          "source_scope": {
+            "enum": [
+              "bravo",
+              "network",
+              "creator",
+              "community",
+              "news"
+            ],
+            "title": "Source Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account",
+          "action",
+          "source_scope",
+          "date_start",
+          "date_end",
+          "selected_tasks",
+          "scope",
+          "metadata_ttl_days",
+          "metrics_ttl_hours",
+          "force",
+          "policy_version"
+        ],
+        "title": "InstagramRunIntentV2",
+        "type": "object"
+      },
+      "InstagramStageProgressV2": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "blocked_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked Reasons",
+            "type": "array"
+          },
+          "cached_satisfied": {
+            "minimum": 0.0,
+            "title": "Cached Satisfied",
+            "type": "integer"
+          },
+          "committed": {
+            "minimum": 0.0,
+            "title": "Committed",
+            "type": "integer"
+          },
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "discovery_complete": {
+            "title": "Discovery Complete",
+            "type": "boolean"
+          },
+          "last_committed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Committed At"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "retry_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry At"
+          },
+          "sealed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sealed At"
+          },
+          "source_unavailable": {
+            "minimum": 0.0,
+            "title": "Source Unavailable",
+            "type": "integer"
+          },
+          "stage": {
+            "enum": [
+              "listing",
+              "post_details",
+              "comments",
+              "media"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "unresolved": {
+            "minimum": 0.0,
+            "title": "Unresolved",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stage",
+          "discovery_complete",
+          "sealed_at",
+          "total",
+          "committed",
+          "cached_satisfied",
+          "source_unavailable",
+          "unresolved",
+          "attempts",
+          "requests",
+          "retry_at",
+          "blocked_reasons",
+          "last_committed_at",
+          "complete"
+        ],
+        "title": "InstagramStageProgressV2",
+        "type": "object"
+      },
+      "InstagramTargetDiagnosticV2": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked Reason"
+          },
+          "last_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Code"
+          },
+          "max_attempts": {
+            "minimum": 1.0,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "outcome": {
+            "enum": [
+              "committed",
+              "cached_satisfied",
+              "source_unavailable",
+              "unresolved"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "requests": {
+            "minimum": 0.0,
+            "title": "Requests",
+            "type": "integer"
+          },
+          "retry_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry At"
+          },
+          "stage": {
+            "enum": [
+              "listing",
+              "post_details",
+              "comments",
+              "media"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "target_key": {
+            "title": "Target Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "target_key",
+          "outcome",
+          "attempts",
+          "requests",
+          "max_attempts",
+          "retry_at",
+          "blocked_reason"
+        ],
+        "title": "InstagramTargetDiagnosticV2",
+        "type": "object"
+      },
       "JsonValue": {},
       "NetworkStreamingCompletionDetailV2": {
         "additionalProperties": false,
@@ -13973,6 +15280,1369 @@
         "summary": "Update Typography Set",
         "tags": [
           "admin-site-typography-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/capabilities": {
+      "get": {
+        "operationId": "getInstagramIngestionCapabilitiesV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionCapabilitiesV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Capabilities",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs": {
+      "post": {
+        "operationId": "launchInstagramIngestionRunV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstagramIngestionLaunchV2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionCommandV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Launch",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/recent": {
+      "get": {
+        "operationId": "listRecentInstagramIngestionRunsV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_scope",
+            "required": false,
+            "schema": {
+              "default": "network",
+              "enum": [
+                "bravo",
+                "network",
+                "creator",
+                "community",
+                "news"
+              ],
+              "title": "Source Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramRecentRunsV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Recent",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/{run_id}": {
+      "get": {
+        "operationId": "getInstagramIngestionRunV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProgressV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Progress",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/{run_id}/cancel": {
+      "post": {
+        "operationId": "cancelInstagramIngestionRunV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstagramIngestionControlV2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionCommandV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Cancel",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/{run_id}/diagnostics": {
+      "get": {
+        "operationId": "getInstagramIngestionDiagnosticsV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionDiagnosticsV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Diagnostics",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/{run_id}/replay": {
+      "post": {
+        "operationId": "replayInstagramIngestionEvidenceV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstagramReplayV2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramReplayResultV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Replay",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/{run_id}/resume": {
+      "post": {
+        "operationId": "resumeInstagramIngestionRunV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstagramIngestionControlV2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionCommandV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Resume",
+        "tags": [
+          "instagram-ingestion-v2"
+        ]
+      }
+    },
+    "/api/v2/admin/social/profiles/instagram/{handle}/ingestion/runs/{run_id}/retry-targets": {
+      "post": {
+        "operationId": "retryInstagramIngestionTargetsV2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "handle",
+            "required": true,
+            "schema": {
+              "title": "Handle",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstagramRetryTargetsV2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionCommandV2"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstagramIngestionProblemResponseV2"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "InternalAdminBearer": []
+          }
+        ],
+        "summary": "Retry",
+        "tags": [
+          "instagram-ingestion-v2"
         ]
       }
     },

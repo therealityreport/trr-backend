@@ -11,11 +11,20 @@ import asyncio
 import inspect
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 from trr_backend.socials._scrapling_http_utils import env_truthy, response_text, status_code
-from trr_backend.socials.instagram.constants import PERMALINK_URL, PROFILE_INFO_URL, PROFILE_POSTS_ROOT_FIELD_NAME
+from trr_backend.socials.instagram.constants import (
+    GRAPHQL_URL,
+    PERMALINK_URL,
+    PROFILE_INFO_URL,
+    PROFILE_POSTS_FRIENDLY_NAME,
+    PROFILE_POSTS_ROOT_FIELD_NAME,
+    resolve_profile_posts_doc_ids,
+)
 from trr_backend.socials.instagram.post_normalizer import normalize_instagram_post
+from trr_backend.socials.instagram.public_post_extractor import parse_public_post_from_html
 from trr_backend.socials.instagram.runtimes.crawlee_runtime import _node_to_post
 from trr_backend.socials.instagram.runtimes.protocol import (
     InstagramRuntime,
@@ -75,28 +84,72 @@ class ScraplingRuntime:
         if limit <= 0:
             return []
         payload = await self._fetch_json(PROFILE_INFO_URL, params={"username": username})
-        edges = _timeline_edges(payload)
-        if not edges:
-            raise RuntimeUnsupported(f"ScraplingRuntime returned empty posts payload for {username}")
         posts: list[Post] = []
-        for edge in edges[:limit]:
-            node = edge.get("node") if isinstance(edge, dict) else None
-            if not isinstance(node, dict):
-                continue
-            post = _node_to_post(node)
-            if post.shortcode:
-                posts.append(post)
+        seen_posts: set[str] = set()
+        seen_cursors: set[str] = set()
+        while True:
+            edges = _timeline_edges(payload)
+            if not edges:
+                raise RuntimeUnsupported(f"ScraplingRuntime returned empty posts payload for {username}")
+            for edge in edges:
+                node = edge.get("node")
+                if not isinstance(node, dict):
+                    continue
+                post = _post_from_node(node)
+                if post.shortcode and post.shortcode not in seen_posts:
+                    posts.append(post)
+                    seen_posts.add(post.shortcode)
+                    if len(posts) >= limit:
+                        return posts
+            connection = _timeline_connection(payload)
+            page_info = connection.get("page_info") or {}
+            if not page_info.get("has_next_page"):
+                break
+            cursor = str(page_info.get("end_cursor") or "").strip()
+            if not cursor or cursor in seen_cursors:
+                raise RuntimeUnsupported("ScraplingRuntime pagination cursor did not advance")
+            seen_cursors.add(cursor)
+            # Bound even malformed feeds that keep returning duplicate posts.
+            if len(seen_cursors) > limit:
+                raise RuntimeUnsupported("ScraplingRuntime pagination made insufficient progress")
+            count = min(33, limit - len(posts))
+            payload = await self._fetch_json(
+                GRAPHQL_URL,
+                data={
+                    "doc_id": resolve_profile_posts_doc_ids()[0],
+                    "fb_api_caller_class": "RelayModern",
+                    "fb_api_req_friendly_name": PROFILE_POSTS_FRIENDLY_NAME,
+                    "variables": json.dumps(
+                        {
+                            "username": username,
+                            "after": cursor,
+                            "before": None,
+                            "first": count,
+                            "last": None,
+                            "data": {"count": count},
+                        }
+                    ),
+                },
+            )
         if not posts:
             raise RuntimeUnsupported(f"ScraplingRuntime returned no supported posts for {username}")
         return posts
 
     async def fetch_post_detail(self, shortcode: str) -> PostDetail:
-        payload = await self._fetch_json(PERMALINK_URL.format(shortcode=shortcode))
-        node = _detail_node(payload)
+        response = await self._fetch_response(PERMALINK_URL.format(shortcode=shortcode))
+        html = response_text(response)
+        extracted = parse_public_post_from_html(html, shortcode=shortcode)
+        if extracted is not None:
+            node = extracted.to_raw_media()
+        else:
+            try:
+                node = _detail_node(_response_json(response))
+            except (TypeError, ValueError):
+                node = {}
         if not node:
             raise RuntimeUnsupported(f"ScraplingRuntime returned unsupported detail payload for {shortcode}")
 
-        post = _node_to_post(node)
+        post = _post_from_node(node)
         if not post.shortcode:
             raise RuntimeUnsupported(f"ScraplingRuntime returned detail without shortcode for {shortcode}")
 
@@ -108,31 +161,42 @@ class ScraplingRuntime:
             permalink=normalized.permalink or PERMALINK_URL.format(shortcode=post.shortcode),
         )
 
-    async def _fetch_json(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
-        """Fetch JSON with Scrapling's basic fetcher.
-
-        This helper intentionally avoids browser-backed fetchers. The canary
-        runtime should prove lightweight JSON transport before moving policy or
-        stateful browser behavior into this runtime.
-        """
+    async def _fetch_response(
+        self, url: str, *, params: dict[str, Any] | None = None, data: dict[str, Any] | None = None
+    ) -> Any:
         fetcher = build_fetcher()
         kwargs: dict[str, Any] = {
-            "params": params or {},
             "cookies": dict(self._cookies),
-            "timeout": DEFAULT_TRANSPORT.timeout_ms,
+            # Browser timeouts use milliseconds; the basic HTTP fetcher uses seconds.
+            "timeout": DEFAULT_TRANSPORT.timeout_ms / 1000,
+            "follow_redirects": False,
+            "retries": 1,
+            # An explicit empty proxy disables libcurl environment proxy lookup.
+            "proxies": {"all": ""},
+            "headers": {"x-ig-app-id": "936619743392459"},
         }
+        if data is not None:
+            kwargs["data"] = data
+        else:
+            kwargs["params"] = params or {}
         response = await _call_fetcher(fetcher, url, **kwargs)
         status = status_code(response)
-        if status >= 400:
+        if status >= 300:
             raise RuntimeUnsupported(f"ScraplingRuntime HTTP {status} for {url}")
+        return response
+
+    async def _fetch_json(
+        self, url: str, *, params: dict[str, Any] | None = None, data: dict[str, Any] | None = None
+    ) -> Any:
+        response = await self._fetch_response(url, params=params, data=data)
         try:
             return _response_json(response)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise RuntimeUnsupported(f"ScraplingRuntime returned non-JSON payload for {url}") from exc
 
 
 async def _call_fetcher(fetcher: Any, url: str, **kwargs: Any) -> Any:
-    for method_name in ("async_fetch", "fetch", "get"):
+    for method_name in ("post",) if "data" in kwargs else ("async_fetch", "fetch", "get"):
         method = getattr(fetcher, method_name, None)
         if not callable(method):
             continue
@@ -141,8 +205,22 @@ async def _call_fetcher(fetcher: Any, url: str, **kwargs: Any) -> Any:
             if inspect.isawaitable(result):
                 return await result
             return result
-        return await asyncio.to_thread(method, url, **kwargs)
+        result = await asyncio.to_thread(method, url, **kwargs)
+        return await result if inspect.isawaitable(result) else result
     raise RuntimeUnsupported("ScraplingRuntime fetcher has no supported fetch method")
+
+
+def _post_from_node(node: dict[str, Any]) -> Post:
+    post = _node_to_post(node)
+    normalized = normalize_instagram_post(node)
+    return replace(
+        post,
+        caption=normalized.caption.text or post.caption,
+        media_urls=tuple(normalized.media_urls) or post.media_urls,
+        media_type=normalized.media_type or post.media_type,
+        like_count=_safe_int(node.get("like_count")) if "like_count" in node else post.like_count,
+        comment_count=_safe_int(node.get("comment_count")) if "comment_count" in node else post.comment_count,
+    )
 
 
 def _response_json(response: Any) -> Any:
@@ -164,6 +242,17 @@ def _profile_user(payload: Any) -> dict[str, Any]:
     if isinstance(payload.get("username"), str):
         return payload
     return {}
+
+
+def _timeline_connection(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    timeline = _profile_user(payload).get("edge_owner_to_timeline_media")
+    if isinstance(timeline, dict):
+        return timeline
+    data = payload.get("data")
+    connection = data.get(PROFILE_POSTS_ROOT_FIELD_NAME) if isinstance(data, dict) else None
+    return connection if isinstance(connection, dict) else {}
 
 
 def _timeline_edges(payload: Any) -> list[dict[str, Any]]:

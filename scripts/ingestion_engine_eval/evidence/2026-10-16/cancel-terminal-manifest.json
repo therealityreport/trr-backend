@@ -1,0 +1,11 @@
+{
+  "source_sha256": {
+    "scripts/ingestion_engine_eval/dbos_worker.py": "fb0f50ecff618e2e2152191c429fea45cb0bc77bcd30f7b46b289ca73a6d9d44",
+    "scripts/ingestion_engine_eval/temporal_worker.py": "30b2558e4bf3227bec6ffb73437c8a049951a081d8ec5b390bec2df2252aa8e3",
+    "scripts/ingestion_engine_eval/run.py": "a814635e0b29ff001e5ac0a71327a75de92f3b1a95af8032d6539295c6acbaa8"
+  },
+  "command": "python scripts/ingestion_engine_eval/run.py --runtime-dir /tmp/trr-engine-eval-cancel-terminal-6f437318 --cancel-only",
+  "checks": "4 affected cases PASS; terminal engine states explicitly asserted",
+  "earlier_evidence_unchanged": true,
+  "history_batching_partitioning": "UNVERIFIED"
+}

@@ -1,0 +1,58 @@
+{
+  "status": "Reviewed representative evidence; resource acceptance remains parent-owned.",
+  "pair_count": 1,
+  "sources": {
+    "legacy_commit": "17f978d101a26634c96ac62f6f352f8ae9bc7487",
+    "candidate_commit": "595fda4b238f04b9daad382386c00162d6eab594",
+    "later_unmeasured_delta": "6f38e07d guarded-error classification; valid fixture/SQL inputs unchanged"
+  },
+  "frozen_harness_sha256": {
+    "full_pipeline_resource.py": "404885a093d65684f43359a613b3bed5722ca04c73a205d6b54a56c43df70534",
+    "full_pipeline_sources.py": "31b1e06f610feff549b48c3330d661fd279c0f47d2e7a1f7c54b87b2540ddfdf",
+    "pre_run_full_pipeline_workload.md": "3b6383126ef06667dfa95f0289d15a66bd844a9a9b8f3ffe1980b58895330510"
+  },
+  "files": {
+    "full-pipeline-resource-v3-report.md": {
+      "sha256": "3bb46007a420da888014fa280c9a47255f2c0a6dfd6313a62eb462f604064884",
+      "bytes": 15960,
+      "copied_from": ".artifacts/ingestion-engine-eval-full-17f978d/representative-report.md",
+      "byte_identical_to_reviewed_private_artifact": true
+    },
+    "full-pipeline-resource-v3-analysis.py": {
+      "sha256": "3659c4d7f07898964b8c36ab326fd24accce0610180d52d8e5ceae66718c4fdd",
+      "bytes": 9754,
+      "copied_from": ".artifacts/ingestion-engine-eval-full-17f978d/representative-analysis.py",
+      "byte_identical_to_reviewed_private_artifact": true
+    },
+    "full-pipeline-resource-v3-evidence.tar.gz": {
+      "sha256": "59e65b26a794b8f0b7ae3b99d634cef0aece5716838294612ca9245d95d9bb84",
+      "bytes": 596740,
+      "copied_from": ".artifacts/ingestion-engine-eval-full-17f978d/representative-evidence-v3.tar.gz",
+      "byte_identical_to_reviewed_private_artifact": true
+    }
+  },
+  "archive": {
+    "members": 528,
+    "layout": "Relative names; extract into a separate task-private directory. Original representative-report.md, representative-analysis.py and representative-attribution.json are included alongside both named arm directories and manifest.json.",
+    "attribution_json_sha256": "aa6c4384a64a991728ba2027cb4b037fb8871794485c7141859a0d5845f32526",
+    "separate_attribution_copy": false,
+    "excluded": "Private PostgreSQL data, private HOME/TMP, full source exports and credentials.",
+    "retained": "Raw SQL/session measurements, fixture bodies, schema/inventory, snapshots, actual hosted objects, operation/process/pool/cleanup/error receipts."
+  },
+  "sanitization": {
+    "tool": "gitleaks8.30.1",
+    "findings": 0,
+    "scope": "Curated archive input tree (~6.72MB), including retained logs; redacted scan. Reused reviewed scan; no new scan or measurement during durable copy."
+  },
+  "review": "Independent foundation review: no findings in final report/attribution; parent retains acceptance.",
+  "limitations": [
+    "One serial local pair is descriptive, not a statistical or causal timing claim.",
+    "Real PostgreSQL/native workers/DBOS; source, CDN, storage and provider dispatch are fixtures. No live Supavisor/Modal/grant/concurrency acceptance.",
+    "All SQL categories reconcile; necessity or optimality of added work is not proven. Completion SQL +160.6668%; full lifecycle +198.6234%; mocked network +211.",
+    "Session peaks2/5 are10ms-sampled aggregate lower bounds. PID ownership is inferred; resolved per-process caps were preserved.",
+    "Common denominator is12 committed posts, not27 legacyjobs versus38 candidatereceipts. Known canonical hosted/status writes and literal comment-media URL differences are retained.",
+    "Candidate global coordinator tail remains separate from business completion and engine terminal status.",
+    "Complete source snapshots remain task-private; included full source hash receipts establish lineage but archive alone is not a source distribution."
+  ],
+  "closeout_action": "Copied three reviewed files byte-for-byte; updated workload links; verified copied hashes only. No benchmarks, tests, source/provider calls or commits."
+}
