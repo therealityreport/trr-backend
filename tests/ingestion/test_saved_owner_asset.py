@@ -553,7 +553,11 @@ def test_final_physical_plan_checks_old_and_current_objects_as_distinct_roles(sn
             pass
 
         def get(self, url, **kwargs):
-            assert kwargs["allow_redirects"] is False and kwargs["headers"] == {"Accept-Encoding": "identity"}
+            # Public reads are identified to the CDN since 98ccb8ed.
+            assert kwargs["allow_redirects"] is False and kwargs["headers"] == {
+                "Accept-Encoding": "identity",
+                "User-Agent": hosted.PUBLIC_STORAGE_USER_AGENT,
+            }
             return PublicResponse(f.storage.client.objects[urlsplit(url).path.lstrip("/")][0])
 
     monkeypatch.setattr(requests, "Session", Session)

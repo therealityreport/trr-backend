@@ -1,6 +1,7 @@
 """Verified retained outputs replay with private SQL and mock storage only."""
 
 import json
+import re
 from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
@@ -72,7 +73,12 @@ def test_result_round_trip_preserves_exact_proof_and_individual_observation_time
     assert decoded.snapshot.avatars[0].observed_at == original
     assert decoded.snapshot.comments[0].observed_at == original
     assert payload["media_result"]["asset_manifest"]["originals"]["cover"]["sha256"]
-    assert all("sha256" not in variant for variant in payload["media_result"]["asset_manifest"]["display_variants"])
+    # Variants keep exactly the fields storage returned: content-addressed variant
+    # writes (98ccb8ed) report a hash, which must then be a valid digest.
+    variants = payload["media_result"]["asset_manifest"]["display_variants"]
+    assert variants and all(
+        re.fullmatch(r"[a-f0-9]{64}", variant["sha256"]) for variant in variants if "sha256" in variant
+    )
 
 
 def summary_payload():

@@ -654,11 +654,13 @@ scheduler=Scheduler(store,admit=admit,dispatch=dispatch,reconcile=lambda _:'unkn
 config=RuntimeConfig(sys.argv[2],'test-v1',runtime_role='ingestion_runtime',lifetime_seconds=float(sys.argv[3]))
 DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
 """
+    # Two partitions plus one retried continuation must finish inside the
+    # lifetime minus the 5s shutdown allowance, even on a loaded host.
     child = subprocess.run(
-        [sys.executable, "-c", child_code, admin_dsn, runtime_url, "14", "continuation_once"],
+        [sys.executable, "-c", child_code, admin_dsn, runtime_url, "18", "continuation_once"],
         capture_output=True,
         text=True,
-        timeout=22,
+        timeout=26,
     )
     assert child.returncode == 0, child.stdout + child.stderr
     assert sql(
@@ -720,8 +722,10 @@ DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
             cur.execute("select pg_try_advisory_lock(%s,%s)", (48112, 20261016))
             assert cur.fetchone()[0]
             cur.execute("select pg_advisory_unlock(%s,%s)", (48112, 20261016))
+    # The recovered sleep wakes ~4s into this process; leave scheduling margin
+    # beyond the 5s shutdown allowance so host load cannot end the loop first.
     replacement = subprocess.run(
-        [sys.executable, "-c", child_code, admin_dsn, runtime_url, "10"], capture_output=True, text=True, timeout=18
+        [sys.executable, "-c", child_code, admin_dsn, runtime_url, "14"], capture_output=True, text=True, timeout=22
     )
     assert replacement.returncode == 0, replacement.stdout + replacement.stderr
     assert sql(
@@ -751,11 +755,13 @@ DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
         (admission_run["run_id"],),
     ) == [(1,)]
     failed_run, failed_partition = run_fixture(database)
+    # Engine failures are reconciled on a 5s scan inside the lifetime minus the
+    # 5s shutdown allowance; 12s guarantees a scan after the terminal error.
     terminal = subprocess.run(
-        [sys.executable, "-c", child_code, admin_dsn, runtime_url, "10", "schedule_terminal"],
+        [sys.executable, "-c", child_code, admin_dsn, runtime_url, "12", "schedule_terminal"],
         capture_output=True,
         text=True,
-        timeout=18,
+        timeout=20,
     )
     assert terminal.returncode == 0, terminal.stdout + terminal.stderr
     assert sql(

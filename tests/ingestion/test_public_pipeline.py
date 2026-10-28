@@ -237,6 +237,17 @@ def test_public_composed_pipeline_commits_native_parent_reply_post_and_avatar_me
     monkeypatch.setattr(composition, "Store", lambda: store)
     monkeypatch.setattr(composition, "Queries", lambda: Queries(transaction))
     monkeypatch.setattr(boto3, "Session", lambda **kw: SimpleNamespace(client=lambda *a, **kw: client))
+    # Production storage runs in a bounded child process (98ccb8ed); keep this
+    # in-process fake as the composed media client instead.
+    from trr_backend.ingestion import media_storage_io
+
+    class InProcessStorage:
+        """A real type for media.py's isinstance checks; construction yields the fake."""
+
+        def __new__(cls, **kwargs):
+            return client
+
+    monkeypatch.setattr(media_storage_io, "BoundedS3Client", InProcessStorage)
     monkeypatch.setattr(
         s3_mirror,
         "get_hosted_media_storage_config",

@@ -30,7 +30,7 @@ OBSERVED = datetime(2026, 10, 16, 12, tzinfo=UTC)
 
 
 @pytest.fixture(scope="module")
-def database(tmp_path_factory):
+def database(tmp_path_factory, register_isolated_postgres):
     root = tmp_path_factory.mktemp("canonical")
     binaries = Path("/opt/homebrew/opt/postgresql@17/bin")
     if not (binaries / "initdb").exists():
@@ -81,9 +81,10 @@ def database(tmp_path_factory):
             conn.close()
 
     try:
-        with transaction() as conn, conn.cursor() as cur:
-            cur.execute((FIXTURES / "canonical_schema.sql").read_text())
-        yield transaction
+        with register_isolated_postgres(host="127.0.0.1", port=port, dbname="postgres", user="canonical_test"):
+            with transaction() as conn, conn.cursor() as cur:
+                cur.execute((FIXTURES / "canonical_schema.sql").read_text())
+            yield transaction
     finally:
         subprocess.run(
             [str(binaries / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "stop"], check=True, capture_output=True
@@ -528,8 +529,9 @@ def test_import_boundary_in_clean_interpreter():
     code = """import sys
 from trr_backend.ingestion import canonical
 assert not any('social_season_analytics' in k for k in sys.modules)
-assert 'trr_backend.socials.provider_registry' not in sys.modules
 """
+    # provider_registry is a stdlib-only leaf registry (see its module docstring);
+    # TikTok parsing leaves import it since 7ea1826f, so it is not a boundary breach.
     subprocess.run([str(Path(__import__("sys").executable)), "-c", code], check=True, capture_output=True)
 
 

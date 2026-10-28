@@ -113,7 +113,7 @@ def test_apply_requires_password_and_bounded_connections_without_echoing_bad_arg
 
 
 @pytest.fixture(scope="module")
-def local_database(base_database):
+def local_database(base_database, register_isolated_postgres):
     _, transaction = base_database
     with transaction() as conn:
         params = conn.get_dsn_parameters()
@@ -127,13 +127,10 @@ def local_database(base_database):
         login = unquote(parsed.username).removesuffix("." + PROJECT_REF)
         username = params["user"] if login == "postgres" else login
         calls.append(username)
-        return psycopg2.connect(
-            host=params["host"],
-            port=params["port"],
-            dbname="postgres",
-            user=username,
-            password=unquote(parsed.password),
-        )
+        assert unquote(parsed.password)  # the supplied DSN still carries a credential
+        # The fixture cluster uses trust auth, and the non-live guard admits only
+        # host/port/dbname/user, so the password is validated but not forwarded.
+        return psycopg2.connect(host=params["host"], port=params["port"], dbname="postgres", user=username)
 
     def migrate(supplied, role):
         from dbos import DBOS
@@ -141,7 +138,9 @@ def local_database(base_database):
         assert supplied == environment()["TEST_DBOS_ADMIN_DSN"]
         DBOS.migrate(admin_url, application_role=role)
 
-    return transaction, connect, migrate, calls
+    # The bootstrap also logs in as the restricted runtime role it creates.
+    with register_isolated_postgres(host=params["host"], port=int(params["port"]), dbname="postgres", user=ROLE):
+        yield transaction, connect, migrate, calls
 
 
 def test_inspect_is_read_only_then_apply_proves_restricted_runtime_and_repeat_inspect(local_database, capsys):

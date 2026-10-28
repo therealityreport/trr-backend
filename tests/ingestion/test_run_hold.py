@@ -209,7 +209,8 @@ def test_held_progress_is_typed_cancelled_incomplete_and_has_no_executable_actio
     hold(database, run)
     queries = Queries(database[1])
     internal = queries.progress(run["run_id"], "bravotv")
-    assert "execution_hold_reason" not in internal and internal["allowed_actions"] == []
+    # Progress reports the hold reason truthfully (47249752) and offers no actions.
+    assert internal["execution_hold_reason"] == REASON and internal["allowed_actions"] == []
     service = CommandService(database[0], queries, engine="dbos", workflow_version="test-v1", enabled=False)
     progress = service.progress("bravotv", UUID(run["run_id"]))
     assert progress.state == "cancelled" and not progress.complete and progress.allowed_actions == []

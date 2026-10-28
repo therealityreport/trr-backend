@@ -163,7 +163,15 @@ def test_media_storage_composes_lazy_target_bound_refresh_without_credentials_or
     storage = composition._media_storage(
         {"run": {"intent": {"account": "bravotv"}}, "target": {"owner_expires_at": expires}}, owned
     )
-    assert storage.client is client and isinstance(storage.refresh, MediaRefresh)
+    # Storage I/O runs in a bounded child process (98ccb8ed); composition builds
+    # no in-process SDK client and never selects source credentials.
+    from trr_backend.ingestion.media_storage_io import BoundedS3Client
+
+    assert isinstance(storage.client, BoundedS3Client) and isinstance(storage.refresh, MediaRefresh)
     assert storage.refresh.owned == owned and storage.refresh.owner_expires_at == expires
     assert storage.refresh._snapshot is None and storage.refresh._credentials_snapshot is None
-    assert calls[0][0] == "s3" and calls[0][1]["config"].retries["total_max_attempts"] == 1
+    assert calls == [] and client is not None
+    spec = storage.client._spec
+    assert spec["bucket"] == "fixture" and spec["config"]["retries"] == {"total_max_attempts": 1}
+    assert spec["client_options"]["endpoint_url"] == "https://fixture-storage.invalid"
+    assert "aws_access_key_id" not in spec["client_options"]

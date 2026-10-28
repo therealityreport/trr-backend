@@ -347,7 +347,7 @@ def test_default_transport_binding_uses_shared_identity_and_requires_oauth(monke
     events: list[Any] = []
 
     @contextmanager
-    def guard(identity: str, lane: str):
+    def guard(identity: str, lane: str, *, allow_blocked: bool = False):
         events.append((identity, lane))
         yield
 

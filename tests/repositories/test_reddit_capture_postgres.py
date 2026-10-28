@@ -326,6 +326,9 @@ def test_media_capture_reuses_shared_asset_and_keeps_both_associations(database,
 
     monkeypatch.setattr(s3_mirror, "mirror_url_to_s3", mirror)
     for post in posts:
+        # Post media commits only after its comments are enumerated (unresolved
+        # comment media must stay visibly incomplete).
+        capture.record_capture(post["reddit_post_id"], "comments", "committed", str(run["id"]))
         capture.ensure_target(str(run["id"]), "media", post["reddit_post_id"], post_id=post["reddit_post_id"])
         reddit_execution.media_capture(post, execution)
     assets = pg.fetch_all("select * from social.reddit_assets")

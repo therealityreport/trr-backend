@@ -52,8 +52,15 @@ class _Lanes:
                 self._result = None
                 if text.startswith("set local"):
                     return
+                # The gate folds its lock/statement timeouts into the next statement.
+                timeout_prefix = "select set_config('lock_timeout',%s,true),set_config('statement_timeout',%s,true); "
+                if text.startswith(timeout_prefix):
+                    text, params = text[len(timeout_prefix) :], tuple(params)[2:]
                 if text.startswith("insert into social.instagram_detail_request_lanes"):
                     lanes.row(params[0])
+                elif text.startswith("with locked_lane as materialized"):
+                    found = lanes.rows.get(params[0])
+                    self._result = None if found is None else {**found, "current_time": lanes.now}
                 elif text.startswith("select * from social.instagram_detail_request_lanes"):
                     self._result = dict(lanes.rows[params[0]]) if params[0] in lanes.rows else None
                 elif text.startswith("select clock_timestamp()"):

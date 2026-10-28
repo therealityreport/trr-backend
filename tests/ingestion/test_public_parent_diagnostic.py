@@ -155,6 +155,9 @@ def fake_transport(monkeypatch):
         def __init__(self, **kwargs):
             options.append(kwargs)
             super().__init__(**kwargs)
+            # Pacing now runs through DispatchTurn; a zero delay skips its database turn.
+            self._api_delay_seconds = 0.0
+            self._global_api_delay_seconds = 0.0
 
         async def _pace_api_requests(self, **kwargs):
             return True

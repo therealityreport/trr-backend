@@ -152,7 +152,7 @@ def test_nested_native_metrics_qualify_and_hidden_native_metrics_override_projec
 
 
 @pytest.fixture(scope="module")
-def database(tmp_path_factory):
+def database(tmp_path_factory, register_isolated_postgres):
     root = tmp_path_factory.mktemp("freshness")
     binaries = Path("/opt/homebrew/opt/postgresql@17/bin")
     if not (binaries / "initdb").exists():
@@ -208,13 +208,16 @@ def database(tmp_path_factory):
             yield conn
 
     try:
-        with transaction() as conn, conn.cursor() as cur:
-            cur.execute((FIXTURES / "canonical_schema.sql").read_text())
-            cur.execute("""create role anon;create role authenticated;create role service_role;
-                alter table social.scrape_runs add column source_scope text,add column status text,
-                add column initiated_by text,add column config jsonb,add column cancelled_at timestamptz;""")
-            cur.execute((ROOT / "supabase/migrations/20261016070000_instagram_ingestion_foundation.sql").read_text())
-        yield Store(transaction), transaction, DetailCache(read_connection)
+        with register_isolated_postgres(host="127.0.0.1", port=port, dbname="postgres", user="cache_test"):
+            with transaction() as conn, conn.cursor() as cur:
+                cur.execute((FIXTURES / "canonical_schema.sql").read_text())
+                cur.execute("""create role anon;create role authenticated;create role service_role;
+                    alter table social.scrape_runs add column source_scope text,add column status text,
+                    add column initiated_by text,add column config jsonb,add column cancelled_at timestamptz;""")
+                cur.execute(
+                    (ROOT / "supabase/migrations/20261016070000_instagram_ingestion_foundation.sql").read_text()
+                )
+            yield Store(transaction), transaction, DetailCache(read_connection)
     finally:
         subprocess.run(
             [str(binaries / "pg_ctl"), "-D", str(data), "-m", "fast", "-w", "stop"], check=True, capture_output=True

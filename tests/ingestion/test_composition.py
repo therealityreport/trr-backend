@@ -506,12 +506,14 @@ def avatar_media_handoff(monkeypatch):
 
         def execute(self, **kwargs):
             assert state.depth == 0
-            assert kwargs == {
-                **binding,
-                "owner_token": owned["owner_token"],
-                "handles": ("bravotv", "writer"),
-                "fetch": state.sources[0],
-            }
+            expected = {**binding, "owner_token": owned["owner_token"], "handles": ("bravotv", "writer")}
+            factory = kwargs.pop("source_factory", None)
+            if factory is not None:
+                # Public discovery builds one logged-out source per username (98ccb8ed).
+                factory(expected["handles"][0])
+            else:
+                expected["fetch"] = state.sources[0]
+            assert kwargs == expected
             self.gate.check_cancelled()
             state.resolutions.append(kwargs)
             events.append("resolved")
@@ -519,6 +521,8 @@ def avatar_media_handoff(monkeypatch):
                 raise RuntimeError("resolver_failed")
 
     monkeypatch.setattr(composition, "_credentials", credentials)
+    # No saved owner hint, so public discovery uses the logged-out profile source.
+    monkeypatch.setattr(composition, "_public_avatar_lookup_hint", lambda *args: None)
     monkeypatch.setattr(composition.time, "monotonic", lambda: 123.0)
     monkeypatch.setattr(avatar_transport, "AvatarProfileSource", Source)
     monkeypatch.setattr(avatar_resolution, "AvatarResolutionActivity", Resolution)
@@ -590,7 +594,8 @@ def test_load_media_complete_cache_needs_no_profile_credentials_or_source(monkey
     monkeypatch.setattr(avatar_transport, "AvatarProfileSource", unexpected)
     monkeypatch.setattr(avatar_resolution, "AvatarResolutionActivity", unexpected)
     monkeypatch.setattr(identity_policy, "SourceRequestGate", unexpected)
-    result = object()
+    # A complete cache with no regional avatars needs no bridge lookup.
+    result = SimpleNamespace(unavailable=None, avatars=())
     reads = []
     loader = SimpleNamespace(load=lambda **kwargs: reads.append(kwargs) or result)
     owned = {"run_id": "run", "account": "bravotv", "generation": 1, "target_key": "post", "owner_token": "private"}

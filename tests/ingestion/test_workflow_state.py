@@ -41,7 +41,9 @@ def test_checkpoint_retry_budget_and_late_writer(database):
             where run_id=%s""",
             (run["run_id"],),
         )
-        assert cur.fetchone() == (3, 6, {"cursor": "retained"})
+        # The checkpoint keeps the lane cursor plus a sanitized fixed failure code;
+        # a code outside the lowercase pattern is recorded as activity_failed.
+        assert cur.fetchone() == (3, 6, {"cursor": "retained", "last_error_code": "activity_failed"})
 
 
 def test_completion_requires_every_manifest_sealed_and_every_target_settled(database):

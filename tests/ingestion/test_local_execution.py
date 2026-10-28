@@ -861,7 +861,8 @@ def test_heartbeat_failure_aborts_reaps_activity_and_cancels_before_lease_cleanu
 
         def execute(self, query, *_):
             self.query = query
-            if query == "select 1":
+            # The heartbeat now confirms its backend and grant in one query.
+            if query.startswith("select pg_backend_pid(),exists("):
                 assert started.wait(2)
                 query_entered.set()
                 if failure == "connection_lost":
@@ -869,7 +870,15 @@ def test_heartbeat_failure_aborts_reaps_activity_and_cancels_before_lease_cleanu
                 release_query.wait(5)
 
         def fetchone(self):
-            return (True,) if "pg_try_advisory_lock" in self.query else ("local_runtime", False, True, False, False)
+            if self.query.startswith("select pg_backend_pid(),exists("):
+                return (4242, True)
+            if "pg_locks" in self.query:
+                return (False,)  # this backend holds no stale grant (47249752 guard)
+            if "pg_try_advisory_lock" in self.query:
+                return (True, 4242)
+            if "idle_session_timeout" in self.query:
+                return ("0",)
+            return ("local_runtime", False, True, False, False)
 
     class Connection:
         closed = False
