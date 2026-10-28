@@ -63,7 +63,9 @@ def test_comment_mirror_enqueue_failure_rolls_back_only_its_savepoint(
     monkeypatch.setattr(
         social_repo, "_rollback_to_savepoint", lambda _conn, name: savepoint_calls.append(("rollback", name))
     )
-    monkeypatch.setattr(social_repo, "_release_savepoint", lambda _conn, name: savepoint_calls.append(("release", name)))
+    monkeypatch.setattr(
+        social_repo, "_release_savepoint", lambda _conn, name: savepoint_calls.append(("release", name))
+    )
 
     persist_stats: dict[str, int] = {}
     total = getattr(social_repo, upsert_name)(

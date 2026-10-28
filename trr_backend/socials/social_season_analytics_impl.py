@@ -28811,6 +28811,7 @@ def _upsert_facebook_comment_tree(
     if persist_stats is not None and row:
         persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
     if row:
+        mirror_job_id: str | None = None
         try:
             # A failed enqueue must not poison the post transaction; roll back only its own statements.
             with _SavepointScope(conn=conn, prefix="facebook_comment_media_mirror", index=1):
@@ -29190,6 +29191,7 @@ def _upsert_meta_threads_comment_tree(
     if persist_stats is not None and row:
         persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + 1
     if row:
+        mirror_job_id: str | None = None
         try:
             # A failed enqueue must not poison the post transaction; roll back only its own statements.
             with _SavepointScope(conn=conn, prefix="threads_comment_media_mirror", index=1):
