@@ -21651,13 +21651,18 @@ def test_catalog_recent_runs_header_resolves_terminal_attached_followups(monkeyp
 def test_catalog_header_batches_followups_with_exact_payload_and_missing_children(monkeypatch):
     conn = object()
     configs = [
-        {"comments_run_id": "child", "attached_followups": {
-            "comments": {"run_id": "child"},
-            "media": {"source": "catalog_media_mirror", "enqueued_job_ids": ["job", "job"]}}},
-        {"comments_run_id": "child", "attached_followups": {
-            "media": {"source": "catalog_media_mirror"}}},
-        {"comments_run_id": "missing", "attached_followups": {
-            "comments": {"status": "queued"}, "media": {"source": "comments_media_followups"}}},
+        {
+            "comments_run_id": "child",
+            "attached_followups": {
+                "comments": {"run_id": "child"},
+                "media": {"source": "catalog_media_mirror", "enqueued_job_ids": ["job", "job"]},
+            },
+        },
+        {"comments_run_id": "child", "attached_followups": {"media": {"source": "catalog_media_mirror"}}},
+        {
+            "comments_run_id": "missing",
+            "attached_followups": {"comments": {"status": "queued"}, "media": {"source": "comments_media_followups"}},
+        },
     ]
     statuses = {"child": "completed"}
     jobs = [{"id": "job", "status": "running"}]

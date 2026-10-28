@@ -122,9 +122,7 @@ def test_anonymous_native_media_delivery_query_survives_without_reencoding():
     query = "oh=asset%2Bsignature&_nc_ad=z-m&_nc_cid=0&_nc_ss=8&ig_cache_key=asset%3D%3D.3-ccb7-5&oe=ABC"
     for host in ("scontent.cdninstagram.com", "scontent.fbcdn.net"):
         url = f"https://{host}/image.jpg?{query}"
-        assert sanitize_payload({"display_url": url + "&sessionid=secret&ds_user_id=secret"}) == {
-            "display_url": url
-        }
+        assert sanitize_payload({"display_url": url + "&sessionid=secret&ds_user_id=secret"}) == {"display_url": url}
     assert sanitize_payload({"url": f"https://example.com/image.jpg?{query}"}) == {
         "url": "https://example.com/image.jpg"
     }

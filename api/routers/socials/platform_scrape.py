@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter
 
 from ._shared import *
+from ._shared import _run_admin_repo_call  # explicit: star exports via dynamic __all__ are invisible to Pyright
 from .social_landing import *
 
 if TYPE_CHECKING:

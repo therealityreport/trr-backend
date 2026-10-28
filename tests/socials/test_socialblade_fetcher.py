@@ -164,7 +164,6 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
     assert captured["kwargs"]["wait"] == 2_000
 
 
-
 def test_capture_session_closes_when_browser_fetch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -177,6 +176,7 @@ def test_capture_session_closes_when_browser_fetch_fails(monkeypatch: pytest.Mon
         __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/example"))
     assert captured["closed"] is True
     assert "search" not in captured
+
 
 def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
     browser_proxy = {"server": "http://proxy.example:8080", "username": "user", "password": "pass"}

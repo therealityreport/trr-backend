@@ -1127,10 +1127,16 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
         )
     with pytest.raises(comments_module.Conflict, match="advanced concurrently"):
         activity._persist_page(
-            owned, post_id=args["post_id"], evidence=retained, evidence_id=evidence_id,
+            owned,
+            post_id=args["post_id"],
+            evidence=retained,
+            evidence_id=evidence_id,
             page=parse_comment_evidence(retained, pinned=True),
-            expected_checkpoint=saved["target_checkpoint"], expected_checkpoint_hash=committed_hash,
-            checkpoint=checkpoint, metadata_writes_enabled=True, assignment=None,
+            expected_checkpoint=saved["target_checkpoint"],
+            expected_checkpoint_hash=committed_hash,
+            checkpoint=checkpoint,
+            metadata_writes_enabled=True,
+            assignment=None,
         )
 
 

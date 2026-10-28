@@ -6,5 +6,11 @@
     "trr_backend",
     "scripts",
     "tests"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "scripts/ingestion_engine_eval/evidence"
   ]
 }

@@ -1049,18 +1049,28 @@ def reply_work_skip_reason(
     """
     lane = lane or {}
     if (
-        any(lane.get(key) for key in (
-            "pending", "technical_failure", "needs_diagnostics", "recovery", "after", "cursor", "next_cursor"
-        ))
+        any(
+            lane.get(key)
+            for key in (
+                "pending",
+                "technical_failure",
+                "needs_diagnostics",
+                "recovery",
+                "after",
+                "cursor",
+                "next_cursor",
+            )
+        )
         or lane.get("exhausted") is False
         or (expected_replies is not None and expected_replies > observed_replies)
     ):
         return None
     exact_query = (
         lane.get("started_from_root") is True
-        and all(isinstance(lane.get(key), str) and lane[key] for key in (
-            "relay_doc_id", "relay_friendly_name", "sort_order"
-        ))
+        and all(
+            isinstance(lane.get(key), str) and lane[key]
+            for key in ("relay_doc_id", "relay_friendly_name", "sort_order")
+        )
         and type(lane.get("page_size")) is int
         and 1 <= lane["page_size"] <= 50
     )
@@ -1082,9 +1092,11 @@ def native_embedded_reply_complete(node: Mapping[str, Any]) -> bool:
     rows = thread.get("edges")
     info = thread.get("page_info")
     if (
-        type(count) is not int or count < 0
+        type(count) is not int
+        or count < 0
         or not isinstance(rows, list)
-        or not isinstance(info, Mapping) or info.get("has_next_page") is not False
+        or not isinstance(info, Mapping)
+        or info.get("has_next_page") is not False
     ):
         return False
     identities = []
@@ -3064,8 +3076,10 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
                     return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
             time.sleep(cooldown_remaining)
     return {
-        "acquired": True, "paced": _deadline_remaining_seconds(deadline) != 0.0,
-        "wait_ms": int((time.monotonic() - started_at) * 1000), "error": None,
+        "acquired": True,
+        "paced": _deadline_remaining_seconds(deadline) != 0.0,
+        "wait_ms": int((time.monotonic() - started_at) * 1000),
+        "error": None,
     }
 
 
@@ -6492,7 +6506,9 @@ class InstagramCommentsScraplingFetcher:
         )
         acquisition = asyncio.create_task(asyncio.to_thread(turn.acquire))
         state = {
-            "permit": None, "local_corrected": True, "turn": turn,
+            "permit": None,
+            "local_corrected": True,
+            "turn": turn,
             "descriptor": SimpleNamespace(request_permit=None, source_kind=kind),
         }
         started = False
@@ -6643,7 +6659,11 @@ class InstagramCommentsScraplingFetcher:
                 self._http_client_used = "curl_cffi" if type(client).__name__ == "_CurlCffiAsyncClient" else "httpx"
                 if strict_public:
                     page_response = await self._send_strict_public_relay_request(
-                        client, "get", post_url, kind="relay_bootstrap", deadline=relay_deadline,
+                        client,
+                        "get",
+                        post_url,
+                        kind="relay_bootstrap",
+                        deadline=relay_deadline,
                         headers=dict(page_headers),
                     )
                 else:
@@ -6838,10 +6858,15 @@ class InstagramCommentsScraplingFetcher:
                 ) -> bool:
                     nonlocal effective_page_size, page_size_downgraded
                     if (
-                        (strict_native_exhaustion and (
-                            bool(top_resume) or trigger != "graphql_relay_http_error"
-                            or _status_code(response_ref) != 400 or self._public_retry_after_seconds
-                        ))
+                        (
+                            strict_native_exhaustion
+                            and (
+                                bool(top_resume)
+                                or trigger != "graphql_relay_http_error"
+                                or _status_code(response_ref) != 400
+                                or self._public_retry_after_seconds
+                            )
+                        )
                         or page_size_downgraded
                         or comments_ref
                         or cursor_ref is not None
@@ -6925,8 +6950,13 @@ class InstagramCommentsScraplingFetcher:
                         }
                         if strict_public:
                             response = await self._send_strict_public_relay_request(
-                                client, "post", _POST_ACTION_GRAPHQL_URL, kind="graphql_comments",
-                                deadline=relay_deadline, data=request_data, headers=graphql_headers,
+                                client,
+                                "post",
+                                _POST_ACTION_GRAPHQL_URL,
+                                kind="graphql_comments",
+                                deadline=relay_deadline,
+                                data=request_data,
+                                headers=graphql_headers,
                             )
                         else:
                             self._prepare_credentials(client.cookies)
@@ -6936,7 +6966,9 @@ class InstagramCommentsScraplingFetcher:
                                 mark_sent(permit)
                             self._request_count += 1
                             response = await client.post(
-                                _POST_ACTION_GRAPHQL_URL, data=request_data, headers=graphql_headers,
+                                _POST_ACTION_GRAPHQL_URL,
+                                data=request_data,
+                                headers=graphql_headers,
                             )
                         self._record_response_bytes(response)
                         if strict_native_exhaustion:
@@ -6958,7 +6990,9 @@ class InstagramCommentsScraplingFetcher:
                         attempt["location"] = _safe_location(response)
                         if strict_native_exhaustion and not _public_relay_block_reason_from_response(response):
                             if _try_page_size_downgrade(
-                                "graphql_relay_http_error", response_ref=response, cursor_ref=cursor,
+                                "graphql_relay_http_error",
+                                response_ref=response,
+                                cursor_ref=cursor,
                             ):
                                 continue
                         if await _retry_parent_relay_soft_failure("graphql_relay_http_error", response):
@@ -6966,7 +7000,9 @@ class InstagramCommentsScraplingFetcher:
                         if attempt.get("block_reason"):
                             break
                         if _try_page_size_downgrade(
-                            "graphql_relay_http_error", response_ref=response, cursor_ref=cursor,
+                            "graphql_relay_http_error",
+                            response_ref=response,
+                            cursor_ref=cursor,
                         ):
                             continue
                         attempt.setdefault("reason", "graphql_relay_http_error")
@@ -6978,7 +7014,9 @@ class InstagramCommentsScraplingFetcher:
                         if attempt.get("block_reason"):
                             break
                         if _try_page_size_downgrade(
-                            "graphql_relay_non_json_response", response_ref=response, cursor_ref=cursor,
+                            "graphql_relay_non_json_response",
+                            response_ref=response,
+                            cursor_ref=cursor,
                         ):
                             continue
                         attempt.setdefault("reason", "graphql_relay_non_json_response")
@@ -7006,7 +7044,9 @@ class InstagramCommentsScraplingFetcher:
                         if attempt.get("block_reason"):
                             break
                         if _try_page_size_downgrade(
-                            "graphql_relay_error_payload", response_ref=response, cursor_ref=cursor,
+                            "graphql_relay_error_payload",
+                            response_ref=response,
+                            cursor_ref=cursor,
                         ):
                             continue
                         attempt.setdefault("reason", "graphql_relay_error_payload")
@@ -7352,11 +7392,14 @@ class InstagramCommentsScraplingFetcher:
 
         parent_comments = comments if parent_limit is None else comments[:parent_limit]
         if strict_native_exhaustion:
+
             def priority(parent):
                 lane = (durable_resume or {}).get(str(parent.comment_id)) or {}
                 needs_diagnostics = (
-                    lane.get("technical_failure") and lane.get("needs_diagnostics")
-                    and lane.get("pending") and not lane.get("deferred")
+                    lane.get("technical_failure")
+                    and lane.get("needs_diagnostics")
+                    and lane.get("pending")
+                    and not lane.get("deferred")
                 )
                 return not needs_diagnostics, bool(lane.get("technical_failure"))
 
@@ -7389,17 +7432,22 @@ class InstagramCommentsScraplingFetcher:
                     metadata["reason"] = PUBLIC_BLOCK_SIGNAL_REPLY_ACCESS
                 return
             if strict_native_exhaustion:
-                if reply_work_skip_reason(
-                    expected_replies=reported_replies,
-                    observed_replies=observed_replies,
-                    lane=lane_resume,
-                    native_leaf=lane_resume.get("native_reply_leaf") is True,
-                ) is not None:
+                if (
+                    reply_work_skip_reason(
+                        expected_replies=reported_replies,
+                        observed_replies=observed_replies,
+                        lane=lane_resume,
+                        native_leaf=lane_resume.get("native_reply_leaf") is True,
+                    )
+                    is not None
+                ):
                     return
             pending = strict_native_exhaustion and lane_resume.get("pending") is True
             if (
-                not strict_native_exhaustion and not pending
-                and expected_replies > 0 and expected_replies <= observed_replies
+                not strict_native_exhaustion
+                and not pending
+                and expected_replies > 0
+                and expected_replies <= observed_replies
             ):
                 metadata["parents_skipped_without_reply_gap"] += 1
                 return
@@ -7477,13 +7525,24 @@ class InstagramCommentsScraplingFetcher:
                 ) -> bool:
                     nonlocal effective_page_size, page_size_downgraded
                     if (
-                        (strict_native_exhaustion and (
-                            any(lane_resume.get(key) for key in (
-                                "relay_doc_id", "page_size", "seen_cursors", "technical_failure", "recovery"
-                            ))
-                            or trigger != "graphql_child_relay_http_error"
-                            or _status_code(response_ref) != 400 or self._public_retry_after_seconds
-                        ))
+                        (
+                            strict_native_exhaustion
+                            and (
+                                any(
+                                    lane_resume.get(key)
+                                    for key in (
+                                        "relay_doc_id",
+                                        "page_size",
+                                        "seen_cursors",
+                                        "technical_failure",
+                                        "recovery",
+                                    )
+                                )
+                                or trigger != "graphql_child_relay_http_error"
+                                or _status_code(response_ref) != 400
+                                or self._public_retry_after_seconds
+                            )
+                        )
                         or page_size_downgraded
                         or child_ref
                         or cursor_ref is not None
@@ -7601,7 +7660,9 @@ class InstagramCommentsScraplingFetcher:
                             response, child_operation=not relay_is_logged_in
                         ):
                             if _try_child_page_size_downgrade(
-                                "graphql_child_relay_http_error", response_ref=response, cursor_ref=cursor,
+                                "graphql_child_relay_http_error",
+                                response_ref=response,
+                                cursor_ref=cursor,
                                 accepted_pages=accepted_child_pages,
                             ):
                                 continue
@@ -7611,7 +7672,9 @@ class InstagramCommentsScraplingFetcher:
                             stop_reason = str(metadata["block_reason"])
                             break
                         if _try_child_page_size_downgrade(
-                            "graphql_child_relay_http_error", response_ref=response, cursor_ref=cursor,
+                            "graphql_child_relay_http_error",
+                            response_ref=response,
+                            cursor_ref=cursor,
                             accepted_pages=accepted_child_pages,
                         ):
                             continue
@@ -7629,7 +7692,9 @@ class InstagramCommentsScraplingFetcher:
                             stop_reason = str(metadata["block_reason"])
                             break
                         if _try_child_page_size_downgrade(
-                            "graphql_child_relay_non_json_response", response_ref=response, cursor_ref=cursor,
+                            "graphql_child_relay_non_json_response",
+                            response_ref=response,
+                            cursor_ref=cursor,
                             accepted_pages=accepted_child_pages,
                         ):
                             continue
@@ -7696,12 +7761,19 @@ class InstagramCommentsScraplingFetcher:
                     if strict_native_exhaustion and self._public_only:
                         from trr_backend.ingestion.reply_failures import isolated_reply_failure
 
-                        if isolated_reply_failure("graphql_replies", _durable_relay_payload(
-                            payload, cursor=cursor, doc_id=normalized_doc_id,
-                            friendly_name=normalized_friendly_name, sort_order="popular",
-                            page_size=effective_page_size, parent=parent_comment_id,
-                            retry_after=effective_retry_after,
-                        )):
+                        if isolated_reply_failure(
+                            "graphql_replies",
+                            _durable_relay_payload(
+                                payload,
+                                cursor=cursor,
+                                doc_id=normalized_doc_id,
+                                friendly_name=normalized_friendly_name,
+                                sort_order="popular",
+                                page_size=effective_page_size,
+                                parent=parent_comment_id,
+                                retry_after=effective_retry_after,
+                            ),
+                        ):
                             technical_branch_failed = True
                             stop_reason = "public_reply_technical_failure"
                             break  # Let the existing supported document fallback run.
@@ -7748,7 +7820,9 @@ class InstagramCommentsScraplingFetcher:
                             stop_reason = str(metadata["block_reason"])
                             break
                         if _try_child_page_size_downgrade(
-                            "graphql_child_relay_error_payload", response_ref=response, cursor_ref=cursor,
+                            "graphql_child_relay_error_payload",
+                            response_ref=response,
+                            cursor_ref=cursor,
                             accepted_pages=accepted_child_pages,
                         ):
                             continue
@@ -7923,7 +7997,8 @@ class InstagramCommentsScraplingFetcher:
                 self._request_count += 1
                 admitted = True
                 state = {
-                    "permit": permit, "local_corrected": False,
+                    "permit": permit,
+                    "local_corrected": False,
                     "turn": dispatch_turns.get(request.parent_id),
                     "descriptor": replace(request, request_permit=permit),
                 }
@@ -8068,12 +8143,16 @@ class InstagramCommentsScraplingFetcher:
             scheduled_parents = []
             for parent in parent_comments:
                 lane = (durable_resume or {}).get(str(parent.comment_id or "").strip()) or {}
-                reason = reply_work_skip_reason(
-                    expected_replies=reported_reply_count(parent),
-                    observed_replies=reply_count_observed(parent),
-                    lane=lane,
-                    native_leaf=lane.get("native_reply_leaf") is True,
-                ) if strict_native_exhaustion and not lane.get("deferred") else None
+                reason = (
+                    reply_work_skip_reason(
+                        expected_replies=reported_reply_count(parent),
+                        observed_replies=reply_count_observed(parent),
+                        lane=lane,
+                        native_leaf=lane.get("native_reply_leaf") is True,
+                    )
+                    if strict_native_exhaustion and not lane.get("deferred")
+                    else None
+                )
                 if reason is None:
                     scheduled_parents.append(parent)
                 else:
@@ -8113,6 +8192,7 @@ class InstagramCommentsScraplingFetcher:
             )
             raise
         finally:
+
             async def close_turns():
                 errors = []
                 for turn in tuple(dispatch_turns.values()):
@@ -8173,12 +8253,17 @@ class InstagramCommentsScraplingFetcher:
             for parent in parent_comments:
                 identity = str(parent.comment_id or "").strip()
                 lane = (durable_resume or {}).get(identity) or {}
-                if identity in completed or identity in pending_ids or reply_work_skip_reason(
-                    expected_replies=reported_reply_count(parent),
-                    observed_replies=reply_count_observed(parent),
-                    lane=lane,
-                    native_leaf=lane.get("native_reply_leaf") is True,
-                ) is not None:
+                if (
+                    identity in completed
+                    or identity in pending_ids
+                    or reply_work_skip_reason(
+                        expected_replies=reported_reply_count(parent),
+                        observed_replies=reply_count_observed(parent),
+                        lane=lane,
+                        native_leaf=lane.get("native_reply_leaf") is True,
+                    )
+                    is not None
+                ):
                     continue
                 if (
                     lane.get("pending")

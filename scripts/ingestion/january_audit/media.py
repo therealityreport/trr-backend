@@ -979,14 +979,19 @@ def verify_cached_aliases(target, source, registry, at, pinned, check):
             verify_parent(proof, records)
             check(proof["verified_at"] <= at.isoformat(), "cached_avatar_alias_future_verification")
             check(proof["account"] == common.ACCOUNT, "cached_avatar_alias_account_mismatch")
-            check(proof["post_id"] == source.post_id and proof["canonical_post_id"] == source.canonical_post_id,
-                  "cached_avatar_alias_post_identity_mismatch")
+            check(
+                proof["post_id"] == source.post_id and proof["canonical_post_id"] == source.canonical_post_id,
+                "cached_avatar_alias_post_identity_mismatch",
+            )
             check(proof["owner_generation"] <= target["owner_generation"], "cached_avatar_alias_owner_lineage_mismatch")
             # Removed historical roles do not constrain current work. Every
             # current role sharing the historical asset still needs its own
             # independently sealed authorization; do not infer a role change.
-            related = [a for a in source.avatars if all(slot(a)[k] == proof["slot"][k]
-                                                       for k in ("username", "source_reference"))]
+            related = [
+                a
+                for a in source.avatars
+                if all(slot(a)[k] == proof["slot"][k] for k in ("username", "source_reference"))
+            ]
             required_slots.update(digest(slot(a)) for a in related)
             avatars = [a for a in related if slot(a) == proof["current_slot"]]
             if not avatars:
@@ -998,9 +1003,12 @@ def verify_cached_aliases(target, source, registry, at, pinned, check):
                 # An interrupted attempt deliberately leaves its valid unused
                 # proof. Only the exact final inventory/result authorization
                 # can justify the promoted cache used by this receipt.
-                if not (proof["current_inventory"] == source.inventory_fingerprint
-                        and a.cached_sha256 == proof["sha256"] and a.cached_hosted_url == proof["hosted_url"]
-                        and equal(proof["byte_clock"], a.observed_at)):
+                if not (
+                    proof["current_inventory"] == source.inventory_fingerprint
+                    and a.cached_sha256 == proof["sha256"]
+                    and a.cached_hosted_url == proof["hosted_url"]
+                    and equal(proof["byte_clock"], a.observed_at)
+                ):
                     continue
             cohort = registry_cohort(registry, proof["slot"]["username"], proof["slot"]["source_reference"])
             if proof["parent_evidence_id"] is not None:
@@ -1014,9 +1022,15 @@ def verify_cached_aliases(target, source, registry, at, pinned, check):
                     continue
             verify_promoted(proof, cohort)
             authorized_slots.add(identity)
-            verified.append({"evidence_id": str(row["evidence_id"]), "sha256": row["content_hash"],
-                             "source_clock": proof["source_clock"], "byte_clock": proof["byte_clock"],
-                             "verified_at": proof["verified_at"]})
+            verified.append(
+                {
+                    "evidence_id": str(row["evidence_id"]),
+                    "sha256": row["content_hash"],
+                    "source_clock": proof["source_clock"],
+                    "byte_clock": proof["byte_clock"],
+                    "verified_at": proof["verified_at"],
+                }
+            )
         except (ValueError, TypeError, KeyError):
             check(False, "cached_avatar_alias_auxiliary_proof_invalid")
     check(required_slots <= authorized_slots, "cached_avatar_alias_current_inventory_or_result_mismatch")
@@ -1040,7 +1054,9 @@ def load_cached_aliases(cur, targets):
         if target["target_outcome"] != "committed" or not target.get("payload"):
             continue
         payload = json.loads(target["payload"])
-        references = sorted({ref for a in payload.get("avatars", []) if (ref := regional_reference(a.get("profile_pic_url")))})
+        references = sorted(
+            {ref for a in payload.get("avatars", []) if (ref := regional_reference(a.get("profile_pic_url")))}
+        )
         if not references:
             continue
         aliases = read_auxiliary(recorded, common.RUN, target["target_key"], references)
@@ -1049,11 +1065,15 @@ def load_cached_aliases(cur, targets):
             from trr_backend.ingestion.cached_avatar_alias import validate_retained
 
             proof = validate_retained(row, run_id=common.RUN, target_key=target["target_key"])
-            for field, target_field in (("source_evidence_id", "_source_evidence"),
-                                        ("current_source_evidence_id", "_current_source_evidence")):
+            for field, target_field in (
+                ("source_evidence_id", "_source_evidence"),
+                ("current_source_evidence_id", "_current_source_evidence"),
+            ):
                 evidence_id = proof[field]
                 if evidence_id not in sources:
-                    found = common.rows(cur, "select * from social.instagram_ingestion_evidence where evidence_id=%s", (evidence_id,))
+                    found = common.rows(
+                        cur, "select * from social.instagram_ingestion_evidence where evidence_id=%s", (evidence_id,)
+                    )
                     common.require(len(found) == 1, "cached_avatar_alias_source_evidence_missing")
                     sources[evidence_id] = found[0]
                 row[target_field] = sources[evidence_id]
@@ -1079,7 +1099,9 @@ def load_saved_owner_assets(cur, targets, at, pinned):
         if target["target_outcome"] != "committed" or not target.get("payload"):
             continue
         payload = json.loads(target["payload"])
-        references = sorted({ref for a in payload.get("avatars", []) if (ref := cached.regional_reference(a.get("profile_pic_url")))})
+        references = sorted(
+            {ref for a in payload.get("avatars", []) if (ref := cached.regional_reference(a.get("profile_pic_url")))}
+        )
         if not references:
             continue
         records = saved.read_records(reader, common.RUN, target["target_key"], references, at=at, pinned=pinned)
@@ -1113,19 +1135,26 @@ def verify_saved_owner_assets(row, source, result, post, sidecar, registry, chec
             eligible = []
             for item in related:
                 p, auth = item["input"], item["auth"]
-                historical = row["_saved_owner_historical_cohorts"][(p["historical_handle"], p["slot"]["source_reference"])]
+                historical = row["_saved_owner_historical_cohorts"][
+                    (p["historical_handle"], p["slot"]["source_reference"])
+                ]
                 current = row["_saved_owner_current_cohorts"][(p["slot"]["username"], p["slot"]["source_reference"])]
-                if not (saved.applicable(item, source, avatar, historical, current, postcommit=True)
-                        and auth["owner_token"] == str(row["target_owner_token"])
-                        and auth["owner_generation"] == row["target_owner_generation"]
-                        and avatar.cached_sha256 == p["sha256"] and avatar.cached_hosted_url == p["destination_url"]
-                        and saved.stamp(avatar.observed_at) == p["byte_clock"]):
+                if not (
+                    saved.applicable(item, source, avatar, historical, current, postcommit=True)
+                    and auth["owner_token"] == str(row["target_owner_token"])
+                    and auth["owner_generation"] == row["target_owner_generation"]
+                    and avatar.cached_sha256 == p["sha256"]
+                    and avatar.cached_hosted_url == p["destination_url"]
+                    and saved.stamp(avatar.observed_at) == p["byte_clock"]
+                ):
                     continue
                 # Both bindings are historical observations. Only the exact
                 # current input/result projection can authorize this receipt.
                 actual = saved.binding(post, sidecar, source, avatar)
                 expected = dict(p["binding"])
-                expected["hosted_owner_url"] = result.post_fields.get("hosted_owner_profile_pic_url", expected["hosted_owner_url"])
+                expected["hosted_owner_url"] = result.post_fields.get(
+                    "hosted_owner_profile_pic_url", expected["hosted_owner_url"]
+                )
                 if actual != expected:
                     continue
                 eligible.append(item)
@@ -1134,14 +1163,26 @@ def verify_saved_owner_assets(row, source, result, post, sidecar, registry, chec
                 continue
             item = max(eligible, key=lambda r: (r["auth"]["verified_at"], str(r["row"]["evidence_id"])))
             p, auth = item["input"], item["auth"]
-            identities.append({"avatar_index": index, "proof_evidence_id": str(item["row"]["evidence_id"]),
-                "proof_sha256": item["row"]["content_hash"], "input_id": auth["input_id"],
-                "input_sha256": auth["input_sha256"], "origin_input_id": auth["origin_input_id"],
-                "origin_input_sha256": auth["origin_input_sha256"], "historical_handle": p["historical_handle"],
-                "current_handle": p["slot"]["username"], "source_reference": p["slot"]["source_reference"],
-                "source_url": p["source_url"], "source_key": p["source_key"], "sha256": p["sha256"],
-                "byte_clock": p["byte_clock"], "source_clock": item["origin"]["source_clock"],
-                "verification": auth["old_bytes"]})
+            identities.append(
+                {
+                    "avatar_index": index,
+                    "proof_evidence_id": str(item["row"]["evidence_id"]),
+                    "proof_sha256": item["row"]["content_hash"],
+                    "input_id": auth["input_id"],
+                    "input_sha256": auth["input_sha256"],
+                    "origin_input_id": auth["origin_input_id"],
+                    "origin_input_sha256": auth["origin_input_sha256"],
+                    "historical_handle": p["historical_handle"],
+                    "current_handle": p["slot"]["username"],
+                    "source_reference": p["slot"]["source_reference"],
+                    "source_url": p["source_url"],
+                    "source_key": p["source_key"],
+                    "sha256": p["sha256"],
+                    "byte_clock": p["byte_clock"],
+                    "source_clock": item["origin"]["source_clock"],
+                    "verification": auth["old_bytes"],
+                }
+            )
     except (ValueError, TypeError, KeyError):
         check(False, "saved_owner_asset_proof_invalid")
     return identities
@@ -1153,12 +1194,22 @@ def saved_owner_byte_plans(local_plan, identities):
         original = next(p for p in local_plan if p["role"] == "avatar:" + str(identity["avatar_index"]))
         entry = dict(original)
         meta = identity["verification"]
-        entry.update(role="saved_owner_asset_source:" + str(identity["avatar_index"]),
-            url=identity["source_url"], storage_key=identity["source_key"], hosted_path=hosted_key(identity["source_url"]),
-            expected_bytes=meta["bytes"], historical_sha256=identity["sha256"], historical_hash_limit=None,
-            format=meta["format"].lower(), content_type="image/" + {"JPEG": "jpeg"}.get(meta["format"], meta["format"].lower()),
-            width=meta["width"], height=meta["height"], original_observed_at=identity["byte_clock"],
-            storage_key_derivation="sealed_saved_owner_asset_historical_key", saved_owner_asset_source=identity)
+        entry.update(
+            role="saved_owner_asset_source:" + str(identity["avatar_index"]),
+            url=identity["source_url"],
+            storage_key=identity["source_key"],
+            hosted_path=hosted_key(identity["source_url"]),
+            expected_bytes=meta["bytes"],
+            historical_sha256=identity["sha256"],
+            historical_hash_limit=None,
+            format=meta["format"].lower(),
+            content_type="image/" + {"JPEG": "jpeg"}.get(meta["format"], meta["format"].lower()),
+            width=meta["width"],
+            height=meta["height"],
+            original_observed_at=identity["byte_clock"],
+            storage_key_derivation="sealed_saved_owner_asset_historical_key",
+            saved_owner_asset_source=identity,
+        )
         entry.pop("avatar_identity", None)
         plans.append(entry)
     return plans

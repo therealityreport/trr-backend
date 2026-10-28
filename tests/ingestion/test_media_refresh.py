@@ -394,7 +394,9 @@ def test_narrow_detail_protocol_cannot_merge_ambient_or_response_credentials(mon
     session.auth = ("ambient", "forbidden")
     session.headers["Authorization"] = "forbidden"
     monkeypatch.setenv("SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED", "true")
-    client = ExplicitDetailClient(cookies=cookies()["raw_cookies"], browser_account_id="fixture_ingest_account", session=session)
+    client = ExplicitDetailClient(
+        cookies=cookies()["raw_cookies"], browser_account_id="fixture_ingest_account", session=session
+    )
     try:
         assert client.session.trust_env is False and client.session.auth is None
         assert "Authorization" not in client.session.headers and not session.cookies

@@ -63,9 +63,14 @@ def test_checkpoint_transfer_pair(database, large_baseline, fresh_public_lanes, 
         results[name] = {**sizes, **metrics}
     assert results["after"]["json_parameter_bytes"] < results["before"]["json_parameter_bytes"] / 10
     assert results["after"]["checkpoint_result_bytes"] < results["before"]["checkpoint_result_bytes"] / 10
-    report = {"scope": "65 mocked reply pages; identical full inventories, receipts and parents",
-              "pairs": 1, "network_latency_seconds": 0.01, "source_spacing_seconds": 0.25,
-              "full_run_measurement": False, "results": results}
+    report = {
+        "scope": "65 mocked reply pages; identical full inventories, receipts and parents",
+        "pairs": 1,
+        "network_latency_seconds": 0.01,
+        "source_spacing_seconds": 0.25,
+        "full_run_measurement": False,
+        "results": results,
+    }
     output = os.getenv("TRR_CHECKPOINT_TRANSFER_OUTPUT")
     if output:
         with Path(output).open("x") as stream:

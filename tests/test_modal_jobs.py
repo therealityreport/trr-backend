@@ -523,8 +523,11 @@ def test_authenticated_comment_probe_missing_credentials_sends_nothing(monkeypat
 
     monkeypatch.delenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", "SECRET")
-    monkeypatch.setattr(authenticated_comment_probe, "probe_authenticated_comment_ids",
-                        lambda _: pytest.fail("Missing credentials must not send"))
+    monkeypatch.setattr(
+        authenticated_comment_probe,
+        "probe_authenticated_comment_ids",
+        lambda _: pytest.fail("Missing credentials must not send"),
+    )
     result = modal_jobs.probe_instagram_authenticated_comment_ids.local()
     assert result["stop_reason"] == "credential_snapshot_unavailable"
     assert result["requests"] == 0
@@ -539,9 +542,16 @@ def test_authenticated_comment_probe_consumes_only_pinned_environment(monkeypatc
 
     monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USERNAME", "fixture_ingest_account")
     monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_AUTH_USER_ID", "123")
-    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", json.dumps({
-        "sessionid": "SECRET", "csrftoken": "CSRF", "ds_user_id": "123",
-    }))
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_COOKIES_JSON",
+        json.dumps(
+            {
+                "sessionid": "SECRET",
+                "csrftoken": "CSRF",
+                "ds_user_id": "123",
+            }
+        ),
+    )
 
     def probe(snapshot):
         assert snapshot.username == "fixture_ingest_account" and snapshot.user_id == "123"

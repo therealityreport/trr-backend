@@ -137,8 +137,6 @@ def resume_failure(value: Any, *, now: datetime) -> dict[str, Any]:
     result = {"technical_failure": True, "deferred": deferred, "pending": not deferred}
     from trr_backend.ingestion.public_reply_failure_diagnostics import VERSION
 
-    if not deferred and not (
-        type(value.get("diagnostic_version")) is int and value["diagnostic_version"] == VERSION
-    ):
+    if not deferred and not (type(value.get("diagnostic_version")) is int and value["diagnostic_version"] == VERSION):
         result["needs_diagnostics"] = True
     return result
