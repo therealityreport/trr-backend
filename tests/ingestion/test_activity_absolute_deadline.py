@@ -208,7 +208,7 @@ def test_comment_activity_resume_consumes_existing_absolute_soft_budget(
         assert callbacks["pre_source_request"].deadline - time.monotonic() == 5
         return CommentFetchSummary(fetch_failed=True)
 
-    activity._resume_inventory = slow_resume
+    activity._resume_inventory = slow_resume  # pyright: ignore[reportAttributeAccessIssue]
     token = execution_deadline.set(130.0)
     try:
         if expected_source:

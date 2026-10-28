@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import cast
 from urllib.parse import urlsplit
 
 import requests
@@ -92,7 +93,15 @@ class ObservedPublicSession:
                 self.headers.pop(key, None)
         for scheme in ("http://", "https://"):
             session.mount(scheme, HTTPAdapter(max_retries=0))
-        self.classifier = PublicRequestClient(session=self)
+        self.classifier = PublicRequestClient(session=self.as_requests_session())
+
+    def as_requests_session(self) -> requests.Session:
+        """Present this facade to collaborators that type their session as ``requests.Session``.
+
+        It is deliberately not a Session subclass: it implements only the request/get/post/close,
+        cookie, header, adapter and mount surface those collaborators use.
+        """
+        return cast(requests.Session, self)
 
     @property
     def trust_env(self):
@@ -238,7 +247,7 @@ class PublicListingSource(_PublicSource):
             session = self._session(on_request=pre_source_request, on_payload=source_observer)
             scraper = (self.scraper_factory or InstagramScraper)(
                 cookies={},
-                session=session,
+                session=session.as_requests_session(),
                 browser_account_id=None,
                 attach_auth_session=False,
                 strict_public_credentials=True,
@@ -292,7 +301,7 @@ class PublicDetailSource(_PublicSource):
             check_cancelled()
             payload = (self.permalink_fetcher or fetch_permalink_media_item)(
                 self.shortcode,
-                session=session,
+                session=session.as_requests_session(),
                 cookies={},
                 transport=Transport(),
             )

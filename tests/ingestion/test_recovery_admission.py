@@ -5,6 +5,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from psycopg2.extras import RealDictCursor
@@ -68,7 +69,7 @@ def additional_settled(tx, args, key):
         )
 
 
-def for_target(tx, args, key=None):
+def for_target(tx, args, key=None) -> Any:
     key = key or args["target_key"]
     cp = fixtures.query(
         tx,
@@ -421,13 +422,13 @@ def test_bounded_full_root_capacity_waits_before_checkpoint_cohort_or_audit(data
     statements = []
 
     class AdmissionCursor(RealDictCursor):
-        def execute(self, query, params=None):
+        def execute(self, query, vars=None):
             normalized = " ".join(query.lower().split())
             statements.append(normalized)
             if normalized.startswith("select target_key,outcome,checkpoint"):
                 pytest.fail("Full root capacity loaded the settled checkpoint cohort")
             assert normalized.startswith("select "), "Full capacity must not write data or journals"
-            return super().execute(query, params)
+            return super().execute(query, vars)
 
     @contextmanager
     def observed_transaction():
@@ -528,7 +529,7 @@ def test_real_local_callback_waits_abortably_and_cannot_finalize(monkeypatch, pa
         def clock(self):
             return None
 
-        def tick(self, *args):
+        def tick(self, *args) -> dict[str, Any]:
             return {"stop": "blocked"}
 
     abort = local_worker.DiagnosticAbort()
@@ -556,7 +557,7 @@ def test_real_local_callback_waits_abortably_and_cannot_finalize(monkeypatch, pa
         lambda *a, **k: {"status": "recovery_admission_wait", "reason": "recovery_root_capacity_full"},
     )
 
-    def execute(**options):
+    def execute(**options) -> dict[str, Any]:
         with pytest.raises(local_worker.Interrupted):
             local_worker.run_partition(
                 {"run_id": "bound-run", "account": "bravotv", "generation": 1},

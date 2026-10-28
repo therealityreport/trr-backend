@@ -3,11 +3,12 @@
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import requests
 
@@ -23,8 +24,82 @@ from trr_backend.socials.tiktok.models import TikTokComment, TikTokPost, TikTokS
 logger = logging.getLogger(__name__)
 
 
+class _HttpSession(Protocol):
+    """HTTP client surface the web API transport needs from ``TikTokScraper.session``."""
+
+    def get(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
 class WebApiTransportMixin:
     """Talk to TikTok's web API through the scraper's configured HTTP session."""
+
+    if TYPE_CHECKING:
+        # State and sibling-mixin methods supplied by ``TikTokScraper`` and the other mixins it composes.
+        cookies: dict[str, str]
+        session: _HttpSession
+        _direct_comment_api_enabled_override: bool | None
+        _request_count: int
+        _last_api_fail_reason: str | None
+        last_comment_fetch_reason: str | None
+        last_comment_fetch_meta: dict[str, Any]
+        comments_auth_failed: bool
+        last_retrieval_meta: dict[str, Any]
+        USER_DETAIL_URL: str
+        USER_POST_URL: str
+        COMMENTS_URL: str
+        COMMENT_REPLIES_URL: str
+        REQUEST_TIMEOUT_SECONDS: tuple[int, int]
+        COMMENT_REQUEST_TIMEOUT_SECONDS: tuple[int, int]
+        _REHYDRATION_RE: re.Pattern[str]
+        _SIGI_STATE_RE: re.Pattern[str]
+
+        @staticmethod
+        def _coerce_timestamp(value: Any) -> int: ...
+        @staticmethod
+        def _safe_int_metric(value: Any) -> int: ...
+        def _extract_posts_from_html_data(self, data: dict, username: str) -> tuple[list[dict], str | None]: ...
+        def _parse_post_item(self, item: dict, config: TikTokScrapeConfig) -> TikTokPost: ...
+        def _parse_comment(
+            self,
+            data: dict,
+            video_id: str,
+            post_url: str,
+            is_reply: bool = False,
+            parent_id: str | None = None,
+        ) -> TikTokComment: ...
+        def build_profile_snapshot(
+            self,
+            username: str,
+            *,
+            user_data: dict | None = None,
+            html_data: dict | None = None,
+        ) -> dict[str, Any]: ...
+        def _emit_progress(
+            self,
+            progress_cb: Callable[[dict[str, Any]], None] | None,
+            *,
+            phase: str,
+            pages_scanned: int,
+            posts_checked: int,
+            matched_posts: int,
+        ) -> None: ...
+        def _set_retrieval_meta(
+            self,
+            *,
+            context_mode: str | None = None,
+            auth_mode: str | None = None,
+            **values: Any,
+        ) -> None: ...
+        @staticmethod
+        def _has_ytdlp() -> bool: ...
+        def _scrape_via_ytdlp(
+            self,
+            config: TikTokScrapeConfig,
+            *,
+            max_videos_hint: int | None = None,
+            max_posts_hint: int | None = None,
+            progress_cb: Callable[[dict[str, Any]], None] | None = None,
+        ) -> list[TikTokPost]: ...
 
     @staticmethod
     def _is_auth_related_failure(reason: str | None) -> bool:

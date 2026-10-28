@@ -264,6 +264,8 @@ def advance(cur, run, *, limit=100):
                 manifest,
                 {"version": PROFILE_VERSION, "state": "enumerating", "target_after": target["target_key"]},
             )
+        if root is None:
+            raise ProfileInventoryError()
         page = _page(cur, run["run_id"], target, receipt, root, state)
         if not page:
             # Every observed comment must still have committed current-scan page

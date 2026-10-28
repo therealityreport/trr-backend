@@ -122,7 +122,10 @@ class DetailTransport:
                 if row is None:
                     raise RuntimeError("Instagram detail request lane was not created")
                 cur.execute("select clock_timestamp() as current_time")
-                now = cur.fetchone()["current_time"]
+                clock_row = cur.fetchone()
+                if clock_row is None:
+                    raise RuntimeError("Instagram detail request lane clock query returned no row")
+                now = clock_row["current_time"]
                 cooldown = row.get("server_retry_after_until")
                 replacement = bool(row["blocked"] and row.get("blocked_fingerprint") != self.credential_fingerprint)
                 if row["blocked"] and not replacement:
@@ -170,7 +173,10 @@ class DetailTransport:
                 if row is None:
                     raise RuntimeError("Instagram detail request lane disappeared")
                 cur.execute("select clock_timestamp() as current_time")
-                now = cur.fetchone()["current_time"]
+                clock_row = cur.fetchone()
+                if clock_row is None:
+                    raise RuntimeError("Instagram detail request lane clock query returned no row")
+                now = clock_row["current_time"]
                 # A late result cannot clear another probe or a newer failure.
                 if row.get("probe_token") != self.probe_token or (
                     self.probe_token and (not row.get("probe_expires_at") or row["probe_expires_at"] <= now)

@@ -48,9 +48,9 @@ def test_canary_is_fenced_to_one_target_and_attempt(monkeypatch, target, generat
     def guard():
         pass
 
-    guard.owner_generation = 7
-    guard.run_id = "run-fixture"
-    guard.run_generation = 3
+    guard.owner_generation = 7  # pyright: ignore[reportFunctionMemberAccess]
+    guard.run_id = "run-fixture"  # pyright: ignore[reportFunctionMemberAccess]
+    guard.run_generation = 3  # pyright: ignore[reportFunctionMemberAccess]
     summary = fetch(shortcode="fixture", checkpoint={}, source_observer=lambda *args: None, pre_source_request=guard)
     assert summary.fetch_failed is False and peak == expected and active == 0
 

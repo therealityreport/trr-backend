@@ -123,4 +123,5 @@ def test_same_proof_replay_restores_only_its_committed_attachment(media_database
         cur.execute("select hosted_media_urls,raw_data from social.instagram_comments where id=%s", (before["id"],))
         hosted, raw = cur.fetchone()
     assert hosted == result.comment_fields["123"]["hosted_media_urls"]
+    assert source.comments[0].attachment_refresh is not None
     assert raw["ingestion_attachment"] == source.comments[0].attachment_refresh.to_payload()

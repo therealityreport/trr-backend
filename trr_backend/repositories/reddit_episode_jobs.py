@@ -46,7 +46,7 @@ def safe_snapshot(value: dict, conn: Any) -> dict:
     )
     filtered = 0
 
-    def clean(node):
+    def clean(node: Any) -> Any:
         nonlocal filtered
         if isinstance(node, dict):
             if node.get("reddit_post_id") in deleted:
@@ -61,6 +61,8 @@ def safe_snapshot(value: dict, conn: Any) -> dict:
         return node
 
     result = clean(value)
+    if not isinstance(result, dict):
+        raise ValueError("Episode snapshot root was filtered by lifecycle enrollment")
     if filtered and "candidates" in result:
         candidates = result["candidates"]
         result["episode_matrix"] = episode._matrix(candidates, result.get("expected_episode_numbers", []))
@@ -90,12 +92,15 @@ def create_job(community_id: str, payload: dict) -> dict:
         )
         if existing:
             return existing
-        return capture._one(
+        created = capture._one(
             """insert into social.reddit_episode_discovery_jobs(community_id,config_hash,payload)
             values(%s,%s,%s::jsonb) returning *""",
             [community_id, digest, capture._json(payload)],
             conn=conn,
         )
+        if created is None:
+            raise RuntimeError("Episode discovery job insert returned no row")
+        return created
 
 
 def get_job(job_id: str) -> dict | None:

@@ -61,4 +61,4 @@ def test_signed_native_gif_survives_evidence_selection_and_idempotent_hosting():
     assert requested == [url, url]
     saved = next(iter(client.objects.values()))[0]
     with Image.open(io.BytesIO(saved)) as image:
-        assert image.n_frames == 2
+        assert image.n_frames == 2  # pyright: ignore[reportAttributeAccessIssue]

@@ -40,11 +40,11 @@ def test_full_public_wrapper_chain_preserves_metadata_and_exact_permits():
     def before():
         pass
 
-    before.run_id = "synthetic-run"
-    before.run_generation = 3
-    before.owner_generation = 7
-    before.observation_clock = clock
-    before.deadline = time.monotonic() + 3
+    before.run_id = "synthetic-run"  # pyright: ignore[reportFunctionMemberAccess]
+    before.run_generation = 3  # pyright: ignore[reportFunctionMemberAccess]
+    before.owner_generation = 7  # pyright: ignore[reportFunctionMemberAccess]
+    before.observation_clock = clock  # pyright: ignore[reportFunctionMemberAccess]
+    before.deadline = time.monotonic() + 3  # pyright: ignore[reportFunctionMemberAccess]
 
     class Fetcher:
         def __init__(self, **kwargs):
@@ -91,7 +91,7 @@ def test_gate_deadline_clamps_longer_source_budget():
     def before():
         pass
 
-    before.deadline = time.monotonic() + 300
+    before.deadline = time.monotonic() + 300  # pyright: ignore[reportFunctionMemberAccess]
 
     def source(**callbacks):
         captured.append(callbacks["pre_source_request"].deadline)
@@ -150,9 +150,9 @@ def test_parse_failure_retains_own_permit_after_response_context_unwinds():
 
     def finish(code=None, **kwargs):
         gate.failures.append((code, kwargs))
-        return Failure(code)
+        return Failure(code)  # pyright: ignore[reportArgumentType]
 
-    gate.finish_failure = finish
+    gate.finish_failure = finish  # pyright: ignore[reportAttributeAccessIssue]
 
     def source(**callbacks):
         first = callbacks["pre_source_request"]()
@@ -191,9 +191,9 @@ def test_terminal_read_failure_uses_request_five_while_six_is_outstanding(monkey
 
     def finish(code=None, **kwargs):
         gate.failures.append((code, kwargs))
-        return Failure(code)
+        return Failure(code)  # pyright: ignore[reportArgumentType]
 
-    gate.finish_failure = finish
+    gate.finish_failure = finish  # pyright: ignore[reportAttributeAccessIssue]
 
     async def handler(request):
         nonlocal peer_tail_started

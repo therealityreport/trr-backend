@@ -58,7 +58,7 @@ def test_safe_partial_response_round_trips_original_observation_and_all_post_ide
         parser_version=PARSER_VERSION,
     )
     assert preview["writes"] == preview["source_requests"] == 0
-    assert len(replayed.posts) == 12 and replayed.observed_at == OBSERVED
+    assert len(replayed.posts) == 12 and replayed.observed_at == OBSERVED  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @pytest.mark.parametrize(

@@ -470,7 +470,7 @@ def discover_episode(
     successful, failed, rate_limited = [], [], []
     first_error = None
     for sort in sorts:
-        params = {"limit": limit, "raw_json": 1}
+        params: dict[str, Any] = {"limit": limit, "raw_json": 1}
         if sort == "top":
             params["t"] = "all"
         try:

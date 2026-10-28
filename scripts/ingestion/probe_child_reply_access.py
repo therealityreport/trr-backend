@@ -69,7 +69,7 @@ def _proxy(comparison_id):
 
     from trr_backend.socials.instagram._proxy_sessions import apply_decodo_session_affinity
 
-    settings = {name: os.environ.get(name) for name in ("DECODO_USERNAME", "DECODO_PASSWORD", "DECODO_GATEWAY")}
+    settings = {name: os.environ.get(name) or "" for name in ("DECODO_USERNAME", "DECODO_PASSWORD", "DECODO_GATEWAY")}
     if not all(settings.values()):
         raise ValueError("Proxy configuration missing")
     gateway = settings["DECODO_GATEWAY"]

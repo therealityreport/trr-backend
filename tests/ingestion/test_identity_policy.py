@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -216,11 +217,11 @@ def test_detail_transport_uses_one_connection_for_lane_and_owner(one_connection)
     with requests.Session() as session:
 
         class Scraper:
-            def _request_cookies(self):
+            def _request_cookies(self) -> dict[str, Any]:
                 return {"ds_user_id": uuid4().hex, "sessionid": "synthetic-session"}
 
         scraper = Scraper()
-        scraper.session = session
+        scraper.session = session  # pyright: ignore[reportAttributeAccessIssue]
         transport = DetailTransport(
             scraper=scraper,
             transaction=transaction,
@@ -237,7 +238,7 @@ def test_detail_transport_uses_one_connection_for_lane_and_owner(one_connection)
         assert len(row(transaction, transport)["request_times"]) == 1
 
 
-def row(transaction, lane):
+def row(transaction, lane) -> dict[str, Any]:
     with transaction() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("select * from social.instagram_detail_request_lanes where identity_key=%s", (lane.identity_key,))
         return dict(cur.fetchone() or {})
@@ -352,6 +353,7 @@ def test_auth_block_is_fingerprint_bound_and_explicit_replacement_gets_one_probe
     old = gate(lanes, subject=subject, session="old-session")
     old.before_request()
     failure = old.finish_failure("unauthorized")
+    assert failure is not None
     assert failure.identity_blocked
     unchanged = gate(lanes, subject=subject, session="old-session")
     with pytest.raises(IdentityDeferred) as deferred:
@@ -405,6 +407,9 @@ def test_cooldown_rejects_before_count_and_rate_limit_retry_after_is_preserved(l
     lane.before_request()
     start = datetime.now(UTC)
     failure = lane.finish_failure("rate_limited", retry_after_seconds=120)
+    assert failure is not None
+    assert failure.retry_at is not None
+    assert failure is not None
     assert failure.retry_at >= start + timedelta(seconds=120)
     with pytest.raises(IdentityDeferred) as deferred:
         gate(lanes, subject=subject).before_request()
@@ -436,6 +441,7 @@ def test_expired_probe_failure_has_no_authority_over_current_state(lanes):
     new_permit = replacement.before_request()
     failure = old.finish_failure("unauthorized", permit=old_permit)
     state = row(lanes, old)
+    assert failure is not None
     assert failure.code == "identity_probe_lost"
     assert not state["blocked"] and state["failure_generation"] == 0
     assert state["probe_token"] == new_permit.probe_token
@@ -483,6 +489,7 @@ def test_sql_lock_is_released_before_source_operation_and_unknown_errors_are_saf
             (lane.identity_key,),
         )
     failure = lane.finish_failure("https://private.example/?sessionid=secret")
+    assert failure is not None
     assert failure.code == "request_failed"
     assert row(lanes, lane)["last_error_code"] == "request_failed"
 
@@ -491,6 +498,7 @@ def test_independent_auth_alias_preserves_legacy_shared_block_vocabulary(lanes):
     lane = gate(lanes)
     lane.before_request()
     failure = lane.finish_failure("source_auth_failed")
+    assert failure is not None
     assert failure.code == "unauthorized" and failure.identity_blocked
     assert row(lanes, lane)["blocked_fingerprint"] == lane.credential_fingerprint
 
@@ -533,6 +541,7 @@ def test_huge_retry_after_fails_closed_without_raw_time_overflow(lanes):
     lane = gate(lanes)
     lane.before_request()
     failure = lane.finish_failure("rate_limited", retry_after_seconds=1e300)
+    assert failure is not None
     assert failure.retry_at == datetime.max.replace(tzinfo=UTC)
 
 
@@ -617,6 +626,7 @@ def test_public_login_wall_has_no_local_wait_or_permanent_auth_block(public_lane
     lane = public_gate(public_lanes)
     lane.before_request()
     failure = lane.finish_failure(code)
+    assert failure is not None
     assert failure.code == "public_access_backoff" and not failure.identity_blocked
     assert failure.retry_at is None
     state = row(public_lanes, lane)
@@ -633,10 +643,14 @@ def test_public_backoff_preserves_retry_after_safety_and_overflow_fail_closed(pu
     started = datetime.now(UTC)
     failure = lane.finish_failure("public_access_backoff", retry_after_seconds=retry_after)
     if retry_after == 1e300:
+        assert failure is not None
         assert failure.retry_at == datetime.max.replace(tzinfo=UTC)
     elif retry_after == 120:
+        assert failure is not None
+        assert failure.retry_at is not None
         assert started + timedelta(seconds=120) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=120)
     else:
+        assert failure is not None
         assert failure.retry_at is None
     assert not failure.identity_blocked and not row(public_lanes, lane)["blocked"]
 
@@ -669,6 +683,7 @@ def test_public_late_success_cannot_clear_a_newer_failure_generation(public_lane
     state = row(public_lanes, failed)
     assert not early.finish_success(permit)
     assert row(public_lanes, failed) == state
+    assert failure is not None
     assert state["cooldown_until"] == failure.retry_at and state["failure_generation"] == 1
 
 
@@ -678,6 +693,8 @@ def test_public_late_shorter_retry_after_cannot_advance_existing_server_delay(pu
     late.before_request()
     original = first.finish_failure("public_access_backoff", retry_after_seconds=600)
     result = late.finish_failure("unauthorized", retry_after_seconds=120)
+    assert result is not None
+    assert original is not None
     assert result.retry_at == original.retry_at and not result.identity_blocked
     state = row(public_lanes, first)
     assert state["cooldown_until"] == original.retry_at and state["failure_generation"] == 2
@@ -701,7 +718,9 @@ def test_public_expired_probe_cannot_change_replacement_and_duplicate_failure_co
     current = public_gate(public_lanes)
     current_permit = current.before_request()
     assert current_permit.probe_token != old_permit.probe_token
-    assert old.finish_failure("unauthorized", permit=old_permit).code == "identity_probe_lost"
+    finish_failure = old.finish_failure("unauthorized", permit=old_permit)
+    assert finish_failure is not None
+    assert finish_failure.code == "identity_probe_lost"
     assert row(public_lanes, current)["probe_token"] == current_permit.probe_token
     failure = current.record_failure("login_required", permit=current_permit)
     assert current.record_failure("public_access_backoff", permit=current_permit) == failure
@@ -729,6 +748,9 @@ def test_public_rate_pause_server_delay_wins_and_success_resets(public_lanes, mo
     lane.before_request()
     started = datetime.now(UTC)
     failure = lane.finish_failure("rate_limited", retry_after_seconds=1234)
+    assert failure is not None
+    assert failure.retry_at is not None
+    assert failure is not None
     assert started + timedelta(seconds=1234) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=1234)
     change(
         public_lanes,
@@ -749,6 +771,12 @@ def test_received_peer_extends_finished_hold_without_health_or_probe_changes(lan
     baseline = row(lanes, lane)
     stronger = lane.finish_failure("rate_limited", retry_after_seconds=60, permit=second)
     held = row(lanes, lane)
+    assert stronger is not None
+    assert stronger.retry_at is not None
+    assert stronger is not None
+    assert initial is not None
+    assert initial.retry_at is not None
+    assert initial is not None
     assert stronger.retry_at > initial.retry_at + timedelta(seconds=39)
     assert held["server_retry_after_until"] == stronger.retry_at
     assert held["failure_generation"] == baseline["failure_generation"]
@@ -757,6 +785,7 @@ def test_received_peer_extends_finished_hold_without_health_or_probe_changes(lan
     assert lane.record_success(second) is False
     assert row(lanes, lane)["server_retry_after_until"] == stronger.retry_at
     weaker = lane.finish_failure("rate_limited", retry_after_seconds=1, permit=first)
+    assert weaker is not None
     assert weaker.retry_at == stronger.retry_at
 
 
@@ -779,11 +808,12 @@ def test_finished_peer_server_holds_do_not_reduce_longer_policy_or_returned_hold
     lane.finish_failure("rate_limited", retry_after_seconds=20, permit=first)
     policy_hold = datetime.now(UTC) + timedelta(seconds=180)
     change(lanes, lane, "cooldown_until=%s", policy_hold)
-    lane._last_failure = replace(lane._last_failure, retry_at=policy_hold)
+    lane._last_failure = replace(lane._last_failure, retry_at=policy_hold)  # pyright: ignore[reportArgumentType]
     baseline = row(lanes, lane)
     for seconds in (20, 60, 1):
         result = lane.finish_failure("rate_limited", retry_after_seconds=seconds, permit=second)
         current = row(lanes, lane)
+        assert result is not None
         assert result.retry_at == policy_hold
         assert current["cooldown_until"] == policy_hold
         assert current["server_retry_after_until"] < policy_hold
@@ -792,5 +822,7 @@ def test_finished_peer_server_holds_do_not_reduce_longer_policy_or_returned_hold
     assert row(lanes, lane)["server_retry_after_until"] >= datetime.now(UTC) + timedelta(seconds=59)
     # A changed shared row must not shorten the already returned target hold.
     change(lanes, lane, "cooldown_until=clock_timestamp()+interval '2 seconds'")
-    assert lane.finish_failure("rate_limited", retry_after_seconds=1, permit=second).retry_at == policy_hold
+    finish_failure = lane.finish_failure("rate_limited", retry_after_seconds=1, permit=second)
+    assert finish_failure is not None
+    assert finish_failure.retry_at == policy_hold
     assert row(lanes, lane)["cooldown_until"] == policy_hold

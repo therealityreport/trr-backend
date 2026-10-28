@@ -161,6 +161,7 @@ def test_received_retry_after_uses_maximum_server_delay_regardless_of_completion
     assert row["server_retry_after_until"] >= started + timedelta(seconds=60), (
         "the shorter sibling response replaced or prevented recording the received 60-second server hold"
     )
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.retry_at >= started + timedelta(seconds=60)
     assert row["cooldown_until"] == row["server_retry_after_until"]
 

@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,7 +15,7 @@ from trr_backend.ingestion.domain import RunIntent, SourceProfile
 avatar_case = avatar_case_fixture
 
 
-def context(mode=None):
+def context(mode=None) -> dict[str, Any]:
     intent = RunIntent(account="bravotv")
     payload = intent.payload()
     if mode is not None:
@@ -49,7 +50,7 @@ def test_frozen_adapter_routing_ignores_worker_environment(monkeypatch, mode):
     monkeypatch.setattr(composition, "_gate_source", lambda source, *args, **kw: source)
     credentials = []
 
-    def credential(account):
+    def credential(account) -> dict[str, Any]:
         assert mode != "public", "public lane selected credentials"
         credentials.append(account)
         return {
@@ -196,7 +197,7 @@ def test_public_commenter_profile_gate_uses_run_placement_lane(monkeypatch, plac
     ctx["run"]["execution_placement"] = placement
     ctx["target"]["checkpoint"] = {}
     _, gate = composition._profile_provider(ctx, {"account": "bravotv", "stage": "profiles", "target_key": "writer"})
-    assert gate.public_only is True and gate.cookies == {}
+    assert gate.public_only is True and gate.cookies == {}  # pyright: ignore[reportAttributeAccessIssue]
     assert gate.network_lane == placement
 
 
@@ -230,6 +231,7 @@ def test_media_storage_refresh_uses_run_placement_lane_only_when_public(monkeypa
     if placement is not None:
         ctx["run"]["execution_placement"] = placement
     storage = composition._media_storage(ctx, {"account": "bravotv"})
+    assert isinstance(storage, dict)
     assert storage["refresh"] == "refresh"
     assert captured["public_only"] is (mode == "public")
     assert captured["network_lane"] == lane

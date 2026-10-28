@@ -139,6 +139,7 @@ def test_valid_normalized_bootstrap_keeps_exact_two_request_budget(extra):
         assert source(username="reader", pre_source_request=lambda: counted.append(True)) == payload
         assert len(counted) == len(session.calls) == source._sends == 2
         assert [call[0] for call in session.calls] == ["GET", "POST"]
+        assert source.provenance is not None
         assert source.provenance["profile_provider_flags"] == provider_flags(html(original))
     finally:
         source.close()

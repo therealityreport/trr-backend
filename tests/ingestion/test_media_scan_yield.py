@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Event
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -24,7 +25,7 @@ def query(tx, sql, args=()):
     return comments.query(tx, sql, args)
 
 
-def fixture(database, *, pending_comment=True):
+def fixture(database, *, pending_comment=True) -> Any:
     """Eight strict inventory failures before the ninth ready media target."""
     owned, tx, store, item, ordered, _ = snapshots._seed_media_readiness_page(database)
     key = "Available" + uuid4().hex
@@ -43,7 +44,7 @@ def fixture(database, *, pending_comment=True):
     return store, tx, store.seed(item), key, ordered
 
 
-def preferred(part):
+def preferred(part) -> dict[str, Any]:
     return dict(part, prefer_media=True)
 
 
@@ -151,6 +152,7 @@ def test_comment_reconcile_preserves_exact_token_and_only_marks_actual_dispatch(
     store, tx, part, key, _ = fixture(pipeline_database)
     first = store.decision(preferred(part), 0, NOW)
     reservation = store.reserve_decision(part, first, ordinal=0)
+    assert reservation is not None
     assert store.transition(part, reservation["owner_token"], "sending")
     restart_scan(tx, part)
     second = store.decision(preferred(part), 1, NOW)
@@ -209,7 +211,7 @@ def test_real_partial_partition_keeps_scan_due_then_runs_ready_media_beside_comm
     abort, entered, release = Event(), Event(), Event()
     occupancy, admissions, requests = [], [], []
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         args = {k: reservation[k] for k in ("run_id", "account", "generation", "target_key", "owner_token")}
         args["stage"] = Stage(reservation["stage"])
         store.acquire(**args)
@@ -290,7 +292,7 @@ def test_pending_scan_comment_admission_denial_retains_due_without_reserving(pip
     dispatch.bind(part, 6)
     dispatch.media_fairness[(part["run_id"], part["generation"])]["due"] = True
     waits, admitted = [], []
-    dispatch.wait = waits.append
+    dispatch.wait = waits.append  # pyright: ignore[reportAttributeAccessIssue]
 
     def admit(item):
         admitted.append(item["stage"])
@@ -353,7 +355,7 @@ def test_completed_scan_comment_submission_consumes_due_turn(pipeline_database, 
         )
     abort, release = Event(), Event()
 
-    def execute(*args, **kwargs):
+    def execute(*args, **kwargs) -> dict[str, Any]:
         assert release.wait(10)
         return {"outcome": "committed"}
 

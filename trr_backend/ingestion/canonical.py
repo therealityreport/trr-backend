@@ -179,8 +179,8 @@ def _upsert(
 
 
 def _guard(conn: Any, identity: str, observed_at: datetime) -> datetime:
-    observed_at = _time(observed_at)
-    if observed_at is None:
+    normalized_at = _time(observed_at)
+    if normalized_at is None:
         raise CanonicalWriteError("Original observed_at is required")
     if conn is None or conn.autocommit:
         raise CanonicalWriteError("An explicit non-autocommit connection is required")
@@ -188,7 +188,7 @@ def _guard(conn: Any, identity: str, observed_at: datetime) -> datetime:
     # alone do not serialize them. The transaction lock also covers absent rows.
     with conn.cursor() as cur:
         cur.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", ("instagram:" + identity,))
-    return observed_at
+    return normalized_at
 
 
 def _reject_older(observed_at: datetime, *rows: Mapping[str, Any]) -> None:
@@ -437,7 +437,7 @@ def _post_payload(
         payload.pop("views", None)
     if hidden("comment_count_hidden", "comments_count_hidden"):
         payload.pop("comments_count", None)
-    view_metrics = {"observed_at": observed_at.isoformat()}
+    view_metrics: dict[str, Any] = {"observed_at": observed_at.isoformat()}
     if node.get("video_views_source"):
         view_metrics["source"] = node["video_views_source"]
     if payload.get("views") is not None:

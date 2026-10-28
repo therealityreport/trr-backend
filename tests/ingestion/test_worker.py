@@ -191,7 +191,7 @@ def test_failure_diagnostics_preserve_legacy_marker_and_bounded_history_without_
                 "observed_at": None,
                 "owner_generation": None,
             }
-    assert diagnostics["failure_history"] == seen[-4:]
+    assert diagnostics["failure_history"] == seen[-4:]  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 def test_immediate_operational_retries_preserve_the_finite_attempt_budget(database):
@@ -399,7 +399,7 @@ def test_main_hard_timer_is_bounded_by_lease_and_always_cancelled(
 
     class Clock(datetime):
         @classmethod
-        def now(cls, tz=None):
+        def now(cls, tz=None):  # pyright: ignore[reportIncompatibleMethodOverride]
             return now
 
     class Timer:

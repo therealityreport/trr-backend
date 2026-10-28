@@ -21,6 +21,7 @@ import time
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -46,7 +47,7 @@ def connect(*, readonly=True):
 
     load_dotenv(ENV, override=True)
     url = os.environ.get("TRR_DB_URL") or os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
-    parts = urlsplit(url)
+    parts = urlsplit(url or "")
     if "vwxfvzutyufrkhfgoeaa" not in (parts.hostname or "") + (parts.username or ""):
         raise RuntimeError("Wrong database project")
     return psycopg2.connect(
@@ -225,7 +226,10 @@ def snapshot():
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("set transaction isolation level repeatable read read only")
             cur.execute("select * from social.instagram_ingestion_runs where run_id=%s", (RUN,))
-            run = dict(cur.fetchone())
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("Recovery run is missing")
+            run = dict(row)
             if run["account"] != "bravotv" or run["intent_hash"] != INTENT or run["execution_placement"] != "local":
                 raise RuntimeError("January binding changed")
             cur.execute(
@@ -312,7 +316,7 @@ def snapshot():
         conn.close()
 
 
-def target_diagnostics(checkpoint):
+def target_diagnostics(checkpoint) -> dict[str, Any]:
     """Bounded factual projection; missing old snapshot fields remain unknown.
 
     Failure facts are historical, not evidence that a target is currently held.
@@ -348,7 +352,7 @@ def target_diagnostics(checkpoint):
     access = pages.get("reply_access")
     technical = checkpoint.get("public_reply_failures")
     lanes = pages.get("lanes")
-    proof = {"availability": presence(lanes)}
+    proof: dict[str, Any] = {"availability": presence(lanes)}
     if isinstance(lanes, dict):
         proof["total"] = len(lanes)
         for field in ("exhausted", "repeated", "started_from_root"):
@@ -371,7 +375,7 @@ def target_diagnostics(checkpoint):
                 if isinstance(lane, dict) and isinstance(lane.get("cursors"), list)
             ),
         }
-    holds = {"availability": presence(technical)}
+    holds: dict[str, Any] = {"availability": presence(technical)}
     if isinstance(technical, dict):
         holds.update(
             total=len(technical),
@@ -557,7 +561,9 @@ def transition_snapshot():
         )
         targets = cur.fetchone()
         cur.execute("select count(*) from social.instagram_ingestion_receipts where run_id=%s", (RUN,))
-        return {"targets": targets, "receipts": cur.fetchone()[0]}
+        row = cur.fetchone()
+        assert row is not None
+        return {"targets": targets, "receipts": row[0]}
 
 
 def merge_frontier(frontiers, target, observed, supported, proofs, best):
@@ -587,13 +593,17 @@ def progress(window, frontiers=None):
             from social.instagram_ingestion_targets where run_id=%s""",
             (RUN,),
         )
-        requests, media_count = cur.fetchone()
+        totals = cur.fetchone()
+        assert totals is not None
+        requests, media_count = totals
         cur.execute(
             """select count(*) from social.instagram_ingestion_comment_pages
             where run_id=%s and committed_at>=%s""",
             (RUN, window["started_at"]),
         )
-        pages = cur.fetchone()[0]
+        row_3 = cur.fetchone()
+        assert row_3 is not None
+        pages = row_3[0]
         cur.execute(
             """select count(*) from social.instagram_comments c
             join social.instagram_posts p on p.id=c.post_id where exists(
@@ -601,7 +611,9 @@ def progress(window, frontiers=None):
                 where t.run_id=%s and t.stage='comments' and t.target_key=p.shortcode)""",
             (RUN,),
         )
-        canonical_ids = cur.fetchone()[0]
+        row_4 = cur.fetchone()
+        assert row_4 is not None
+        canonical_ids = row_4[0]
     with closing(connect()) as conn, conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         current_phase = phase(cur, window)
         cur.execute(
@@ -769,7 +781,7 @@ def merge_comment_metrics(*frames):
 
 
 def updated_comment_seed(seed, metrics, decision, wall_now):
-    value = dict(seed, metrics=merge_comment_metrics(seed["metrics"], metrics))
+    value: dict[str, Any] = dict(seed, metrics=merge_comment_metrics(seed["metrics"], metrics))
     if decision["useful_progress"]:
         value["last_useful_at"] = wall_now.isoformat()
     if decision["reason"] != "running":
@@ -785,9 +797,10 @@ def replace_comment_seed(directory, seed):
 def public_base_urls(public_bases):
     """Accept verified storage-binding entries and older URL-only bindings."""
     urls = tuple(value.get("url") if isinstance(value, dict) else value for value in public_bases)
-    if any(not isinstance(value, str) or not value for value in urls):
+    checked = tuple(value for value in urls if isinstance(value, str) and value)
+    if len(checked) != len(urls):
         raise ValueError("Configured public storage base has no URL")
-    return urls
+    return checked
 
 
 def media_slots(snapshot, public_bases):
@@ -923,7 +936,9 @@ def main():
     storage = json.loads(storage_path.read_text())
     label = f"gui/{os.getuid()}/{native['Label']}"
     state = subprocess.check_output(["launchctl", "print", label], text=True)
-    pid = int(re.search(r"\bpid = (\d+)\b", state)[1])
+    match_2 = re.search(r"\bpid = (\d+)\b", state)
+    assert match_2 is not None
+    pid = int(match_2[1])
     if processes(pid) != {pid} or any(
         row["owner_expires_at"] and row["owner_expires_at"] > datetime.now(UTC) for row in before["targets"]
     ):
@@ -977,6 +992,7 @@ def main():
         )
         save(directory, "window.json", window)
         # The parent may only issue phase commands for this exact authorization.
+        assert window is not None
         os.environ.update(
             {
                 "TRR_INSTAGRAM_RECOVERY_WINDOW_ID": window["window_id"],
@@ -1216,6 +1232,7 @@ def main():
                     expected_placement="local",
                     idempotency_key="window-stop:" + window["window_id"],
                 )
+                assert cancelled is not None
                 held = control_call(
                     store.hold_cancelled_run,
                     RUN,
@@ -1261,6 +1278,7 @@ def main():
                 ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], check=True, capture_output=True
             )
             restored = None
+            native_lease = None
             end = time.monotonic() + 30
             while time.monotonic() < end:
                 state = subprocess.check_output(["launchctl", "print", label], text=True)
@@ -1275,6 +1293,7 @@ def main():
             if restored is None:
                 raise RuntimeError("Native worker restoration is not qualified")
             time.sleep(1)
+            assert native_lease is not None
             if not alive(restored) or grants() != [native_lease["lease_backend_pid"]]:
                 raise RuntimeError("Restored native grant changed")
             save(directory, "restored.json", {"pid": restored, "grants": grants(), "package": str(release)})

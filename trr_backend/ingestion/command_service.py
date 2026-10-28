@@ -23,6 +23,7 @@ from api.schemas.v2.instagram_ingestion import (
     InstagramReplayResultV2,
     InstagramReplayV2,
     InstagramRetryTargetsV2,
+    SourceScope,
 )
 from trr_backend.ingestion.domain import (
     Conflict,
@@ -110,7 +111,7 @@ class CommandService:
             raise ValueError("An explicit engine and workflow version are required")
         self.store = store
         self.queries = queries
-        self.engine = engine
+        self.engine: Literal["dbos", "temporal"] = engine
         self.workflow_version = workflow_version
         self.enabled = enabled
         self.capacity = capacity
@@ -264,13 +265,15 @@ class CommandService:
             {key: value[key] for key in InstagramIngestionProgressV2.model_fields if key in value}
         )
 
-    def recent(self, handle: str, *, source_scope: str, limit: int) -> InstagramRecentRunsV2:
+    def recent(self, handle: str, *, source_scope: SourceScope, limit: int) -> InstagramRecentRunsV2:
         query = InstagramRecentRunsQueryV2(source_scope=source_scope, limit=limit)
-        return InstagramRecentRunsV2(
-            runs=[
-                _api_run(run)
-                for run in self.queries.recent(_account(handle), source_scope=query.source_scope, limit=query.limit)
-            ]
+        return InstagramRecentRunsV2.model_validate(
+            {
+                "runs": [
+                    _api_run(run)
+                    for run in self.queries.recent(_account(handle), source_scope=query.source_scope, limit=query.limit)
+                ]
+            }
         )
 
     def _compatible(self, handle: str, run_id: UUID) -> None:

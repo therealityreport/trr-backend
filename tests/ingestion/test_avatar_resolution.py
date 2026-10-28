@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -73,7 +74,7 @@ def owned_target(database):
     return owned, AvatarResolutionActivity(store, gate=gate)
 
 
-def profile(username, url=URL):
+def profile(username, url=URL) -> dict[str, Any]:
     return {"status": "ok", "data": {"user": {"id": "123", "username": username, "profile_pic_url_hd": url}}}
 
 
@@ -135,12 +136,12 @@ def test_counted_source_retains_fetchable_safe_url_and_never_settles_media(avata
 def test_explicit_unavailable_proof_is_retained_and_offline_replay_deduplicates_null(avatars):
     owned, activity = owned_target(avatars)
     handle = "b" + uuid4().hex[:12]
-    result = activity.execute(**owned, handles=[handle], fetch=source(lambda username: profile(username, None)))[0]
+    result = activity.execute(**owned, handles=[handle], fetch=source(lambda username: profile(username, None)))[0]  # pyright: ignore[reportArgumentType]
     assert result.unavailable and result.source_url is None
     _, evidence = rows(avatars, owned)
     capture = retained(avatars, evidence[0])
     assert capture.read(pinned=True)["avatar_url_explicitly_missing"] is True
-    activity.apply_evidence(**owned, username=handle, evidence=capture, evidence_id=result.evidence_id)
+    activity.apply_evidence(**owned, username=handle, evidence=capture, evidence_id=result.evidence_id)  # pyright: ignore[reportArgumentType]
     found = registry(avatars, handle)
     assert len(found) == 1 and found[0]["status"] == "unsupported"
     assert found[0]["failure_reason"] == "profile_pic_not_available"
@@ -206,13 +207,13 @@ def test_evidence_binding_rejects_other_target_account_and_changed_envelope(avat
     evidence = retained(avatars, stored[0])
     other, _ = owned_target(avatars)
     with pytest.raises(AvatarResolutionError, match="avatar_retained_evidence_required"):
-        activity.apply_evidence(**other, username=handle, evidence=evidence, evidence_id=observation.evidence_id)
+        activity.apply_evidence(**other, username=handle, evidence=evidence, evidence_id=observation.evidence_id)  # pyright: ignore[reportArgumentType]
     with pytest.raises(LookupError):
         activity.apply_evidence(
             **{**owned, "account": "other_account"},
             username=handle,
             evidence=evidence,
-            evidence_id=observation.evidence_id,
+            evidence_id=observation.evidence_id,  # pyright: ignore[reportArgumentType]
         )
     with pytest.raises(AvatarResolutionError, match="avatar_evidence_identity_mismatch"):
         parse_avatar_evidence(evidence, username="other_user", pinned=True)
@@ -223,7 +224,7 @@ def test_evidence_binding_rejects_other_target_account_and_changed_envelope(avat
         payload=evidence.read(pinned=True),
     )
     with pytest.raises(AvatarResolutionError, match="avatar_retained_evidence_required"):
-        activity.apply_evidence(**owned, username=handle, evidence=forged, evidence_id=observation.evidence_id)
+        activity.apply_evidence(**owned, username=handle, evidence=forged, evidence_id=observation.evidence_id)  # pyright: ignore[reportArgumentType]
 
 
 def test_older_replay_cannot_overwrite_newer_registry_observation(avatars):
@@ -239,7 +240,10 @@ def test_older_replay_cannot_overwrite_newer_registry_observation(avatars):
         )
     with pytest.raises(AvatarResolutionError, match="avatar_source_newer"):
         activity.apply_evidence(
-            **owned, username=handle, evidence=retained(avatars, evidence[0]), evidence_id=observation.evidence_id
+            **owned,
+            username=handle,
+            evidence=retained(avatars, evidence[0]),
+            evidence_id=observation.evidence_id,  # pyright: ignore[reportArgumentType]
         )
 
 
@@ -325,7 +329,7 @@ def test_parser_requires_version_identity_and_explicit_missing_marker():
             **kwargs,
         )
 
-    proof = capture(payload=profile("fixture", None))
+    proof = capture(payload=profile("fixture", None))  # pyright: ignore[reportArgumentType]
     with pytest.raises(AvatarResolutionError, match="avatar_unavailable_proof_missing"):
         parse_avatar_evidence(proof, username="fixture")
 
@@ -380,7 +384,7 @@ def test_simultaneous_unavailable_writes_deduplicate_nullable_registry_key(avata
         source_identity=AVATAR_SOURCE_PREFIX + username,
         captured_at=datetime.now(UTC),
         parser_version=AVATAR_PARSER_VERSION,
-        payload={**profile(username, None), "avatar_url_explicitly_missing": True},
+        payload={**profile(username, None), "avatar_url_explicitly_missing": True},  # pyright: ignore[reportArgumentType]
     )
 
     def apply(item):
@@ -404,7 +408,7 @@ def test_missing_avatar_profiles_do_not_close_the_shared_local_lane(avatars, cas
     with tx() as conn, conn.cursor() as cur:
         cur.execute("delete from social.instagram_detail_request_lanes where identity_key=%s", (key,))
 
-    def fetch(*, username, pre_source_request):
+    def fetch(*, username, pre_source_request) -> dict[str, Any]:
         pre_source_request()
         if case == "null_user":
             return {"status": "ok", "data": {"user": None}}

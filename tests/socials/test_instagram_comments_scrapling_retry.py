@@ -1091,6 +1091,7 @@ def test_fetch_api_with_browser_strips_accept_encoding() -> None:
             "x-ig-app-id": "936619743392459",
         }
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(
         return_value=httpx.Response(
             200,
@@ -2419,6 +2420,7 @@ def test_fetch_api_with_browser_returns_browser_response() -> None:
         headers={"set-cookie": "csrftoken=fresh-csrf-token"},
     )
     response.cookies = {"csrftoken": "fresh-csrf-token", "sessionid": "fresh-session"}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
     fetcher._rebuild_http_client = AsyncMock()
 
@@ -2454,6 +2456,7 @@ def test_fetch_api_with_browser_evaluates_fetch_after_navigation_failure() -> No
         text=(f'<html><body><pre id="trr-browser-api-result">{html.escape(json.dumps(payload))}</pre></body></html>'),
     )
     container_response.cookies = {"csrftoken": "fresh-csrf-token"}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(
         side_effect=[
             RuntimeError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE"),

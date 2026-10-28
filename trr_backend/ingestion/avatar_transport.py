@@ -43,10 +43,13 @@ class AvatarProfileSource:
         self.client = (PublicRequestClient if public_only else InstagramRequestClient)(session=self.session)
 
     def _public_cookies(self, response=None):
+        identity = self._public_identity
+        if identity is None:
+            raise RuntimeError("public_cookie_identity_missing")
         try:
             if response is not None:
-                self.cookies = self._public_identity.prepare_jar(response.cookies, self.cookies)
-            self.cookies = self._public_identity.prepare_jar(self.session.cookies, self.cookies)
+                self.cookies = identity.prepare_jar(response.cookies, self.cookies)
+            self.cookies = identity.prepare_jar(self.session.cookies, self.cookies)
         except CredentialIdentityMismatch:
             raise InstagramRequestFailure(
                 "public_access_backoff",

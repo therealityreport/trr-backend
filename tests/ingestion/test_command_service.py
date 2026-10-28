@@ -328,7 +328,7 @@ def test_replay_requires_durable_adapter_and_validates_requested_run_identity(da
             "source_requests": 0,
         }
 
-    subject.replay_command = replay
+    subject.replay_command = replay  # pyright: ignore[reportAttributeAccessIssue]
     assert subject.replay("bravotv", run.run_id, payload, idempotency_key="preview", initiated_by="admin").writes == 0
     assert calls[0][3] == {"idempotency_key": "preview", "initiated_by": "admin"}
     with pytest.raises(LookupError):
@@ -337,6 +337,7 @@ def test_replay_requires_durable_adapter_and_validates_requested_run_identity(da
         subject.replay("bravotv", uuid4(), payload, idempotency_key="preview", initiated_by="admin")
     assert len(calls) == 1
     original = subject.replay_command
+    assert original is not None
     subject.replay_command = lambda *a, **kw: dict(original(*a, **kw), run_id=str(uuid4()))
     with pytest.raises(Conflict, match="requested run"):
         subject.replay("bravotv", run.run_id, payload, idempotency_key="preview", initiated_by="admin")

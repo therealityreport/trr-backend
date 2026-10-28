@@ -811,7 +811,7 @@ def test_cancellation_fences_network_and_canonical_receipt(media_database, when)
     if when == "before_download":
         cancel()
     else:
-        client.after_put = cancel
+        client.after_put = cancel  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(LostOwnership):
         execute(media_database, owned, token, source, client=client)
     assert bool(client.writes) == (when == "after_upload")
@@ -920,7 +920,7 @@ def test_expired_owner_after_upload_cannot_commit_or_continue_storage(media_data
                 (owned["run_id"],),
             )
 
-    client.after_put = expire_owner
+    client.after_put = expire_owner  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(LostOwnership):
         execute(media_database, owned, token, source, client=client)
     assert len(client.writes) == 1
@@ -946,7 +946,7 @@ def test_fifty_mib_stream_uses_bounded_durable_sql_checks(media_database):
     chunk = b"\x00\x00\x00\x18ftypmp42" + b"x" * (64 * 1024 - 12)
 
     class ChunkedResponse(Response):
-        def iter_content(self, *, chunk_size):
+        def iter_content(self, *, chunk_size):  # pyright: ignore[reportIncompatibleMethodOverride]
             assert chunk_size == len(chunk)
             for _ in range(800):
                 clock.milliseconds += 10
@@ -980,7 +980,7 @@ def test_stream_cancellation_is_observed_within_one_second(media_database):
     cancelled_at = None
 
     class CancelledResponse(Response):
-        def iter_content(self, *, chunk_size):
+        def iter_content(self, *, chunk_size):  # pyright: ignore[reportIncompatibleMethodOverride]
             nonlocal cancelled_at
             for position in range(800):
                 clock.milliseconds += 10
@@ -1031,7 +1031,7 @@ def test_new_generation_after_last_upload_cannot_commit_media(media_database):
                     (owned["run_id"],),
                 )
 
-    client.after_put = replace_generation
+    client.after_put = replace_generation  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(LostOwnership):
         execute(media_database, owned, token, source, client=client)
     assert len(client.writes) == 11
@@ -1238,6 +1238,7 @@ def test_rate_limit_exposes_typed_durable_retry_without_immediate_retry():
     with pytest.raises(MediaIncomplete) as failure:
         storage(opener=opener)._download(SOURCE, check=noop, request=noop)
     assert failure.value.failure.code == "media_source_throttled"
+    assert failure.value.failure.retry_at is not None
     assert failure.value.failure.retry_at >= before + timedelta(seconds=120)
     assert not failure.value.failure.source_unavailable
     assert calls == [1]
@@ -1456,10 +1457,12 @@ def test_old_prior_manifest_uses_archival_retention_clock_and_keeps_source_clock
     source = replace(source, existing_manifest=manifest)
     first = prior_manifest_evidence(source, captured_at=archived)
     second = prior_manifest_evidence(source, captured_at=archived + timedelta(days=1))
+    assert first is not None
     assert first.captured_at == archived and first.expires_at == archived + timedelta(days=30)
     payload = first.read(now=archived + timedelta(days=1))
     assert payload["updated_at"] == payload["captured_at"] == old.isoformat()
     assert all(item["generated_at"] == old.isoformat() for item in payload["media"])
+    assert second is not None
     assert first.content_hash == second.content_hash and first.payload_json == second.payload_json
 
 
@@ -1563,7 +1566,7 @@ def sdk_budget_client():
     from botocore.config import Config
 
     client = Storage()
-    client.meta = SimpleNamespace(config=Config(connect_timeout=10, read_timeout=60, retries={"total_max_attempts": 1}))
+    client.meta = SimpleNamespace(config=Config(connect_timeout=10, read_timeout=60, retries={"total_max_attempts": 1}))  # pyright: ignore[reportAttributeAccessIssue]
     return client
 
 
@@ -1580,8 +1583,8 @@ def test_r2_physical_calls_recheck_known_budget_after_request_callback(operation
         return original_head(**kwargs)
 
     client.head_object = head
-    client.get_object = lambda **kwargs: calls.append("get")
-    client.put_object = lambda **kwargs: calls.append("put")
+    client.get_object = lambda **kwargs: calls.append("get")  # pyright: ignore[reportAttributeAccessIssue]
+    client.put_object = lambda **kwargs: calls.append("put")  # pyright: ignore[reportAttributeAccessIssue]
 
     def request():
         requests.append(True)
@@ -1599,7 +1602,7 @@ def test_r2_physical_calls_recheck_known_budget_after_request_callback(operation
         else:
             service.put("role.png", image_bytes(), "image/png", check=check, request=request)
     assert calls == (["head"] if operation == "put" else [])
-    assert client.meta.config.retries == {"total_max_attempts": 1}
+    assert client.meta.config.retries == {"total_max_attempts": 1}  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_r2_body_budget_closes_received_body_before_an_unbounded_read():
@@ -1619,7 +1622,7 @@ def test_r2_body_budget_closes_received_body_before_an_unbounded_read():
         clock.milliseconds = 45_000
         return {"Body": body}
 
-    client.get_object = get
+    client.get_object = get  # pyright: ignore[reportAttributeAccessIssue]
     with pytest.raises(MediaIncomplete, match="target_deadline"):
         service._same(
             "role.png",
@@ -1745,7 +1748,7 @@ def test_lossless_avatar_reuse_keeps_every_slot_and_exact_signed_urls(distinct_s
     assert len(downloads) == (4 if distinct_signed_urls else 2)
     assert len(requests_seen) == (30 if distinct_signed_urls else 26)
     assert len(result.avatars) == 3
-    assert [row["observed_at"] for row in result.avatars] == [a.observed_at.isoformat() for a in avatars]
+    assert [row["observed_at"] for row in result.avatars] == [a.observed_at.isoformat() for a in avatars]  # pyright: ignore[reportOptionalMemberAccess]
     assert source.avatars == avatars  # Every role, comment lineage and signed source remains intact.
     hosted = result.post_fields["hosted_owner_profile_pic_url"]
     assert result.post_fields["hosted_tagged_profile_pics"]["reader"] == hosted

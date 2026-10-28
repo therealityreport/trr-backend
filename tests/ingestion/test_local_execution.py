@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -64,7 +65,7 @@ def clean(database):
         cur.execute("truncate social.instagram_ingestion_runs,social.scrape_jobs cascade")
 
 
-def sql(database, statement, args=()):
+def sql(database, statement, args=()) -> Any:
     with database[2]() as conn, conn.cursor() as cur:
         cur.execute(statement, args)
         return cur.fetchall() if cur.description else None
@@ -133,7 +134,7 @@ def resume_local(database, request):
     )
 
 
-def owned(reservation):
+def owned(reservation) -> dict[str, Any]:
     result = {key: reservation[key] for key in ("run_id", "account", "generation", "target_key", "owner_token")}
     return dict(result, stage=Stage(reservation["stage"]))
 
@@ -280,7 +281,7 @@ def test_real_scheduler_one_local_target_receipt_or_preserved_failure_cancel_bef
     )
     sends = []
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         assert lease.entered and not lease.exited and kwargs["execution_placement"] == "local"
         assert kwargs["abort"] is abort and kwargs["timeout_seconds"] <= 60
         args = owned(reservation)
@@ -421,6 +422,7 @@ def test_shared_session_lease_busy_and_loss_sets_abort(database, register_isolat
             with pytest.raises(Conflict, match="busy"):
                 with CoordinatorLease(connect, config, threading.Event()):
                     pytest.fail("second consumer")
+            assert lease.connection is not None
             lease.connection.close()
             assert abort.wait(2)
 
@@ -520,13 +522,16 @@ def test_lease_idle_expiry_releases_abandoned_pooled_backend(database, register_
     with register_isolated_postgres(**endpoint):
         try:
             lease.__enter__()
+            assert lease.connection is not None
             with lease.connection.cursor() as cur:
                 cur.execute("show idle_session_timeout")
                 assert cur.fetchone() == ("5s",)
             # Model a lost frontend whose pooled backend remains connected:
             # stop heartbeats without invoking unlock or connection close.
             lease.stop.set()
+            assert lease.monitor is not None
             lease.monitor.join(1)
+            assert lease.watchdog is not None
             lease.watchdog.join(1)
             time.sleep(5.2)
             with CoordinatorLease(connect, config, threading.Event()):
@@ -665,7 +670,7 @@ time.sleep(30)
             if not state or state.startswith("Z"):
                 break
             time.sleep(0.05)
-        assert not state or state.startswith("Z"), "orphan activity survived driver SIGKILL"
+        assert not state or state.startswith("Z"), "orphan activity survived driver SIGKILL"  # pyright: ignore[reportPossiblyUnboundVariable]
     finally:
         if driver.poll() is None:
             driver.kill()
@@ -772,7 +777,7 @@ def test_aged_transition_expires_old_journal_and_real_single_slot_admission_exec
     )
     completed = []
 
-    def execute(reservation, **_):
+    def execute(reservation, **_) -> dict[str, Any]:
         assert sql(
             database,
             "select state,remote_identity from social.instagram_ingestion_dispatches where owner_token=%s",

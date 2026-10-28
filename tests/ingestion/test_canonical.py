@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import psycopg2
@@ -91,7 +92,7 @@ def database(tmp_path_factory, register_isolated_postgres):
         )
 
 
-def load(conn, table, **keys):
+def load(conn, table, **keys) -> dict[str, Any]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(f"select * from social.{table} where " + " and ".join(f"{k}=%s" for k in keys), list(keys.values()))
         return dict(cur.fetchone() or {})
@@ -410,7 +411,7 @@ def test_comment_native_date_repairs_only_missing_or_epoch_without_losing_reply(
             )
         before = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="date-reply")
         if native is not None:
-            reply["created_at"] = int(native.timestamp())
+            reply["created_at"] = int(native.timestamp())  # pyright: ignore[reportArgumentType]
         write([reply], OBSERVED)
         after = load(conn, "instagram_comments", post_id=ids["post_id"], comment_id="date-reply")
         assert after["created_at"] == (native if repair else saved)

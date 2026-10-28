@@ -12,7 +12,7 @@ import re
 from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.domain import Conflict, LostOwnership, fingerprint, stable_json
-from trr_backend.ingestion.persistence import _row
+from trr_backend.ingestion.persistence import _required_row, _row
 
 _SUFFIX = {"draining_comments": ":drain-comments", "media": ":media"}
 _PREVIOUS = {"draining_comments": "comments", "media": "draining_comments"}
@@ -148,7 +148,7 @@ def transition(store, *, run_id, account, generation, intent_hash, window_id, so
             **command,
             "phase": to_phase,
             "previous_phase": current,
-            "transitioned_at": _row(cur, "select clock_timestamp() as now")["now"].isoformat(),
+            "transitioned_at": _required_row(cur, "select clock_timestamp() as now")["now"].isoformat(),
         }
         cur.execute(
             """insert into social.instagram_ingestion_commands

@@ -141,6 +141,11 @@ class DetailSource:
         scraper = scraper_factory(
             cookies=dict(self.cookies), browser_account_id=self.browser_account_id, attach_auth_session=False
         )
+        optional_arguments: dict[str, Any] = (
+            {"check_cancelled_in_transaction": self.check_cancelled_in_transaction}
+            if self.check_cancelled_in_transaction is not None
+            else {}
+        )
         try:
             transport = transport_factory(
                 scraper=scraper,
@@ -149,11 +154,7 @@ class DetailSource:
                 deadline=time.monotonic() + self.deadline_seconds,
                 source_payload_observer=source_observer,
                 transaction=self.transaction,
-                **(
-                    {"check_cancelled_in_transaction": self.check_cancelled_in_transaction}
-                    if self.check_cancelled_in_transaction is not None
-                    else {}
-                ),
+                **optional_arguments,
             )
             return transport.fetch(self.shortcode, allow_public_fallback=False)
         finally:

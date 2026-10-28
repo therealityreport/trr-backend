@@ -139,6 +139,7 @@ def test_partial_body_failure_keeps_original_error_server_hold_and_closes_respon
     started = datetime.now(UTC)
     with pytest.raises(AvatarResolutionError) as caught:
         observe(activity, owned, "partial_fixture", source)
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.code == "network_error" and caught.value.failure.retry_at >= started + timedelta(
         seconds=37
     )

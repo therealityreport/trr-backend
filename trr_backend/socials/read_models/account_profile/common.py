@@ -268,6 +268,7 @@ if TYPE_CHECKING:
         collaborator_posted_since: datetime | None = None,
         conn: Any | None = None,
         comments_only: bool = False,
+        comment_filter: str | None = None,
         sort_by: str | None = None,
         sort_dir: str | None = None,
     ) -> list[dict[str, Any]]: ...

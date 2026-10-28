@@ -459,6 +459,7 @@ def subset_envelope_errors(proof, release, listing_hash, audited_keys, actual_ha
     )
     check(valid_results, "comment_certificate_target_schema_invalid")
     if valid_results:
+        assert results is not None
         for entry in results:
             if entry["source_page_evidence_complete"]:
                 pages = entry["source_page_evidence_manifest"]
@@ -472,7 +473,7 @@ def subset_envelope_errors(proof, release, listing_hash, audited_keys, actual_ha
                     stamp(pages[-1]["captured_at"]) == stamp(binding["receipt"]["observed_at"]),
                     "comment_target_source_page_receipt_clock_mismatch",
                 )
-    result_keys = [entry["shortcode"] for entry in results] if valid_results else []
+    result_keys = [entry["shortcode"] for entry in results] if valid_results and isinstance(results, list) else []
     check(
         valid_results and len(result_keys) == len(set(result_keys)) == len(keys) and set(result_keys) == set(keys),
         "comment_certificate_target_coverage_not_exact",
@@ -483,11 +484,12 @@ def subset_envelope_errors(proof, release, listing_hash, audited_keys, actual_ha
         valid_entries = isinstance(entries, list) and all(
             _legacy_comment_shape(field, entry, keys) for entry in entries
         )
-        if valid_entries:
+        if valid_entries and isinstance(entries, list):
             valid_entries = len({entry["shortcode"] for entry in entries}) == len(entries)
         check(valid_entries, "comment_certificate_unclassified_or_foreign_diagnostics")
-        if valid_results and valid_entries:
+        if valid_results and valid_entries and isinstance(results, list):
             by_key = {entry["shortcode"]: entry for entry in results}
+            assert entries is not None
             for entry in entries:
                 if entry["shortcode"] not in by_key:
                     check(False, "comment_certificate_target_coverage_not_exact")
@@ -1607,6 +1609,7 @@ def audit_target(
                 and saved.get("source_snapshot_type") == "full_comments_scrape",
                 "comment_media_source_clock_mismatch",
             )
+            assert item.observed_at is not None
             check(
                 (saved.get("raw_data") or {}).get("ingestion_media")
                 == {"version": MEDIA_VERSION, "observed_at": item.observed_at.isoformat()},

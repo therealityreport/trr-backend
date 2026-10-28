@@ -236,9 +236,11 @@ def _runtime_checks(conn, target):
         result = dict(cur.fetchone())
     from trr_backend.ingestion.workflows import RuntimeConfig
 
-    result["run_migrations"] = RuntimeConfig(
-        target.runtime_dsn, target.workflow_version, runtime_role=target.role
-    ).dbos_config()["run_migrations"]
+    result["run_migrations"] = (
+        RuntimeConfig(target.runtime_dsn, target.workflow_version, runtime_role=target.role)
+        .dbos_config()
+        .get("run_migrations")
+    )
     result["checked"] = True
     result["ready"] = bool(
         result["role"] == target.role
@@ -266,6 +268,7 @@ def run(target: Target, *, connect=_connect, migrate=_migrate):
             if role is not None and not _restricted(role, target.connection_limit):
                 raise BootstrapError("EXISTING_ROLE_IS_NOT_RESTRICTED")
             if target.apply and role is None:
+                assert target.password is not None
                 verifier = extensions.encrypt_password(target.password, target.role, conn, algorithm="scram-sha-256")
                 with conn.cursor() as cur:
                     cur.execute(

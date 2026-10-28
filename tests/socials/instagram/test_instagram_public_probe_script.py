@@ -752,6 +752,7 @@ def test_probe_resume_keeps_current_flags_and_normalizes_legacy_sample_without_r
     original_path = tmp_path / "original-input.json"
     original_path.write_text(original_text)
     config = replace(_config(tmp_path), resume=True)
+    assert config.state_file is not None
     config.state_file.write_text(original_text)
 
     def unexpected(*_args):

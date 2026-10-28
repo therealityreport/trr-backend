@@ -40,7 +40,7 @@ def test_guard_rejects_changed_pair_in_full_partial_and_domain_duplicate_jars(fi
             operation()
         assert str(caught.value) == "instagram_credential_identity_mismatch"
         assert "private" not in repr(caught.value) + repr(guard)
-    for jar in (requests.cookies.RequestsCookieJar(), httpx.Cookies()):
+    for jar in (requests.cookies.RequestsCookieJar(), httpx.Cookies()):  # pyright: ignore[reportAttributeAccessIssue]
         jar.update(COOKIES)
         jar.set(field, "forbidden-private-cookie", domain=".instagram.com", path="/")
         with pytest.raises(CredentialIdentityMismatch):
@@ -83,7 +83,7 @@ def test_strict_scraper_never_constructs_or_selects_pool_or_attaches_ambient_aut
         assert instance._request_cookies() == COOKIES and instance.get_headers()["x-csrftoken"] == "old-csrf"
         assert instance._rotate_active_identity(username="bravotv", reason="fixture") is False
         assert instance._auth_session is None and session.trust_env is False
-        assert session.get_adapter("https://www.instagram.com").max_retries.total == 0
+        assert session.get_adapter("https://www.instagram.com").max_retries.total == 0  # pyright: ignore[reportAttributeAccessIssue]
         instance.attach_auth_session(SimpleNamespace(cookies={"sessionid": "other", "ds_user_id": "other"}))
         pytest.fail("strict scraper attached divergent identity")
     except CredentialIdentityMismatch:
@@ -188,8 +188,10 @@ def test_posts_browser_send_rebuilds_cookie_list_from_pinned_state_not_stale_sna
     response = SimpleNamespace(
         status_code=200, headers={}, text="<html>fixture</html>", url="https://www.instagram.com/bravotv/"
     )
+    assert instance._fetcher is not None
     instance._fetcher.async_fetch = AsyncMock(return_value=response)
     asyncio.run(instance._fetch_page(response.url, referer=response.url))
+    assert instance._fetcher.async_fetch.await_args is not None
     outgoing = instance._fetcher.async_fetch.await_args.kwargs["cookies"]
     assert {cookie["name"]: cookie["value"] for cookie in outgoing} == COOKIES
     assert instance._request_count == 1

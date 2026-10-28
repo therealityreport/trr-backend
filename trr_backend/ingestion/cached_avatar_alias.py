@@ -720,6 +720,8 @@ def bridge_cached_avatars(snapshot, *, loader, store, owned, storage_factory, ca
             store.check_owner(**owned, connection=conn)
             if avatar.cached_hosted_url and not relevant:
                 continue  # Ordinary native exact-reference cached version.
+            if reference is None:
+                raise MediaIncomplete("cached_avatar_alias_proof_invalid")
             cohort = read_cohort(cur, avatar.username, reference)
             if avatar.cached_hosted_url:
                 roots = [(r, p) for r, p in relevant if p["parent_evidence_id"] is None]
@@ -820,8 +822,8 @@ def bridge_cached_avatars(snapshot, *, loader, store, owned, storage_factory, ca
             "current_source_evidence_id": current_id,
             "current_source_evidence_sha256": ordinary.content_hash,
             "current_cohort_sha256": fingerprint(cohort),
-            "parent_evidence_id": str(parent_row["evidence_id"]) if parent is not None else None,
-            "parent_evidence_sha256": parent_row["content_hash"] if parent is not None else None,
+            "parent_evidence_id": str(parent_row["evidence_id"]) if parent_row is not None else None,
+            "parent_evidence_sha256": parent_row["content_hash"] if parent_row is not None else None,
             **verified,
         }
         validate_payload(proof)

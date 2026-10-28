@@ -24,9 +24,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 if __package__ in {None, ""}:
@@ -252,7 +254,7 @@ def start_abort_reporter(abort, emit):
 class LocalDispatch:
     """Serial dispatch owner with bounded, independently reaped comment children."""
 
-    def __init__(self, execute, abort):
+    def __init__(self, execute: Callable[..., Any], abort):
         self.execute, self.abort = execute, abort
         self.latest = None
         self.active = {}

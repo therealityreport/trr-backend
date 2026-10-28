@@ -117,8 +117,8 @@ def project_reply_page(payload: Mapping[str, Any], parent: str, *, rest: bool = 
         data = payload.get("data")
         connection = data.get(CONNECTION) if isinstance(data, Mapping) else None
         present = isinstance(connection, Mapping) and isinstance(connection.get("edges"), list)
-        rows = connection.get("edges") if present else None
-        info = connection.get("page_info") if present else None
+        rows = connection.get("edges") if present and isinstance(connection, Mapping) else None
+        info = connection.get("page_info") if present and isinstance(connection, Mapping) else None
         info = info if isinstance(info, Mapping) else {}
         more, cursor = info.get("has_next_page"), info.get("end_cursor")
     identities = _safe_rows(rows or [], parent)
@@ -134,7 +134,7 @@ def project_reply_page(payload: Mapping[str, Any], parent: str, *, rest: bool = 
 
 def _embed_replies(html: str, parent: str) -> dict[str, Any]:
     identities: set[str] = set()
-    stack = list(_iter_data_sjs_payloads(html))
+    stack: list[Any] = list(_iter_data_sjs_payloads(html))
     while stack:
         node = stack.pop()
         if isinstance(node, Mapping):

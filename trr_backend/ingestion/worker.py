@@ -131,7 +131,7 @@ class Worker:
         if any(not decision.canonical_identity.get(key) for key in ("post_id", "catalog_post_id", "canonical_post_id")):
             raise ValueError("Cache settlement requires complete canonical identities")
         self.store.acquire(**owned)
-        identity = dict(decision.canonical_identity)
+        identity: dict[str, Any] = dict(decision.canonical_identity)
         # Historical evidence belongs to its original run/target. Carry its
         # validated reference as provenance, never as the current receipt's FK.
         identity["cache_source"] = decision.evidence_reference or {"reason": decision.reason}
@@ -236,11 +236,12 @@ class Worker:
             elif owned["target_key"].startswith("profile:"):
                 from trr_backend.ingestion.profiles import ProfileActivity
 
-                if self.profile_source is None:
+                profile_source = self.profile_source
+                if profile_source is None:
                     raise ValueError("Compatible profile source is unavailable")
                 result = ProfileActivity(self.store).execute(
                     **args,
-                    provider=lambda: self.profile_source(context, owned),
+                    provider=lambda: profile_source(context, owned),
                     storage=lambda: self.media_storage(context, owned),
                 )
             else:

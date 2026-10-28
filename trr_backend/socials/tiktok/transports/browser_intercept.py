@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.tiktok.constants import TIKTOK_DEFAULT_MAX_POSTS, TIKTOK_POSTS_PER_PAGE
 from trr_backend.socials.tiktok.models import TikTokPost, TikTokScrapeConfig
@@ -12,6 +12,40 @@ logger = logging.getLogger(__name__)
 
 class BrowserInterceptTransportMixin:
     """Scrape by scrolling a headless browser and intercepting TikTok's own API responses."""
+
+    if TYPE_CHECKING:
+        # State and sibling-mixin methods supplied by ``TikTokScraper`` and the other mixins it composes.
+        cookies: dict[str, str]
+        last_retrieval_meta: dict[str, Any]
+
+        @staticmethod
+        def _coerce_timestamp(value: Any) -> int: ...
+        def _get_headers(self, referer: str | None = None) -> dict: ...
+        def fetch_user_detail(self, username: str, delay: float = 2.0) -> dict | None: ...
+        def build_profile_snapshot(
+            self,
+            username: str,
+            *,
+            user_data: dict | None = None,
+            html_data: dict | None = None,
+        ) -> dict[str, Any]: ...
+        def _parse_post_item(self, item: dict, config: TikTokScrapeConfig) -> TikTokPost: ...
+        def _emit_progress(
+            self,
+            progress_cb: Callable[[dict[str, Any]], None] | None,
+            *,
+            phase: str,
+            pages_scanned: int,
+            posts_checked: int,
+            matched_posts: int,
+        ) -> None: ...
+        def _set_retrieval_meta(
+            self,
+            *,
+            context_mode: str | None = None,
+            auth_mode: str | None = None,
+            **values: Any,
+        ) -> None: ...
 
     def _browser_cookie_payload(self) -> list[dict[str, Any]]:
         """Convert flat cookie dict to Playwright's ``add_cookies`` format."""

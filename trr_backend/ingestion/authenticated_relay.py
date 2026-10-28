@@ -99,8 +99,11 @@ class WwwRelayContext:
             "fb_dtsg": _module(html, "DTSGInitialData").get("token"),
             "lsd": _module(html, "LSD").get("token"),
         }
-        if any(not isinstance(value, str) or not value.strip() for value in tokens.values()):
-            raise ValueError("native_relay_tokens_missing")
+        checked_tokens: dict[str, str] = {}
+        for key, value in tokens.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("native_relay_tokens_missing")
+            checked_tokens[key] = value
         logged_in, threads = _provider(html, "4150"), _provider(html, "23962")
         if not logged_in:
             raise ValueError("native_relay_not_authenticated")
@@ -113,7 +116,7 @@ class WwwRelayContext:
             "fb_api_caller_class": "RelayModern",
             "server_timestamps": "true",
         }
-        form.update(tokens)
+        form.update(checked_tokens)
         site = _module(html, "SiteData")
         # Match the document's getAsyncParams mapping. Client revision and DPR
         # were absent from the former hand-built request envelope.
@@ -206,10 +209,10 @@ class AuthenticatedRelayPageClient:
             follow_redirects=False,
             timeout=20,
         )
-        self._context = None
-        self._referer = None
-        self._bootstrap_html = None
-        self._shortcode = None
+        self._context: WwwRelayContext | None = None
+        self._referer: str | None = None
+        self._bootstrap_html: str | None = None
+        self._shortcode: str | None = None
         self.last_diagnostic = None
 
     def close(self):
@@ -328,6 +331,9 @@ class AuthenticatedRelayPageClient:
     def _provenance(self, *, media_id, cursor, parent_id, initial):
         from trr_backend.ingestion.authenticated_relay_contract import operation
 
+        context = self._context
+        if context is None:
+            raise ValueError("native_relay_bootstrap_required")
         doc, name = operation(parent=parent_id is not None, initial=initial)
         return {
             "adapter_family": AUTH_RELAY_FAMILY,
@@ -339,8 +345,8 @@ class AuthenticatedRelayPageClient:
             "sort_order": "native_default" if parent_id else "popular",
             "page_size": None if initial else (5 if parent_id else 10),
             "media_id": media_id,
-            "relay_logged_in": self._context.logged_in,
-            "relay_threads_style": self._context.threads_style,
+            "relay_logged_in": context.logged_in,
+            "relay_threads_style": context.threads_style,
         }
 
     def fetch_root_page(self, *, media_id):
@@ -351,7 +357,7 @@ class AuthenticatedRelayPageClient:
         return self._query(form, media_id=media_id, cursor=None, parent_id=None, initial=True)
 
     def root_page(self):
-        if self._context is None or self._bootstrap_html is None:
+        if self._context is None or self._bootstrap_html is None or self._shortcode is None or self._referer is None:
             raise ValueError("native_relay_bootstrap_required")
         from trr_backend.ingestion.authenticated_bootstrap import AuthenticatedBootstrapError, extract_parent_bootstrap
         from trr_backend.socials.instagram.child_reply_probe import media_id_from_shortcode

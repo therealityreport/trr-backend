@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -170,7 +171,7 @@ def _fixture(*, attachment=False, comment=False, all_roles=False):
         True,
         include_comment_avatars=all_roles,
     )
-    result = mirror_snapshot(source, PureStorage(), check=lambda: None, request=lambda: None)
+    result = mirror_snapshot(source, cast(Any, PureStorage()), check=lambda: None, request=lambda: None)
     payload = serialize_media_result(result)
     evidence = Evidence.capture(
         source_identity="instagram:media:Fixture",
@@ -495,12 +496,14 @@ class MediaAuditOffline(unittest.TestCase):
     def test_already_applied_attachment_is_independent_and_baseline_is_preapply(self):
         values, source, result = fixture(attachment=True)
         before = deepcopy(values["comments"][0])
+        assert source.comments[0].attachment_refresh is not None
         self.assertNotEqual(attachment_baseline(before), source.comments[0].attachment_refresh.baseline_sha256)
         checks = []
         native = audit.verify_attachment(
             source.comments[0], before, source, lambda ok, code: checks.append(code) if not ok else None
         )
         self.assertEqual(checks, [])
+        assert native is not None
         self.assertEqual(native["kind"], "attachment_refresh")
         self.assertEqual(values["comments"][0], before)
         report = audit.audit_target(**values)
@@ -511,6 +514,7 @@ class MediaAuditOffline(unittest.TestCase):
 
     def test_attachment_version_only_and_corruption_fail_closed(self):
         values, source, _ = fixture(attachment=True)
+        assert source.comments[0].attachment_refresh is not None
         applied = replace(
             source.comments[0],
             attachment_refresh=None,
@@ -545,6 +549,7 @@ class MediaAuditOffline(unittest.TestCase):
         saved["media_urls"] = [new_gif]
         saved["raw_data"]["giphy_media_info"] = {"id": "789", "images": {"fixed_height": {"url": new_gif}}}
         old = source.comments[0]
+        assert old.attachment_refresh is not None
         item = replace(
             old,
             observed_at=current,
@@ -555,6 +560,7 @@ class MediaAuditOffline(unittest.TestCase):
         checks = []
         proof = audit.verify_attachment(item, saved, source, lambda ok, code: checks.append(code) if not ok else None)
         self.assertEqual(checks, [])
+        assert proof is not None
         self.assertEqual(proof["native_gif_id"], "789")
         self.assertTrue(proof["retained_history"]["current_selection_requires_separate_deep_comment_proof"])
         self.assertEqual(proof["retained_history"]["proof"]["native_gif_id"], "456")
@@ -571,6 +577,7 @@ class MediaAuditOffline(unittest.TestCase):
         checks = []
         proof = audit.verify_attachment(item, saved, source, lambda ok, code: checks.append(code) if not ok else None)
         self.assertEqual(checks, [])
+        assert proof is not None
         self.assertEqual(proof["native_gif_id"], "456")
         del saved["raw_data"]["giphy_media_info"]
         audit.verify_attachment(item, saved, source, lambda ok, code: checks.append(code) if not ok else None)

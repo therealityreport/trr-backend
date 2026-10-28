@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -47,13 +48,15 @@ def clear_isolated_state(database):
             social.account_auth_cooldown,social.instagram_detail_request_lanes cascade""")
 
 
-def sql(database, statement, params=()):
+def sql(database, statement, params=()) -> Any:
     with database[1]() as conn, conn.cursor() as cur:
         cur.execute(statement, params)
         return cur.fetchall() if cur.description else None
 
 
-def candidate(database, stage="post_details", *, workers=12, comments_workers=24, account="bravotv", tasks=None):
+def candidate(
+    database, stage="post_details", *, workers=12, comments_workers=24, account="bravotv", tasks=None
+) -> dict[str, Any]:
     intent = RunIntent(
         account=account,
         scope="recent_window",
@@ -127,7 +130,7 @@ def admission(database, *, env=None, identity_key=None, probe_available=True):
             finally:
                 active.pop()
 
-    def probe(**kwargs):
+    def probe(**kwargs) -> dict[str, Any]:
         assert not active, "Fresh-session probe ran inside capacity read transaction"
         probes.append(kwargs)
         return {"available": probe_available}
@@ -723,13 +726,13 @@ def test_scheduler_with_real_admission_reserves_and_dispatches_proved_media_desp
     workflow = WorkflowStore(database[1], execution_placement="local")
     item = workflow.seed(bounded.item)
     subject, probes = admission(database, env=bounded.env)
-    snapshot = subject._snapshot("bravotv", item["run_id"])
+    snapshot = subject._snapshot("bravotv", item["run_id"])  # pyright: ignore[reportArgumentType]
     assert snapshot["run"]["_comments_ready"] is True and snapshot["counts"] == []
     assert snapshot["run"]["_bounded_window"]["phase"] == "media"
-    assert subject._fits(snapshot, "media_mirror", "bravotv", run_id=item["run_id"])
+    assert subject._fits(snapshot, "media_mirror", "bravotv", run_id=item["run_id"])  # pyright: ignore[reportArgumentType]
     proof_calls, dispatched = [], []
 
-    def proved_media(_cur, run, _item, _now, *, advance_cursor=False, full_cycle=False):
+    def proved_media(_cur, run, _item, _now, *, advance_cursor=False, full_cycle=False) -> dict[str, Any]:
         proof_calls.append((run["_bounded_window"]["phase"], advance_cursor, full_cycle))
         return {"kind": "target", "stage": "media", "target_key": "candidate"}
 

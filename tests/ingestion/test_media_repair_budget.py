@@ -181,7 +181,9 @@ def setup(database, tmp_path, monkeypatch, *, failure_code="avatar_refresh_asset
     )
     checkpoint = {"public_recovery": {"no_improvement_passes": 2}, "retained": "unchanged"}
     for _ in range(3):
-        token = str(store.reserve(**owned, stage=Stage.MEDIA)["owner_token"])
+        reserve = store.reserve(**owned, stage=Stage.MEDIA)
+        assert reserve is not None
+        token = str(reserve["owner_token"])
         store.acquire(**owned, stage=Stage.MEDIA, owner_token=token)
         store.checkpoint_failure(
             **owned,

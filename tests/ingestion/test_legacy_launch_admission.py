@@ -42,9 +42,9 @@ def test_legacy_instagram_mutation_is_rejected_before_dispatch(monkeypatch, name
     with pytest.raises(HTTPException) as caught:
         result = function(**kwargs)
         if inspect.isawaitable(result):
-            asyncio.run(result)
+            asyncio.run(result)  # pyright: ignore[reportArgumentType]
     assert caught.value.status_code == 409
-    assert caught.value.detail["code"] == "instagram_v2_owns_launches"
+    assert caught.value.detail["code"] == "instagram_v2_owns_launches"  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(

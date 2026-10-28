@@ -29,6 +29,7 @@ def test_committed_authorization_is_reconciled_without_another_grant(monkeypatch
 
     monkeypatch.setattr(operator, "connect", lambda: JournalConnection([]))
     recovered = operator.reconcile_window("source", "workflow")
+    assert recovered is not None
     assert recovered is window and recovered["generation"] == 3
     assert recovered["deadline_at"] == "2026-10-26T22:00:00+00:00"
     with pytest.raises(RuntimeError, match="different window"):
@@ -145,6 +146,7 @@ def test_comment_children_are_drained_before_media_phase_command(monkeypatch):
         {"run_id": "run", "account": "bravotv", "generation": 5},
         {"window_id": "window", "source_revision": "source", "expected_intent_hash": "digest"},
     )
+    assert result is not None
     assert result["to_phase"] == "media" and events == ["drained", "media"]
 
 

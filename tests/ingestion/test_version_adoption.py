@@ -138,7 +138,9 @@ def test_atomic_adoption_changes_only_version_and_one_idempotent_journal(databas
     assert results[0]["workflow_version"] == ADOPTED_WORKFLOW_VERSION
     assert results[0]["state"] == "cancelled"
     after = snapshot(database)
+    assert after["runs"] is not None
     assert after["runs"][0][0].pop("workflow_version") == ADOPTED_WORKFLOW_VERSION
+    assert before["runs"] is not None
     assert before["runs"][0][0].pop("workflow_version") == "instagram-ingestion-v1"
     assert after == before
     assert sql(database, "select count(*) from social.instagram_ingestion_commands")[0][0] == commands + 1
@@ -359,7 +361,9 @@ def test_adoption_preserves_nonempty_observations_receipts_and_canonical_history
     assert datetime.fromisoformat(before["receipts"][0][0]["observed_at"]) == datetime(2026, 8, 1, tzinfo=UTC)
     adopt(database, request)
     after = snapshot(database)
+    assert before["runs"] is not None
     before["runs"][0][0].pop("workflow_version")
+    assert after["runs"] is not None
     after["runs"][0][0].pop("workflow_version")
     assert after == before
     assert sql(database, "select * from social.test_canonical where run_id=%s", (request.run_id,)) == canonical_before

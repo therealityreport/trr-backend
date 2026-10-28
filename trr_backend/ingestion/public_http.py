@@ -46,9 +46,9 @@ class PublicDocumentSession(Session):
             raise ValueError("Public document transport cannot retry implicitly")
         self.adapters[prefix] = adapter
 
-    def request(self, method, url, **kwargs):
+    def request(self, method, url, *args, **kwargs):
         try:
-            return super().request(method, url, **kwargs)
+            return super().request(method, url, *args, **kwargs)
         except RequestException:
             # Preserve the observed session's counted, redacted failure path.
             raise requests.RequestException("Public document request failed") from None

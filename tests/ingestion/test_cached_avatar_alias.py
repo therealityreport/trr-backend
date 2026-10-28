@@ -80,7 +80,9 @@ def test_exact_full_path_and_immutable_query_free_reference():
     ]
     cohort = alias.registry_cohort(rows, "owner", OLD)
     assert len(cohort) == 1
-    assert alias.select_candidate(cohort, OLD, OBSERVED)["sha256"] == SHA
+    select_candidate = alias.select_candidate(cohort, OLD, OBSERVED)
+    assert select_candidate is not None
+    assert select_candidate["sha256"] == SHA
 
 
 @pytest.mark.parametrize(
@@ -279,8 +281,8 @@ def prepare(snapshot_workflow_database, monkeypatch, *, acquire=True, historical
             ),
         )
     client = Storage()
-    client.digest_object = Mock(return_value={"sha256": SHA, "bytes": len(DATA)})
-    client.close = Mock()
+    client.digest_object = Mock(return_value={"sha256": SHA, "bytes": len(DATA)})  # pyright: ignore[reportAttributeAccessIssue]
+    client.close = Mock()  # pyright: ignore[reportAttributeAccessIssue]
     backend = storage(client=client)
     hosted_url = backend._url(alias.expected_key(handle, SHA, OLD))
     with tx() as conn, conn.cursor() as cur:
@@ -514,6 +516,7 @@ def test_actual_activity_ordinary_snapshot_reload_canonical_receipt_and_replay(s
         parser_version=MEDIA_RESULT_REPLAY_VERSION,
         pinned=True,
     )
+    assert parsed.result is not None
     assert parsed.result.snapshot.avatars[0].source_url == OLD
     assert parsed.result.avatars[0]["observed_at"] == utc_timestamp(BYTE_CLOCK)
     assert post["owner_profile_pic_url"] == OLD

@@ -252,7 +252,12 @@ def date_proof(
     card_owner = card.node.get("owner") or card.node.get("user")
     if isinstance(card_owner, dict):
         detail_owner = normalized.owner
-        if card_owner.get("username") and str(card_owner["username"]).casefold() != detail_owner.username.casefold():
+        if detail_owner is None:
+            raise InvalidSourceError("Permalink date evidence has no native owner")
+        if (
+            card_owner.get("username")
+            and str(card_owner["username"]).casefold() != (detail_owner.username or "").casefold()
+        ):
             raise InvalidSourceError("Permalink owner differs from the native card owner")
         wanted = identity_fields(card_owner)
         if wanted and not identity_matches(actual, wanted):
@@ -639,6 +644,8 @@ class OrderedListingActivity:
                     )
                 next_target = None
                 if not coverage["discovery_complete"]:
+                    if page.end_cursor is None:
+                        raise InvalidSourceError("More listing pages require a cursor")
                     next_target = page_target(page.end_cursor)
                     blocked = "ordered_page_budget_exhausted" if coverage["coverage_unresolved"] else None
                     cur.execute(

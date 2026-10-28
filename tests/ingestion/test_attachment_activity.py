@@ -159,7 +159,7 @@ def test_exact_two_attachments_mirror_without_post_or_avatar_requests(monkeypatc
     receipt, store, storage = run(source)
     assert source == original
     assert len(storage.calls) == 2 and store.requests == 2
-    assert [call[0] for call in storage.calls] == [comment.attachment_refresh.source_url for comment in source.comments]
+    assert [call[0] for call in storage.calls] == [comment.attachment_refresh.source_url for comment in source.comments]  # pyright: ignore[reportOptionalMemberAccess]
     assert all("unknown-" in call[1]["root"] and call[1]["name"] == "media-01" for call in storage.calls)
     identity = receipt["canonical_identity"]
     assert identity["kind"] == "comment_attachments"

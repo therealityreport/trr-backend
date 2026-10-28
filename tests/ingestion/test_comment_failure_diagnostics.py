@@ -40,9 +40,13 @@ def test_fixed_basis_explains_true_malformed_broad_and_legacy_signals(payload, b
     assert projected["scan_truncated"] is False
     # A diagnostic signal never substitutes for the maintained classifier.
     if basis != "legacy_rate_code":
-        assert comment_page_failure(payload)[0] == "rate_limited"
+        failure = comment_page_failure(payload)
+        assert failure is not None
+        assert failure[0] == "rate_limited"
     else:
-        assert comment_page_failure(payload)[0] == "source_incomplete"
+        failure = comment_page_failure(payload)
+        assert failure is not None
+        assert failure[0] == "source_incomplete"
 
 
 def test_multierror_projection_keeps_only_fixed_tokens_and_flags():
@@ -106,8 +110,11 @@ def test_first_public_basis_is_copied_reset_and_http_contract_is_unchanged():
         record_public_comment_failure_basis({"rate_limited": True}, public_only=True)
         record_public_comment_failure_basis({"feedback_required": True}, public_only=True)
         output = current_public_comment_failure_basis()
+        assert output is not None
         output["bases"].append("private-mutation-sentinel")
-        assert current_public_comment_failure_basis()["bases"] == ["explicit_rate_true"]
+        basis = current_public_comment_failure_basis()
+        assert basis is not None
+        assert basis["bases"] == ["explicit_rate_true"]
         http = {
             "event": "instagram_public_request_failed",
             "error_code": "rate_limited",
@@ -148,6 +155,7 @@ def test_public_adapter_records_raw_basis_before_sanitization_with_unchanged_fai
         )
         assert "private-cookie-sentinel" not in evidence.payload_json
         assert "please wait" not in evidence.payload_json.lower()
+        assert proof is not None
         assert proof["bases"] == ["please_wait_message_marker"]
         raise CommentSourceError("fixture native page rejected")
 
@@ -171,7 +179,9 @@ def test_async_context_does_not_leak_basis_to_other_attempt():
         record_public_comment_failure_basis({"rate_limited": True}, public_only=True)
         return current_public_comment_failure_basis()
 
-    assert asyncio.run(one())["bases"] == ["explicit_rate_true"]
+    basis = asyncio.run(one())
+    assert basis is not None
+    assert basis["bases"] == ["explicit_rate_true"]
     assert current_public_comment_failure_basis() is None
 
 
@@ -186,7 +196,9 @@ def test_reply_access_failure_code_has_safe_public_projection():
             "endpoint_category": "graphql",
         }
     )
-    assert current_public_diagnostic()["error_code"] == "reply_access_rejected"
+    diagnostic = current_public_diagnostic()
+    assert diagnostic is not None
+    assert diagnostic["error_code"] == "reply_access_rejected"
 
 
 @pytest.mark.parametrize(

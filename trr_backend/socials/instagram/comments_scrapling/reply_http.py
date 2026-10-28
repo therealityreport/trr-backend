@@ -11,6 +11,7 @@ import zlib
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -152,6 +153,7 @@ class SpoolResponse:
         self._release = release
         self.body_complete = body_complete
         self.cancelled_on_rejection = not body_complete
+        self.request_permit: Any = None
 
     def json(self):
         if not self.body_complete:

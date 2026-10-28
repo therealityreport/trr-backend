@@ -396,7 +396,7 @@ def test_native_comment_rejection_escapes_recovery_before_retry(status, code, re
             self._before_source_request = kwargs["before_source_request"]
             self._source_failure_observer = kwargs["source_failure_observer"]
             self._request_count = 0
-            self._http_client = self
+            self._http_client = self  # pyright: ignore[reportAttributeAccessIssue]
             self._http_client_lock = asyncio.Lock()
             self._max_transient_retries = 10
 

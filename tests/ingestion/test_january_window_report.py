@@ -2,6 +2,7 @@
 
 import json
 from io import BytesIO
+from typing import Any
 
 import pytest
 
@@ -31,7 +32,7 @@ class Connection:
         return self.rows
 
 
-def comment(native, parent=None, *, missing=False):
+def comment(native, parent=None, *, missing=False) -> dict[str, Any]:
     return {
         "shortcode": "post",
         "comment_id": native,
@@ -43,7 +44,7 @@ def comment(native, parent=None, *, missing=False):
     }
 
 
-def snapshot(comments):
+def snapshot(comments) -> dict[str, Any]:
     return {
         "comments": comments,
         "pages": [{"page_id": "old-page", "evidence_id": "old-evidence"}],
@@ -115,8 +116,8 @@ def test_media_counts_logical_slots_separately_from_full_object_reads(monkeypatc
         dict(comment("b"), hosted_media_urls=[base + "/object"]),
     ]
     response = BytesIO(b"preserved bytes")
-    response.url = base + "/object"
-    response.headers = {"Content-Length": "15"}
+    response.url = base + "/object"  # pyright: ignore[reportAttributeAccessIssue]
+    response.headers = {"Content-Length": "15"}  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: response)
     binding = [{"url": base, "verified": True}] if structured_binding else [base]
     result = operator.verify_new_media(before, after, binding)
@@ -241,7 +242,7 @@ def test_diagnostics_bounds_branch_detail_and_omits_requests_cursors_and_secrets
 
 def test_snapshot_projects_checkpoint_before_returning_saved_material(monkeypatch):
     class SnapshotConnection(Connection):
-        def fetchone(self):
+        def fetchone(self) -> dict[str, Any]:
             return {"account": "bravotv", "intent_hash": operator.INTENT, "execution_placement": "local"}
 
         def fetchall(self):

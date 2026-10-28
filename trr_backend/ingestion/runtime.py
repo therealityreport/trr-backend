@@ -139,13 +139,17 @@ def run_ingestion_activity(
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    if child.stdin is None or child.stdout is None:
+        child.kill()
+        raise RuntimeError("Activity child pipes were not created")
+    child_stdin, child_stdout = child.stdin, child.stdout
     output = bytearray()
     overflow = threading.Event()
 
     def read_output():
         try:
             while True:
-                block = child.stdout.read(4096)
+                block = child_stdout.read(4096)
                 if not block:
                     return
                 if len(output) + len(block) > ACTIVITY_OUTPUT_LIMIT_BYTES:
@@ -163,8 +167,8 @@ def run_ingestion_activity(
     try:
         reader.start()
         try:
-            child.stdin.write(json.dumps(safe, separators=(",", ":")).encode())
-            child.stdin.close()
+            child_stdin.write(json.dumps(safe, separators=(",", ":")).encode())
+            child_stdin.close()
         except BrokenPipeError:
             pass
         try:

@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,7 +22,7 @@ REASON = "public_source_profile_replacement"
 ACTOR = "fixture-operator"
 
 
-def sql(database, statement, args=()):
+def sql(database, statement, args=()) -> Any:
     with database[1]() as conn, conn.cursor() as cur:
         cur.execute(statement, args)
         return cur.fetchall() if cur.description else None

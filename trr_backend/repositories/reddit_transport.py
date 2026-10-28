@@ -773,8 +773,8 @@ def _restore_checkpoint(
     for continuation in copy.deepcopy(saved_continuations):
         if not isinstance(continuation, dict):
             raise RedditTransportError("Invalid Reddit checkpoint continuation")
-        parent = continuation.get("parent_id")
-        if parent != f"t3_{post_id}" and not re.fullmatch(r"t1_[a-z0-9]+", str(parent or "")):
+        parent = str(continuation.get("parent_id") or "")
+        if parent != f"t3_{post_id}" and not re.fullmatch(r"t1_[a-z0-9]+", parent):
             raise RedditTransportError("Invalid Reddit continuation parent")
         if not isinstance(continuation.get("depth"), int) or continuation["depth"] < 0:
             raise RedditTransportError("Invalid Reddit continuation depth")

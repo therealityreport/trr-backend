@@ -88,6 +88,7 @@ def test_transport_error_none_competing_and_preexisting_holds_remain_monotone(
     elif exception_delay is not None and exception_delay > 1e100:
         assert caught.value.failure.retry_at == datetime.max.replace(tzinfo=UTC)
     else:
+        assert caught.value.failure.retry_at is not None
         assert caught.value.failure.retry_at >= started + timedelta(
             seconds=max(value for value in (exception_delay, source_delay) if value is not None)
         )
@@ -141,6 +142,7 @@ def test_real_public_native_projection_and_retained_parse_keep_header_hold_and_d
     if delay is None:
         assert caught.value.failure.retry_at is None
     else:
+        assert caught.value.failure.retry_at is not None
         assert caught.value.failure.retry_at >= started + timedelta(seconds=delay)
 
 
@@ -175,6 +177,7 @@ def test_observed_header_survives_read_or_body_limit_failure(avatars, failure, p
     with pytest.raises(AvatarResolutionError) as caught:
         activity.execute(**owned, handles=[username], source_factory=lambda _: source)
     assert caught.value.failure.code == public_code
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.retry_at >= started + timedelta(seconds=37)
     assert source.retry_after_seconds == 37 and successes == [] and failures == [(health_code, 1)]
     assert session.closed and len(session.calls) == 1
@@ -195,6 +198,7 @@ def test_later_weaker_profile_header_cannot_shorten_source_wait(avatars):
     with pytest.raises(AvatarResolutionError) as caught:
         activity.execute(**owned, handles=["weaker" + uuid4().hex[:10]], source_factory=lambda _: source)
     assert caught.value.failure.code == "rate_limited" and source.retry_after_seconds == 90
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.retry_at >= started + timedelta(seconds=90)
     assert successes == [1] and failures == [("rate_limited", 2)] and session.closed
 
@@ -259,6 +263,7 @@ def test_real_received_header_survives_body_deadline_without_health_penalty(avat
     else:
         assert row["server_retry_after_until"] >= started + timedelta(seconds=37)
         assert row["cooldown_until"] >= row["server_retry_after_until"]
+        assert source._retry_after_permit is not None
         assert source._retry_after_permit.request_number == 2
 
 
@@ -317,6 +322,7 @@ def test_header_abort_retains_original_control_error_and_exact_received_permit(a
     with pytest.raises(type(original)) as caught:
         activity.execute(**owned, handles=[username], source_factory=lambda _: source)
     assert caught.value is original and session.closed and len(session.calls) == 1
+    assert source._retry_after_permit is not None
     assert source._retry_after_permit.request_number == 1
     row = _lane(avatars, activity)
     assert row["consecutive_failures"] == 0 and row["last_error_code"] is None and failures == []

@@ -120,7 +120,8 @@ def _scan_subject(send, result, shortcode, targets):
         if comment_id in targets:
             if targets[comment_id] != parent:
                 raise ProbeStoppedError("reply_parent_mismatch")
-            user = row.get("user") if isinstance(row.get("user"), dict) else {}
+            raw_user = row.get("user")
+            user = raw_user if isinstance(raw_user, dict) else {}
             result["target_metadata"][comment_id] = {
                 "parent_id": parent,
                 "is_private": user.get("is_private") if type(user.get("is_private")) is bool else None,
@@ -201,7 +202,7 @@ def probe_authenticated_comment_ids(
             },
         )
         report["requests"] += 1
-        event = {"kind": kind}
+        event: dict[str, Any] = {"kind": kind}
         report["events"].append(event)
         response = client.send(request, stream=True, follow_redirects=False)
         try:

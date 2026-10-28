@@ -24,8 +24,10 @@ deny_unmocked_http = large.deny_unmocked_http
 def test_checkpoint_transfer_pair(database, large_baseline, fresh_public_lanes, monkeypatch, tmp_path):
     baseline_path = Path(os.environ["TRR_CHECKPOINT_TRANSFER_BASELINE"])
     spec = importlib.util.spec_from_file_location("checkpoint_transfer_baseline", baseline_path)
-    baseline = importlib.util.module_from_spec(spec)
+    baseline = importlib.util.module_from_spec(spec)  # pyright: ignore[reportArgumentType]
+    assert spec is not None
     sys.modules[spec.name] = baseline
+    assert spec.loader is not None
     spec.loader.exec_module(baseline)
     current = comments.CommentActivity._persist_page
 
@@ -41,7 +43,7 @@ def test_checkpoint_transfer_pair(database, large_baseline, fresh_public_lanes, 
         class TracedCursor(RealDictCursor):
             measurements = sizes
 
-            def execute(self, query, params=None):
+            def execute(self, query, params=None):  # pyright: ignore[reportIncompatibleMethodOverride]
                 for value in params or ():
                     if isinstance(value, str) and value.startswith("{"):
                         self.measurements["json_parameter_bytes"] += len(value.encode())

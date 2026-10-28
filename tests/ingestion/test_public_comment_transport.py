@@ -4,6 +4,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from typing import Any
 from urllib.parse import parse_qs
 
 import httpx
@@ -130,7 +131,7 @@ def test_retained_shape_gif_parent_observer_dto_and_fresh_reply_hydration(monkey
     assert parsed_parent.text == "" and parsed_parent.raw_data["giphy_media_info"] == native["giphy_media_info"]
 
 
-def node(identity, count=0, **extra):
+def node(identity, count=0, **extra) -> dict[str, Any]:
     return {
         "pk": identity,
         "text": identity,
@@ -140,7 +141,7 @@ def node(identity, count=0, **extra):
     }
 
 
-def page(nodes, *, more=False, after=None, child=False, count=None):
+def page(nodes, *, more=False, after=None, child=False, count=None) -> dict[str, Any]:
     connection = {
         "edges": [{"node": item} for item in nodes],
         "page_info": {"has_next_page": more, "end_cursor": after},
@@ -204,7 +205,7 @@ def bootstrap():
     )
 
 
-def actual_parent_shape(identity, count=None):
+def actual_parent_shape(identity, count=None) -> dict[str, Any]:
     """Synthetic values with the exact retained public parent field shape."""
     return {
         "__typename": "XDTCommentDict",
@@ -597,6 +598,7 @@ def test_public_retained_provenance_replays_without_source_and_rejects_wrong_que
     )
     parsed = parse_comment_evidence(evidence, pinned=True)
     assert parsed.observed_at == OBSERVED and parsed.exhausted
+    assert parsed.cursor_provenance is not None
     assert parsed.cursor_provenance["adapter_family"] == "instagram_public_relay"
     state = {"version": 1, "observed": {}, "lanes": {}, "expected": None}
     first_payload = evidence.read(pinned=True)
@@ -972,6 +974,7 @@ def test_public_cookie_violation_opens_real_gate_immediately_without_another_sen
     if header is None:
         assert failure.retry_at is None
     else:
+        assert failure.retry_at is not None
         assert started + timedelta(seconds=37) <= failure.retry_at <= datetime.now(UTC) + timedelta(seconds=37)
     row = existing.query(fresh_public_lanes, "select * from social.instagram_detail_request_lanes")[0]
     assert row["cooldown_until"] == failure.retry_at and row["failure_generation"] == 1
@@ -1325,9 +1328,10 @@ def test_native_reply_expectation_survives_dto_and_resume_seed(count):
 
     native = actual_parent_shape("p", count)
     dto = maintained._graphql_comment_to_instagram_comment(native, shortcode="fixture", post_url="fixture")
+    assert dto is not None
     assert dto.reply_count == count and dto.child_comment_count == count
     assert dto.to_dict()["reply_count"] == count
-    restored = _seed_parents((SimpleNamespace(source_payload=native),), "fixture")[0]
+    restored = _seed_parents((SimpleNamespace(source_payload=native),), "fixture")[0]  # pyright: ignore[reportArgumentType]
     assert restored.reply_count == count and restored.child_comment_count == count
 
 

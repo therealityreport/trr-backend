@@ -581,6 +581,7 @@ def _inspect(cur, binding, release, listing, listing_hash):
                 pinned=source_row["source_run_state"] != "completed",
             )
             validate_detail(parsed_post)
+            assert parsed_post.post is not None
             native_post = _post_payload(
                 parsed_post.post, parsed_post.source_payload, common.ACCOUNT, parsed_post.observed_at
             )

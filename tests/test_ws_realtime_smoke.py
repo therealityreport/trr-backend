@@ -438,7 +438,7 @@ class TestRedisBrokerRecovery:
                 return None
 
             await broker.subscribe("room1", callback)
-            await _wait_until(lambda: broker.status()["reconnect_failures"] >= 1)
+            await _wait_until(lambda: broker.status()["reconnect_failures"] >= 1)  # pyright: ignore[reportOperatorIssue]
             status = broker.status()
             assert status["connected"] is False
             last_error: Any = status["last_error"]

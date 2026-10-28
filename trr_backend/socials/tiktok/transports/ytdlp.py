@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.tiktok.models import TikTokPost, TikTokScrapeConfig, _coerce_utc_datetime
 from trr_backend.socials.tiktok.parsing.ytdlp import find_ytdlp_cookie_file
@@ -25,6 +25,19 @@ logger = logging.getLogger(__name__)
 
 class YtDlpTransportMixin:
     """Scrape TikTok profiles through the ``yt-dlp`` CLI (no auth required)."""
+
+    if TYPE_CHECKING:
+        # State and sibling-mixin methods supplied by ``TikTokScraper`` and the other mixins it composes.
+        cookies: dict[str, str]
+
+        def _parse_ytdlp_metadata(self, data: dict, config: TikTokScrapeConfig) -> TikTokPost: ...
+        def _set_retrieval_meta(
+            self,
+            *,
+            context_mode: str | None = None,
+            auth_mode: str | None = None,
+            **values: Any,
+        ) -> None: ...
 
     # yt-dlp based fallback methods (no auth required)
 

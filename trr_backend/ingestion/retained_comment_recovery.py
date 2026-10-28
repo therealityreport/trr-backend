@@ -246,16 +246,17 @@ def _idle(target, now):
     )
 
 
+def _module_digest(module) -> str:
+    if module.__file__ is None:
+        raise RuntimeError(f"Parser module {module.__name__} has no source file")
+    return hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+
+
 def _parser_identity():
     from trr_backend.ingestion import canonical, comments
     from trr_backend.socials.instagram import post_normalizer
 
-    return fingerprint(
-        {
-            module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-            for module in (canonical, comments, post_normalizer)
-        }
-    )
+    return fingerprint({module.__name__: _module_digest(module) for module in (canonical, comments, post_normalizer)})
 
 
 def parser_implementation_fingerprint():

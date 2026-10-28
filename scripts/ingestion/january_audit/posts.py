@@ -187,6 +187,7 @@ def inspect(cur, binding, release, listing_report):
             failures.append({"shortcode": key, "codes": problems})
             continue
         source["detail_snapshot"] = proof
+        assert parsed.post is not None
         expected = _post_payload(parsed.post, source, common.ACCOUNT, parsed.observed_at)
         post, sidecar, catalog, catalog_sidecar, canonical = [
             record[name] or {} for name in ("post", "sidecar", "catalog", "catalog_sidecar", "canonical")
@@ -195,6 +196,7 @@ def inspect(cur, binding, release, listing_report):
             post.get("shortcode") == catalog.get("source_id") == canonical.get("source_id") == key,
             "canonical_shortcode_mismatch",
         )
+        assert parsed.post is not None
         check(str(post.get("media_id")) == str(parsed.post.source_id), "native_id_mismatch")
         check(common.START <= common.stamp(post["posted_at"]) < common.END, "canonical_date_outside_january")
         # Only fields actually attested by this capture are compared. Enrichment

@@ -44,7 +44,7 @@ class DispatchTurn:
         self._check()
 
     def acquire(self):
-        fetcher = importlib.import_module(__package__ + ".fetcher")
+        fetcher = importlib.import_module(".fetcher", __package__)
 
         self._check()
         if self.delay <= 0:
@@ -82,6 +82,8 @@ class DispatchTurn:
                             (*keys, self.delay, self.key),
                         )
                         row = cur.fetchone()
+                        if row is None:
+                            raise RuntimeError("Dispatch turn admission query returned no row")
                         if row["locked"]:
                             self.locked = True
                             break
@@ -149,7 +151,7 @@ class DispatchTurn:
             raise
 
     def finish(self, sent=False):
-        fetcher = importlib.import_module(__package__ + ".fetcher")
+        fetcher = importlib.import_module(".fetcher", __package__)
 
         if self.finished:
             return

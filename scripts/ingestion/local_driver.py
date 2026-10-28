@@ -16,10 +16,12 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 if __package__ in {None, ""}:
@@ -160,7 +162,7 @@ class DiagnosticAbort(threading.Event):
         super().__init__()
         self.diagnostic = None
         self._diagnostic_lock = threading.Lock()
-        self.lease_metadata = None
+        self.lease_metadata: Callable[[], Any] | None = None
         self.foreground_phase = "initializing"
         self._diagnostic_error = None
         self._diagnostic_metadata = {}
@@ -244,7 +246,11 @@ class DiagnosticAbort(threading.Event):
                     "lease_backend_pid": sample.backend_pid,
                     "query_state": "inflight" if sample.query_sequence > sample.completion_sequence else "complete",
                 }
-                if type(compared_at) in (int, float) and math.isfinite(compared_at):
+                if (
+                    isinstance(compared_at, (int, float))
+                    and not isinstance(compared_at, bool)
+                    and math.isfinite(compared_at)
+                ):
                     metadata.update(_heartbeat_metadata(sample, compared_at))
                     proof.update(
                         comparison_monotonic=compared_at,
@@ -253,7 +259,7 @@ class DiagnosticAbort(threading.Event):
                     )
                     record["heartbeat_age_scope"] = "watchdog_abort_comparison"
                 gap = captured.get("watchdog_wake_gap_seconds")
-                if type(gap) in (int, float) and math.isfinite(gap) and gap >= 0:
+                if isinstance(gap, (int, float)) and not isinstance(gap, bool) and math.isfinite(gap) and gap >= 0:
                     proof["watchdog_wake_gap_seconds"] = gap
                 record["abort_heartbeat"] = proof
                 record["last_select_scope"] = "captured_previous_completion"
@@ -317,7 +323,12 @@ class DiagnosticAbort(threading.Event):
                     record["sqlstate"] = state
             for key in ("heartbeat_age_seconds", "select_inflight_seconds", "last_select_seconds"):
                 value = metadata.get(key)
-                if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    and value >= 0
+                ):
                     record[key] = value
             pid = metadata.get("lease_backend_pid")
             if type(pid) is int and 0 < pid < 2**31:
@@ -420,6 +431,7 @@ class CoordinatorLease:
             try:
                 # Never queue SQL behind a heartbeat stuck on the same connection.
                 if self.acquired and not (self.monitor and self.monitor.is_alive()):
+                    assert self.connection is not None
                     with self.connection.cursor() as cur:
                         cur.execute(
                             "select pg_advisory_unlock(%s,%s)", (self.config.lock_namespace, self.config.lock_key)
@@ -448,6 +460,7 @@ class CoordinatorLease:
                 self._abort("lease_cleanup_failure", error=error)
             finally:
                 try:
+                    assert self.connection is not None
                     self.connection.close()
                 except Exception as error:
                     self._abort("lease_cleanup_failure", error=error, operation="close")
@@ -483,6 +496,7 @@ class CoordinatorLease:
             )
             self.select_started = started  # Legacy access only; diagnostics use the sample.
             try:
+                assert self.connection is not None
                 with self.connection.cursor() as cur:
                     cur.execute(
                         """select pg_backend_pid(),exists(select 1 from pg_locks

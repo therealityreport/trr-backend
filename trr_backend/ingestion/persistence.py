@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -81,6 +81,14 @@ def _row(cursor, query: str, params: tuple = ()) -> dict[str, Any] | None:
     cursor.execute(query, params)
     row = cursor.fetchone()
     return dict(row) if row else None
+
+
+def _required_row(cursor, query: str, params: tuple = ()) -> dict[str, Any]:
+    """Return the single row of a query that always yields one (aggregate or clock reads)."""
+    row = _row(cursor, query, params)
+    if row is None:
+        raise RuntimeError("Expected the query to return one row")
+    return row
 
 
 class Store:
@@ -209,7 +217,7 @@ class Store:
             if busy:
                 raise Conflict("Another active or uncertain execution occupies this account")
             self._expire_drained_dispatches(cur, run, expected_generation)
-            now = _row(cur, "select clock_timestamp() as now")["now"]
+            now = _required_row(cur, "select clock_timestamp() as now")["now"]
             cur.execute(
                 """update social.instagram_ingestion_runs set execution_hold_reason=null,
                 state='queued',generation=%s,execution_selection=null,updated_at=clock_timestamp()
@@ -835,10 +843,10 @@ class Store:
         """
         if connection is not None and connection.autocommit:
             raise ValueError("Ownership checks require an explicit transaction")
-        with (
-            nullcontext(connection) if connection is not None else self.transaction() as conn,
-            conn.cursor(cursor_factory=RealDictCursor) as cur,
-        ):
+        owner_scope: AbstractContextManager[Any] = (
+            nullcontext(connection) if connection is not None else self.transaction()
+        )
+        with owner_scope as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             run = self._execution_run(cur, run_id, account, shared_fence=stage == Stage.COMMENTS)
             if run["generation"] != generation or run["state"] not in {"queued", "running"}:
                 raise LostOwnership("Run execution is no longer current")
@@ -1215,7 +1223,7 @@ class Store:
                 return run["state"]
             intent = RunIntent.from_payload(run["intent"])
             required = [Stage.LISTING.value, *(stage.value for stage in intent.selected_tasks)]
-            summary = _row(
+            summary = _required_row(
                 cur,
                 """select
                 (select count(*) from social.instagram_ingestion_manifests

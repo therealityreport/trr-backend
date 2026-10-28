@@ -371,6 +371,7 @@ def test_selected_comments_admit_own_inventory_despite_other_unresolved_targets(
         )
     snapshot = load(snapshot_database, owned)
     assert snapshot.comments_complete
+    assert snapshot.inventory_fingerprint is not None
     assert snapshot.inventory_fingerprint["version"] == "instagram-media-inventory-v1"
 
 

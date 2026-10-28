@@ -4,6 +4,7 @@ import json
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -29,28 +30,29 @@ def test_first_cause_survives_cleanup_and_excludes_error_messages():
         heartbeat_age_seconds=1.2,
         select_inflight_seconds=0.9,
     )
-    first = dict(abort.diagnostic)
+    first = dict(abort.diagnostic)  # pyright: ignore[reportArgumentType, reportCallIssue]
     request_abort(abort, "dispatch_shutdown")
     request_abort(abort, "lease_cleanup_failure", error=RuntimeError("token"))
-    abort.lease_metadata = lambda: {"last_select_seconds": 99.0}
+    abort.lease_metadata = lambda: {"last_select_seconds": 99.0}  # pyright: ignore[reportAttributeAccessIssue]
     assert abort.is_set() and abort.diagnostic == first
     first.update(abort.context())
-    assert first["exception_class"] == "OperationalError" and first["sqlstate"] == "08006"
-    assert first["lease_backend_pid"] == 123
+    assert first["exception_class"] == "OperationalError" and first["sqlstate"] == "08006"  # pyright: ignore[reportArgumentType]
+    assert first["lease_backend_pid"] == 123  # pyright: ignore[reportArgumentType]
     assert "last_select_seconds" not in first
-    assert first["report_time_lease"]["last_select_seconds"] == 99.0
+    assert first["report_time_lease"]["last_select_seconds"] == 99.0  # pyright: ignore[reportArgumentType, reportCallIssue]
     assert not any(secret in json.dumps(first) for secret in ["secret", "password", "token"])
 
 
 def test_nonlease_abort_includes_cached_lease_context_and_tolerates_failed_context():
     abort = DiagnosticAbort()
-    abort.lease_metadata = lambda: {"lease_backend_pid": 314, "heartbeat_age_seconds": 0.1}
+    abort.lease_metadata = lambda: {"lease_backend_pid": 314, "heartbeat_age_seconds": 0.1}  # pyright: ignore[reportAttributeAccessIssue]
     request_abort(abort, "control_owner_lost", operation="decision")
     assert abort.context()["lease_backend_pid"] == 314
     assert abort.context()["heartbeat_age_seconds"] == 0.1
     broken = DiagnosticAbort()
-    broken.lease_metadata = lambda: (_ for _ in ()).throw(RuntimeError("secret"))
+    broken.lease_metadata = lambda: (_ for _ in ()).throw(RuntimeError("secret"))  # pyright: ignore[reportAttributeAccessIssue]
     request_abort(broken, "signal_requested")
+    assert broken.diagnostic is not None
     assert broken.is_set() and broken.diagnostic["origin"] == "signal_requested"
 
 
@@ -100,10 +102,10 @@ class OneTurn:
 
 def lease(abort):
     item = CoordinatorLease(None, SimpleNamespace(lock_namespace=11, lock_key=22), abort, clock=lambda: 10.0)
-    item.stop = OneTurn()
+    item.stop = OneTurn()  # pyright: ignore[reportAttributeAccessIssue]
     item.last_heartbeat = 7.9
     item.select_started = 8.2
-    item.last_select_seconds = 0.01
+    item.last_select_seconds = 0.01  # pyright: ignore[reportAttributeAccessIssue]
     item.backend_pid = 987
     item.heartbeat_sample = HeartbeatSample(7, 6, 7.9, 8.2, 0.01, 987)
     abort.lease_metadata = item._diagnostic_metadata
@@ -116,6 +118,7 @@ def test_watchdog_records_age_without_touching_connection():
     item.connection = object()
     item._watch_heartbeat()
     assert abort.is_set()
+    assert abort.diagnostic is not None
     assert abort.diagnostic["origin"] == "lease_heartbeat_deadline"
     assert abort.context()["heartbeat_age_seconds"] == pytest.approx(2.1)
     assert abort.context()["select_inflight_seconds"] == pytest.approx(1.8)
@@ -140,6 +143,7 @@ def test_monitor_records_safe_database_failure():
     item.connection = SimpleNamespace(cursor=cursor)
     item._monitor()
     assert abort.is_set()
+    assert abort.diagnostic is not None
     assert abort.diagnostic["origin"] == "lease_heartbeat_exception"
     assert abort.context()["sqlstate"] == "57P05"
 
@@ -156,6 +160,7 @@ def test_monitor_rejects_lost_or_changed_lease(identity):
     item.connection = SimpleNamespace(cursor=cursor)
     item._monitor()
     assert abort.is_set()
+    assert abort.diagnostic is not None
     assert abort.diagnostic["origin"] == "lease_heartbeat_exception"
     assert item.heartbeat_sample.completion_sequence == 6
 
@@ -189,6 +194,7 @@ def test_lease_metadata_failure_does_not_prevent_abort(monkeypatch):
     item = lease(abort)
     monkeypatch.setattr(item, "_diagnostic_metadata", lambda: (_ for _ in ()).throw(RuntimeError("secret")))
     item._abort("lease_cleanup_failure")
+    assert abort.diagnostic is not None
     assert abort.is_set() and abort.diagnostic["origin"] == "lease_cleanup_failure"
 
 
@@ -218,6 +224,7 @@ def test_control_owner_loss_is_distinct_and_cleanup_keeps_first_cause():
             dispatch=Dispatch(),
             abort=abort,
         )
+    assert abort.diagnostic is not None
     assert abort.is_set() and abort.diagnostic["origin"] == "control_owner_lost"
     assert abort.diagnostic["operation"] == "decision"
     assert abort.diagnostic["foreground_phase"] == "decision"
@@ -238,6 +245,7 @@ def test_reporter_failure_and_blocked_sink_cannot_delay_abort():
     reporter = start_abort_reporter(abort, emit)
     request_abort(abort, "signal_requested")
     assert abort.is_set() and entered.wait(1)
+    assert reporter is not None
     assert reporter.daemon and reporter.is_alive()
     release.set()
     reporter.join(1)
@@ -254,10 +262,10 @@ def test_reporter_start_failure_is_best_effort(monkeypatch):
 
 def test_dispatch_shutdown_with_plain_event_preserves_reaping():
     abort = threading.Event()
-    dispatch = LocalDispatch(None, abort)
+    dispatch = LocalDispatch(None, abort)  # pyright: ignore[reportArgumentType]
     dispatch.active = {"owner": object()}
     events = []
-    dispatch.pool = SimpleNamespace(shutdown=lambda **kw: events.append(("reaped", kw["wait"])))
+    dispatch.pool = SimpleNamespace(shutdown=lambda **kw: events.append(("reaped", kw["wait"])))  # pyright: ignore[reportAttributeAccessIssue]
     dispatch.drain = lambda *a, **kw: events.append(("drained", kw["closing"]))
     dispatch.close(None)
     assert abort.is_set() and events == [("reaped", True), ("drained", True)]
@@ -269,7 +277,7 @@ def test_blocked_optional_enrichment_does_not_delay_abort_reaping_or_minimal_rep
     entered, release, reaped, finished = (threading.Event() for _ in range(4))
     emitted = []
 
-    def hold():
+    def hold() -> dict[str, Any]:
         entered.set()
         release.wait(3)
         return {}
@@ -281,11 +289,11 @@ def test_blocked_optional_enrichment_does_not_delay_abort_reaping_or_minimal_rep
             return "08006"
 
     if blocked == "lease_metadata":
-        abort.lease_metadata = hold
+        abort.lease_metadata = hold  # pyright: ignore[reportAttributeAccessIssue]
     reporter = start_abort_reporter(abort, emitted.append)
-    dispatch = LocalDispatch(None, abort)
+    dispatch = LocalDispatch(None, abort)  # pyright: ignore[reportArgumentType]
     dispatch.active = {"owner": object()}
-    dispatch.pool = SimpleNamespace(shutdown=lambda **kw: reaped.set())
+    dispatch.pool = SimpleNamespace(shutdown=lambda **kw: reaped.set())  # pyright: ignore[reportAttributeAccessIssue]
     dispatch.drain = lambda *a, **kw: None
 
     def producer():
@@ -307,6 +315,7 @@ def test_blocked_optional_enrichment_does_not_delay_abort_reaping_or_minimal_rep
     finally:
         release.set()
         producer_thread.join(1)
+        assert reporter is not None
         reporter.join(1)
 
 
@@ -354,9 +363,9 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
     clock = [10.0]
     item = CoordinatorLease(None, None, abort, clock=lambda: clock[0])
     item.backend_pid = 987
-    item.config = SimpleNamespace(lock_namespace=11, lock_key=22)
+    item.config = SimpleNamespace(lock_namespace=11, lock_key=22)  # pyright: ignore[reportAttributeAccessIssue]
     item.heartbeat_sample = HeartbeatSample(last_completion=10.0, backend_pid=987)
-    abort.lease_metadata = item._diagnostic_metadata
+    abort.lease_metadata = item._diagnostic_metadata  # pyright: ignore[reportAttributeAccessIssue]
     asleep, wake, first_query, first_finish, first_published, second_start, second_query, second_finish = (
         threading.Event() for _ in range(8)
     )
@@ -392,7 +401,7 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
 
         yield SimpleNamespace(execute=execute, fetchone=lambda: (987, True))
 
-    item.stop = Stop()
+    item.stop = Stop()  # pyright: ignore[reportAttributeAccessIssue]
     item.connection = SimpleNamespace(cursor=cursor)
     monitor = threading.Thread(target=item._monitor, name="sample-monitor", daemon=True)
     watchdog = threading.Thread(target=item._watch_heartbeat, name="sample-watchdog", daemon=True)
@@ -410,6 +419,7 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
             clock[0] = 13.0
             wake.set()
             assert abort.wait(1)
+        assert abort.diagnostic is not None
         assert abort.diagnostic["foreground_phase"] == "before_finalize"
         captured = abort._diagnostic_metadata["heartbeat_sample"]
         # A later SELECT really runs/completes before the reporter starts.
@@ -424,6 +434,7 @@ def test_delayed_watchdog_and_late_report_cannot_mix_select_generations():
         clock[0] = 30.0
         emitted = []
         reporter = start_abort_reporter(abort, emitted.append)
+        assert reporter is not None
         reporter.join(1)
         context = emitted[1]
         proof = context["abort_heartbeat"]
@@ -456,13 +467,14 @@ def test_heartbeat_sample_is_immutable_and_phase_labels_are_fixed():
 
     sample = HeartbeatSample(query_sequence=3, completion_sequence=2)
     with pytest.raises(FrozenInstanceError):
-        sample.query_sequence = 4
+        sample.query_sequence = 4  # pyright: ignore[reportAttributeAccessIssue]
     abort = DiagnosticAbort()
     with foreground_phase(abort, "decision"):
         with foreground_phase(abort, "wait"):
             request_abort(abort, "signal_requested")
         assert abort.foreground_phase == "decision"
     assert abort.foreground_phase == "initializing"
+    assert abort.diagnostic is not None
     assert abort.diagnostic["foreground_phase"] == "wait"
     with pytest.raises(ValueError, match="Unknown foreground"):
         with foreground_phase(abort, "secret dynamic query"):
@@ -472,12 +484,12 @@ def test_heartbeat_sample_is_immutable_and_phase_labels_are_fixed():
 @pytest.mark.parametrize("waiting", [False, True])
 def test_worker_finalizer_and_nested_wait_capture_actual_foreground_phase(monkeypatch, waiting):
     abort = DiagnosticAbort()
-    dispatch = LocalDispatch(None, abort)
+    dispatch = LocalDispatch(None, abort)  # pyright: ignore[reportArgumentType]
 
     def fail_complete(*args, **kwargs):
         pytest.fail("An aborted finalizer must not complete the partition")
 
-    def tick(*args):
+    def tick(*args) -> dict[str, Any]:
         assert abort.foreground_phase == "scheduler_tick"
         return {"stop": "blocked"}
 
@@ -504,4 +516,5 @@ def test_worker_finalizer_and_nested_wait_capture_actual_foreground_phase(monkey
             abort=abort,
             before_finalize=finalize,
         )
+    assert abort.diagnostic is not None
     assert abort.diagnostic["foreground_phase"] == ("wait" if waiting else "before_finalize")

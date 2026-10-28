@@ -102,7 +102,7 @@ def _maximum_server_delay(error, source):
     """Match the gate's numeric contract, including finite huge integers."""
     delays = []
     for value in (getattr(error, "retry_after_seconds", None), getattr(source, "retry_after_seconds", None)):
-        if type(value) not in (int, float) or value < 0:
+        if type(value) not in (int, float) or not isinstance(value, (int, float)) or value < 0:
             continue
         try:
             if not math.isfinite(value):
@@ -288,7 +288,8 @@ class AvatarResolutionActivity:
             delay = _maximum_server_delay(error, source)
             if delay is None or not permits:
                 return
-            self.store.check_owner(**{**owned, "stage": Stage.MEDIA})
+            fenced: dict[str, Any] = {**owned, "stage": Stage.MEDIA}
+            self.store.check_owner(**fenced)
             permit = permits[-1]
             source_delay = _maximum_server_delay(None, source)
             header_permit = getattr(source, "_retry_after_permit", None)
@@ -359,8 +360,8 @@ class AvatarResolutionActivity:
             except Exception as error:
                 raise _AvatarControlAbort(error) from None
 
+        payload = None
         try:
-            payload = None
             try:
                 phase = "request"
                 payload = source(username=username, pre_source_request=before_request)
@@ -390,7 +391,7 @@ class AvatarResolutionActivity:
                     if delay is None and is_content_absence(error=error)
                     else self.gate.record_failure(code, retry_after_seconds=delay, permit=permits[-1])
                 )
-                if profile_parse_error:
+                if profile_parse_error and isinstance(error, ProfileError):
                     failure = Failure(error.code, retry_at=health.retry_at, identity_blocked=health.identity_blocked)
                     raise AvatarResolutionError(error.code, failure=failure) from None
                 raise AvatarResolutionError(health.code, failure=health) from None
@@ -431,6 +432,8 @@ class AvatarResolutionActivity:
                     evidence_id=evidence_id,
                 )
                 if graphql:
+                    if not isinstance(user, dict):
+                        raise AvatarResolutionError("avatar_profile_incomplete")
                     fresh_url = next((user.get(key) for key in _AVATAR_FIELDS if user.get(key)), None)
                     if fresh_url is not None:
                         validate_media_url(fresh_url, policy=_POLICY)
@@ -518,7 +521,13 @@ class AvatarResolutionActivity:
             self.store.check_owner(**owned, stage=Stage.MEDIA)
             for username in usernames:
                 self.store.check_owner(**owned, stage=Stage.MEDIA)
-                source = source_factory(username) if source_factory is not None else fetch
+                source: Any
+                if source_factory is not None:
+                    source = source_factory(username)
+                elif fetch is not None:
+                    source = fetch
+                else:
+                    raise AvatarResolutionError("avatar_source_boundary_invalid")
                 try:
                     capture = self.observe(owned=owned, username=username, source=source)
                     observation = self.apply_evidence(

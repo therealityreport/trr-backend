@@ -25,7 +25,7 @@ class RecordingSession(requests.Session):
         self.sent = []
         self.closed = False
 
-    def get(self, url, **kwargs):
+    def get(self, url, **kwargs):  # pyright: ignore[reportIncompatibleMethodOverride]
         self.events.append("get")
         return super().get(url, **kwargs)
 
@@ -69,7 +69,7 @@ def test_profile_has_one_counted_send_with_explicit_credentials_and_no_ambient_a
         assert options["allow_redirects"] is False
         assert options["proxies"] == {}
         assert options["timeout"] == (5, 20)
-        retry = session.get_adapter(PROFILE_INFO_URL).max_retries
+        retry = session.get_adapter(PROFILE_INFO_URL).max_retries  # pyright: ignore[reportAttributeAccessIssue]
         assert retry.total == 0 and retry.read is False
     finally:
         source.close()

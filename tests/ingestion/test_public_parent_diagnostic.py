@@ -38,7 +38,7 @@ def plan(tmp_path, monkeypatch):
 
     class Clock(datetime):
         @classmethod
-        def now(cls, tz=None):
+        def now(cls, tz=None):  # pyright: ignore[reportIncompatibleMethodOverride]
             return wall[0]
 
     monkeypatch.setattr(diagnostic, "datetime", Clock)
@@ -93,10 +93,10 @@ def owned(gate, factory):
     def before():
         charges.append("owned-request")
 
-    before.run_id = diagnostic.RUN_ID
-    before.run_generation = 1
-    before.deadline = time.monotonic() + 10
-    before.owner_generation = 9
+    before.run_id = diagnostic.RUN_ID  # pyright: ignore[reportFunctionMemberAccess]
+    before.run_generation = 1  # pyright: ignore[reportFunctionMemberAccess]
+    before.deadline = time.monotonic() + 10  # pyright: ignore[reportFunctionMemberAccess]
+    before.owner_generation = 9  # pyright: ignore[reportFunctionMemberAccess]
     source = _GatedSource(PublicRelayCommentSource(fetcher_factory=factory), gate, failure_code="comment_fetch_failed")
 
     def run(checkpoint=None, shortcode=diagnostic.SHORTCODE):
@@ -162,7 +162,7 @@ def fake_transport(monkeypatch):
         async def _pace_api_requests(self, **kwargs):
             return True
 
-        async def fetch_comments_for_shortcode(self, shortcode, **kwargs):
+        async def fetch_comments_for_shortcode(self, shortcode, **kwargs):  # pyright: ignore[reportIncompatibleMethodOverride]
             ordinary_checkpoints.append(kwargs)
             return SimpleNamespace(
                 comments=[],
@@ -275,15 +275,15 @@ def test_wrong_owner_or_plan_binding_fails_closed(plan, fake_transport, monkeypa
     gate = Gate()
     run, before, *_ = owned(gate, fake_transport.factory)
     if binding == "run":
-        before.run_id = "another-run"
+        before.run_id = "another-run"  # pyright: ignore[reportFunctionMemberAccess]
     elif binding == "generation":
-        before.run_generation = 2
+        before.run_generation = 2  # pyright: ignore[reportFunctionMemberAccess]
     elif binding == "local":
         gate.network_lane = "modal"
     elif binding == "public":
         gate.public_only = False
     elif binding == "deadline":
-        before.deadline = time.monotonic() - 1
+        before.deadline = time.monotonic() - 1  # pyright: ignore[reportFunctionMemberAccess]
     elif binding == "hash":
         monkeypatch.setenv(diagnostic.SHA_ENV, "0" * 64)
     else:
@@ -298,7 +298,7 @@ def test_started_without_complete_never_resends(plan, fake_transport):
     run, *_ = owned(Gate(), fake_transport.factory)
     with pytest.raises((SourceFailure, diagnostic.ParentDiagnosticError)) as error:
         run()
-    assert error.value.error_code == "source_evidence_missing" and fake_transport.sends == []
+    assert error.value.error_code == "source_evidence_missing" and fake_transport.sends == []  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_default_off_and_other_target_do_not_read_plan(plan, fake_transport, monkeypatch):
@@ -343,7 +343,7 @@ def test_source_wait_uses_exact_permit_and_existing_failure_policy(plan, fake_tr
     run, *_ = owned(gate, fake_transport.factory)
     with pytest.raises((SourceFailure, diagnostic.ParentDiagnosticError)) as error:
         run()
-    assert error.value.failure.code == code
+    assert error.value.failure.code == code  # pyright: ignore[reportAttributeAccessIssue]
     actual, kwargs = gate.failures[0]
     assert actual == code and kwargs["permit"].request_number == 2 and kwargs["retry_after_seconds"] == delay
     assert len(gate.failures) == 1 and gate.successes == [] and len(fake_transport.sends) == 2
@@ -504,7 +504,7 @@ def test_late_owner_or_deadline_fence_prevents_page_or_completion_without_anothe
         elif boundary == "wall":
             plan.wall[0] = datetime(2026, 10, 25, 23, 0, tzinfo=UTC)
         else:
-            monotonic[0] = before.deadline + 1
+            monotonic[0] = before.deadline + 1  # pyright: ignore[reportFunctionMemberAccess]
 
     alive = [True]
 
@@ -519,7 +519,7 @@ def test_late_owner_or_deadline_fence_prevents_page_or_completion_without_anothe
     if boundary == "owner":
         assert actual.value is owner_error
     else:
-        assert actual.value.failure.code == "target_deadline"
+        assert actual.value.failure.code == "target_deadline"  # pyright: ignore[reportAttributeAccessIssue]
     sends = 2 if phase == "response" else 4
     assert gate.request_count == len(charges) == len(fake_transport.sends) == sends
     assert gate.failures == [(None, {})] and ordinary == []
@@ -561,5 +561,7 @@ def test_equal_count_documents_keep_separate_native_id_membership(plan, fake_tra
     assert documents[1]["native_comment_ids"] == ["different-parent"]
     assert documents[0]["payload_sha256"] != documents[1]["payload_sha256"]
     for document in documents:
-        assert datetime.fromisoformat(document["captured_at"]).utcoffset().total_seconds() == 0
+        utcoffset = datetime.fromisoformat(document["captured_at"]).utcoffset()
+        assert utcoffset is not None
+        assert utcoffset.total_seconds() == 0
         assert '"text"' not in json.dumps(document) and "username" not in json.dumps(document)

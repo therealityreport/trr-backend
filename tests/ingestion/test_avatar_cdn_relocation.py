@@ -113,7 +113,7 @@ def test_relocation_download_preserves_canonical_source_and_full_hash_decode():
         return Response(status=403 if url == OLD else 200)
 
     result = mirror_snapshot(initial, storage(opener=opener, refresh=refresh), check=lambda: None, request=lambda: None)
-    assert OLD in urls and NEW in urls and refresh._fetch_avatar.call_count == 1
+    assert OLD in urls and NEW in urls and refresh._fetch_avatar.call_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     assert result.snapshot.avatars[0].source_url == OLD and result.snapshot.avatars[0].observed_at == OBSERVED
     assert result.avatars[0]["source_url"] == OLD and len(result.avatars[0]["sha256"]) == 64
     assert result.avatars[0]["observed_at"] == OBSERVED.isoformat()
@@ -130,23 +130,23 @@ def test_changed_avatar_stays_unresolved_and_cancellation_keeps_its_origin():
     refresh = refresh_for(initial, NEW.replace("/v/", "/changed/"))
     with pytest.raises(MediaIncomplete, match="avatar_refresh_asset_unresolved"):
         refresh(source_reference=OLD, check_cancelled=lambda: None, on_request=lambda: None)
-    assert refresh._fetch_avatar.call_count == 1
+    assert refresh._fetch_avatar.call_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     with pytest.raises(MediaIncomplete, match="avatar_refresh_asset_unresolved"):
         refresh(source_reference=OLD, check_cancelled=lambda: None, on_request=lambda: None)
-    assert refresh._fetch_avatar.call_count == 1
+    assert refresh._fetch_avatar.call_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     refresh = refresh_for(initial)
     with pytest.raises(LostOwnership):
         refresh(
             source_reference=OLD, check_cancelled=Mock(side_effect=LostOwnership("fixture")), on_request=lambda: None
         )
-    refresh._fetch_avatar.assert_not_called()
+    refresh._fetch_avatar.assert_not_called()  # pyright: ignore[reportFunctionMemberAccess]
 
 
 def test_unpinned_relocation_refused_and_provenance_ambiguity_not_selected():
     initial = snapshot(avatars=(AvatarSource("bravowwhl", OLD, observed_at=OBSERVED),))
     assert not avatar_delivery_equivalent(OLD, NEW)
     assert not avatar_delivery_equivalent(OLD, NEW, native_id="bad")
-    assert _bind_avatar_downloads(initial, [observation(pin=None)]).avatars[0].download_url is None
+    assert _bind_avatar_downloads(initial, [observation(pin=None)]).avatars[0].download_url is None  # pyright: ignore[reportArgumentType]
     assert _bind_avatar_downloads(initial, [observation(), observation(pin="999")]).avatars[0].download_url is None
     for proof in (("someone_else", "1063480066"), ("bravowwhl", "bad"), None):
         with pytest.raises(MediaIncomplete, match="avatar_download_identity_mismatch"):
@@ -190,7 +190,7 @@ def test_wrong_pinned_identity_never_produces_delivery_observation(avatars, mism
     source = PublicGraphQLProfileSource(user_id="123", deadline=time.monotonic() + 60, session=public.Session(native))
     with pytest.raises(AvatarResolutionError):
         activity.execute(**owned, handles=[username], source_factory=lambda _: source)
-    assert source.session.closed
+    assert source.session.closed  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_prebound_alias_real_profile_refresh_roundtrip_preserves_original_role(avatars):
@@ -276,7 +276,7 @@ def test_prebound_alias_rejects_role_and_delivery_ambiguity(collision):
     refresh = refresh_for(initial)
     with pytest.raises(MediaIncomplete, match="media_refresh_role_ambiguous"):
         refresh(source_reference=NEW, check_cancelled=lambda: None, on_request=lambda: None)
-    refresh._fetch_avatar.assert_not_called()
+    refresh._fetch_avatar.assert_not_called()  # pyright: ignore[reportFunctionMemberAccess]
 
 
 def test_alias_unpinned_refused_and_repeated_failure_budget_and_cancellation_unchanged():
@@ -288,7 +288,7 @@ def test_alias_unpinned_refused_and_repeated_failure_budget_and_cancellation_unc
     for _ in range(2):
         with pytest.raises(MediaIncomplete, match="avatar_refresh_asset_unresolved"):
             refresh(source_reference=NEW, check_cancelled=lambda: None, on_request=lambda: None)
-    assert refresh._fetch_avatar.call_count == 1
+    assert refresh._fetch_avatar.call_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     refresh = refresh_for(initial)
     refresh._avatar_native_ids["bravowwhl"] = "999"
     with pytest.raises(MediaIncomplete, match="avatar_refresh_asset_unresolved"):
@@ -298,4 +298,4 @@ def test_alias_unpinned_refused_and_repeated_failure_budget_and_cancellation_unc
         refresh(
             source_reference=NEW, check_cancelled=Mock(side_effect=LostOwnership("fixture")), on_request=lambda: None
         )
-    refresh._fetch_avatar.assert_not_called()
+    refresh._fetch_avatar.assert_not_called()  # pyright: ignore[reportFunctionMemberAccess]

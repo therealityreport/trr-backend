@@ -5409,12 +5409,14 @@ def _fetch_reddit_analytics_extras(
     if windows is not None and normalized_scope == "season" and season_id:
         if any(window["key"] not in canonical_container_keys for window in windows):
             raise ValueError("windows must belong to this season")
+        from trr_backend.repositories import reddit_window_coverage
+
         provenance = reddit_window_coverage.classify_windows(windows, proofs)
         previous = {item["container_key"]: item for item in container_statuses}
         container_statuses = []
         for key in canonical_container_keys:
             evidence = provenance.get(key) or {"coverage_state": "unknown"}
-            item = dict(previous.get(key) or {"container_key": key})
+            item: dict[str, Any] = dict(previous.get(key) or {"container_key": key})
             # Retain historical diagnostics, but never call missing history or future windows stale.
             item["historical_stale"] = bool(item.get("stale"))
             item["historical_stale_reason_code"] = item.get("stale_reason_code")
@@ -5437,7 +5439,7 @@ def _fetch_reddit_analytics_extras(
         window_counts["proven_through"] = max(
             (item["covered_through"] for item in container_statuses if item.get("covered_through")),
             default=None,
-            key=lambda value: _parse_iso(value),
+            key=lambda value: _parse_iso(value) or datetime.min.replace(tzinfo=UTC),
         )
     elif normalized_scope == "season" and season_id:
         # Without the caller's displayed bounds, date-based coverage cannot be established.
@@ -5457,6 +5459,8 @@ def _fetch_reddit_analytics_extras(
         )
     latest_coverage_run_id = None
     if normalized_scope == "season" and season_id:
+        from trr_backend.repositories import reddit_window_coverage
+
         qualified_ids = {run_id for _, _, run_id in reddit_window_coverage.qualifying_intervals(proofs)}
         eligible = [proof for proof in proofs if proof.get("run_id") in qualified_ids]
         if eligible:

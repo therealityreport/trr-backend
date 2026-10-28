@@ -82,7 +82,7 @@ def test_operational_failure_defaults_have_no_future_retry(kind):
     else:
         transport = SimpleNamespace(deadline=0, check_cancelled=lambda: None)
         with pytest.raises(DetailDeferred) as error:
-            DetailTransport.check_deadline(transport)
+            DetailTransport.check_deadline(transport)  # pyright: ignore[reportArgumentType]
         failure = classify_failure(error.value)
     assert failure.retry_at is None and not failure.source_unavailable
 
@@ -104,7 +104,7 @@ def test_supplied_server_and_auth_failures_keep_their_exact_deadline_and_block()
 def fixed_media_clock(monkeypatch):
     class Clock(datetime):
         @classmethod
-        def now(cls, tz=None):
+        def now(cls, tz=None):  # pyright: ignore[reportIncompatibleMethodOverride]
             return NOW
 
     monkeypatch.setattr(media, "datetime", Clock)

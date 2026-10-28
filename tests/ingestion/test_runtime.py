@@ -125,12 +125,12 @@ def test_main_builds_existing_adapter_and_session_preserving_lease(monkeypatch):
     )
     scheduler = object()
     composition = ModuleType("trr_backend.ingestion.composition")
-    composition.runtime_config = lambda: config
-    composition.build_scheduler = lambda: scheduler
+    composition.runtime_config = lambda: config  # pyright: ignore[reportAttributeAccessIssue]
+    composition.build_scheduler = lambda: scheduler  # pyright: ignore[reportAttributeAccessIssue]
     psycopg = ModuleType("psycopg")
     calls = []
     lease = object()
-    psycopg.connect = lambda *args, **kwargs: calls.append((args, kwargs)) or lease
+    psycopg.connect = lambda *args, **kwargs: calls.append((args, kwargs)) or lease  # pyright: ignore[reportAttributeAccessIssue]
     workflows = ModuleType("trr_backend.ingestion.workflows")
 
     class Adapter:
@@ -140,7 +140,7 @@ def test_main_builds_existing_adapter_and_session_preserving_lease(monkeypatch):
         def run_bounded(self, connect):
             assert connect() is lease
 
-    workflows.DBOSAdapter = Adapter
+    workflows.DBOSAdapter = Adapter  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, composition.__name__, composition)
     monkeypatch.setitem(sys.modules, "psycopg", psycopg)
     monkeypatch.setitem(sys.modules, workflows.__name__, workflows)

@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from trr_backend.ingestion.callable_attributes import with_attributes
 from trr_backend.ingestion.comments import (
     CommentFetchSummary,
     CommentResumeNode,
@@ -292,6 +293,12 @@ class ScraplingCommentSource:
 
             _guard(retain_and_classify)
 
+        guarded_failure_observer = (
+            (lambda code, retry_after: _guard(source_failure_observer, code, retry_after))
+            if source_failure_observer is not None
+            else None
+        )
+
         async def fetch() -> CommentFetchSummary:
             fetcher = self._factory(
                 cookies=copy.deepcopy(self._cookies),
@@ -300,11 +307,7 @@ class ScraplingCommentSource:
                 timeout_ms=self._timeout_ms,
                 source_payload_observer=observe,
                 before_source_request=before,
-                source_failure_observer=(
-                    (lambda code, retry_after: _guard(source_failure_observer, code, retry_after))
-                    if source_failure_observer is not None
-                    else None
-                ),
+                source_failure_observer=guarded_failure_observer,
                 consume_credentials_only=True,
             )
             failed = True
@@ -444,7 +447,7 @@ class PublicRelayResume:
                 raise CursorStalledError("Public Relay lane has a repeated cursor")
             if not lane:
                 return {}
-            result = {"exhausted": lane.get("exhausted") is True}
+            result: dict[str, Any] = {"exhausted": lane.get("exhausted") is True}
             for proof in ("started_from_root", "embedded_complete"):
                 if lane.get(proof) is True:
                     result[proof] = True
@@ -589,9 +592,12 @@ class PublicRelayCommentSource:
             "release_unsent",
         ):
             if hasattr(pre_source_request, name):
-                setattr(before, name, getattr(pre_source_request, name))
-        before.owner_generation = getattr(pre_source_request, "owner_generation", 0)
-        before.observation_clock = getattr(pre_source_request, "observation_clock", lambda: datetime.now(UTC))
+                with_attributes(before, **{name: getattr(pre_source_request, name)})
+        with_attributes(
+            before,
+            owner_generation=getattr(pre_source_request, "owner_generation", 0),
+            observation_clock=getattr(pre_source_request, "observation_clock", lambda: datetime.now(UTC)),
+        )
 
         rejected_lanes = set()
         technical_failures = set(checkpoint.get("public_reply_failures") or {})
@@ -647,6 +653,17 @@ class PublicRelayCommentSource:
 
             _guard(retain)
 
+        guarded_failure_observer = (
+            (
+                lambda code, delay: _guard(
+                    source_failure_observer,
+                    "public_access_backoff" if code == "source_auth_failed" else code,
+                    delay,
+                )
+            )
+            if source_failure_observer
+            else None
+        )
         fetcher = None
 
         async def fetch():
@@ -660,15 +677,7 @@ class PublicRelayCommentSource:
                 timeout_ms=self._timeout_ms,
                 source_payload_observer=observe,
                 before_source_request=before,
-                source_failure_observer=(
-                    lambda code, delay: _guard(
-                        source_failure_observer,
-                        "public_access_backoff" if code == "source_auth_failed" else code,
-                        delay,
-                    )
-                )
-                if source_failure_observer
-                else None,
+                source_failure_observer=guarded_failure_observer,
             )
             failed = True
             try:
@@ -825,7 +834,9 @@ def _summary(result: Any, *, expected: int | None, from_root: bool, capped: bool
         ),
         retryable=bool(getattr(result, "retryable", False) or unknown or expected is None),
         top_level_checkpoint=top,
-        reply_checkpoints=tuple(_checkpoint(item, root=from_root) for item in replies if item),
+        reply_checkpoints=tuple(
+            checkpoint for item in replies if item and (checkpoint := _checkpoint(item, root=from_root)) is not None
+        ),
         full_observation=from_root and not capped,
         reply_lanes_rejected=rejected,
         reply_access_code="reply_access_rejected" if rejected else None,

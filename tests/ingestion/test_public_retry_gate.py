@@ -30,7 +30,7 @@ def test_negative_header_rejection_invents_no_public_wait(lanes):
     first = gate()
     permit = first.before_request()
     with pytest.raises(InstagramRequestFailure) as rejected:
-        PublicRequestClient(session=None)._classify_response(
+        PublicRequestClient(session=None)._classify_response(  # pyright: ignore[reportArgumentType]
             response("Access denied", status=403, headers={"Retry-After": "-10"})
         )
     assert rejected.value.retry_after_seconds is None
@@ -39,6 +39,7 @@ def test_negative_header_rejection_invents_no_public_wait(lanes):
         retry_after_seconds=rejected.value.retry_after_seconds,
         permit=permit,
     )
+    assert failure is not None
     assert failure.code == "public_access_backoff"
     assert not failure.identity_blocked
     assert failure.retry_at is None

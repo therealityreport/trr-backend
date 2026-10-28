@@ -62,6 +62,8 @@ class Budget:
         return time.monotonic()
 
     def after(self, response, started):
+        import requests
+
         from trr_backend.socials.instagram.public_response import PublicRequestClient
 
         status = response.status_code
@@ -76,7 +78,9 @@ class Budget:
         )
         # Existing public classifier rejects challenge/login/throttle responses.
         try:
-            PublicRequestClient(session=None)._classify_response(response)
+            # The classifier only reads the response; the session is never used for I/O.
+            with requests.Session() as classifier_session:
+                PublicRequestClient(session=classifier_session)._classify_response(response)
         except Exception:
             raise EvaluationStop("public_response_blocked") from None
         if status >= 300:
@@ -150,6 +154,7 @@ def sync_transport(arm, budget):
                 )
                 response = _requests_response(raw, url)
                 try:
+                    assert inner is not None
                     native.cookies.update(guard.prepare_jar(inner.cookies, cookies))
                 except Exception:
                     raise EvaluationStop("credential_cookie_policy") from None
@@ -165,7 +170,7 @@ def sync_transport(arm, budget):
                 raise EvaluationStop("credential_cookie_policy") from None
             return response
 
-        native.request = request
+        native.request = request  # pyright: ignore[reportAttributeAccessIssue]
         yield native
 
 

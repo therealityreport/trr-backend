@@ -2120,6 +2120,26 @@ class InstagramPostsScraplingFetcher:
             trust_env=False,
         )
 
+    async def _ensure_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            await self._rebuild_http_client()
+        client = self._http_client
+        if client is None:
+            raise RuntimeError("Instagram HTTP client was not created")
+        return client
+
+    @staticmethod
+    def _clear_client_auth(client: httpx.AsyncClient) -> None:
+        # httpx stubs reject None for the setter; a no-op Auth flow is the typed equivalent.
+        if getattr(client, "auth", None) is not None:
+            client.auth = httpx.Auth()
+
+    def _require_fetcher(self) -> Any:
+        """Return the browser fetcher, which anonymous runs never construct."""
+        if self._fetcher is None:
+            raise RuntimeError("Browser fetcher is unavailable for anonymous Instagram posts runs")
+        return self._fetcher
+
     async def set_api_proxy_config(self, proxy_config: PostsProxyConfig | None, *, reason: str) -> None:
         """Switch the direct GraphQL proxy route without rerunning browser warmup."""
         if self._anonymous_mode:
@@ -2333,11 +2353,13 @@ class InstagramPostsScraplingFetcher:
         profile HTML comes back with the runtime tokens intact.
         """
         if self._anonymous_mode:
-            if self._http_client is None:
-                await self._rebuild_http_client()
-            self._raw_cookies = self._credential_identity.prepare_jar(self._http_client.cookies, self._raw_cookies)
-            self._http_client.auth = None
-            client_headers = getattr(self._http_client, "headers", {})
+            client = await self._ensure_http_client()
+            anonymous_identity = self._credential_identity
+            if anonymous_identity is None:
+                raise RuntimeError("Anonymous Instagram posts fetch requires a public credential identity")
+            self._raw_cookies = anonymous_identity.prepare_jar(client.cookies, self._raw_cookies)
+            self._clear_client_auth(client)
+            client_headers = getattr(client, "headers", {})
             for key in tuple(client_headers):
                 if key.lower() in {"cookie", "authorization", "proxy-authorization"}:
                     client_headers.pop(key, None)
@@ -2346,7 +2368,7 @@ class InstagramPostsScraplingFetcher:
                 observer("http_warmup")
             self._request_count += 1
             self._http_client_used = "httpx"
-            response = await self._http_client.get(url, headers=_build_nav_headers(referer))
+            response = await client.get(url, headers=_build_nav_headers(referer))
             self._sync_response_cookies(response)
             self._emit_source_diagnostic(response, phase="http_warmup")
             self._observe_source_failure(response, warmup=True)
@@ -2378,7 +2400,7 @@ class InstagramPostsScraplingFetcher:
         }
         self._browser_used = True
         self._scrapling_fetcher_invoked = "StealthyFetcher"
-        response = await self._fetcher.async_fetch(
+        response = await self._require_fetcher().async_fetch(
             url,
             **fetch_kwargs,
         )
@@ -2399,31 +2421,30 @@ class InstagramPostsScraplingFetcher:
         headers: dict[str, str],
     ) -> httpx.Response:
         """Plain HTTP POST via httpx. Used for GraphQL posts-page calls."""
-        if self._http_client is None:
-            await self._rebuild_http_client()
+        client = await self._ensure_http_client()
         await self._pace_api_requests()
         guard = getattr(self, "_credential_identity", None)
         if guard is not None:
-            self._raw_cookies = guard.prepare_jar(self._http_client.cookies, self._raw_cookies)
+            self._raw_cookies = guard.prepare_jar(client.cookies, self._raw_cookies)
             forbidden = {"cookie", "authorization", "proxy-authorization"}
             headers = {key: value for key, value in headers.items() if key.lower() not in forbidden}
-            client_headers = getattr(self._http_client, "headers", None)
+            client_headers = getattr(client, "headers", None)
             if client_headers is not None:
                 for key in tuple(client_headers):
                     if key.lower() in forbidden:
                         client_headers.pop(key, None)
-            self._http_client.auth = None
+            self._clear_client_auth(client)
             if self._raw_cookies.get("csrftoken"):
                 headers["x-csrftoken"] = self._raw_cookies["csrftoken"]
         elif getattr(self, "_consume_credentials_only", False) and self._anonymous_mode:
-            self._http_client.cookies.clear()
-            self._http_client.cookies.update(self._raw_cookies)
+            client.cookies.clear()
+            client.cookies.update(self._raw_cookies)
         observer = getattr(self, "_before_source_request", None)
         if observer is not None:
             observer("graphql")
         self._request_count += 1
         self._http_client_used = "httpx"
-        response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
+        response = await client.post(url, data=data, headers=headers)
         self._emit_source_diagnostic(response, phase="graphql")
         self._observe_source_failure(response, graphql=True)
         self._record_proxy_response(response)

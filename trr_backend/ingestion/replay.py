@@ -21,6 +21,7 @@ from trr_backend.ingestion.listing import ROOT_FIELD, is_anonymous_listing, pars
 from trr_backend.ingestion.providers import PARSER_VERSION, InvalidSourceError, ParsedSource, parse_evidence
 from trr_backend.ingestion.queries import Queries
 from trr_backend.socials.instagram.graphql_response import PROVENANCE_KEY, classify_graphql_response
+from trr_backend.socials.instagram.post_normalizer import InstagramPost
 
 if TYPE_CHECKING:
     from trr_backend.ingestion.media import MediaResult
@@ -620,10 +621,16 @@ def _media(evidence: Evidence, *, target_key: str, parser_version: str, pinned: 
     return MediaReplay(evidence.captured_at, payload, result=result)
 
 
+def _listing_post(source: ParsedSource) -> InstagramPost:
+    if source.post is None:
+        raise InvalidSourceError("Listing replay post is missing")
+    return source.post
+
+
 def _normalized(parsed: ReplaySource) -> Any:
     if isinstance(parsed, ListingReplay):
         value = {
-            "posts": [post.post.to_dict() for post in parsed.posts],
+            "posts": [_listing_post(post).to_dict() for post in parsed.posts],
             "pagination": {"has_next_page": parsed.has_next_page, "end_cursor": parsed.end_cursor},
         }
     elif isinstance(parsed, MediaReplay):

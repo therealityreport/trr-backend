@@ -11,8 +11,13 @@ from trr_backend.repositories import reddit_capture, reddit_episode, reddit_tran
 from trr_backend.repositories.reddit_transport import RedditTransportError
 
 
+def discover_episode(*args: Any, **kwargs: Any) -> Any:
+    """Call the real discovery with the duck-typed fake client below."""
+    return reddit_episode.discover_episode(*args, **kwargs)
+
+
 class Client:
-    def __init__(self, listings: dict[str, Any] | None = None, searches: dict[str, Any] | None = None) -> None:
+    def __init__(self, listings: dict[str, Any] | None = None, searches: dict[Any, Any] | None = None) -> None:
         self.listings = listings or {}
         self.searches = searches or {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -68,7 +73,7 @@ def payload(**extra: Any) -> dict[str, Any]:
 
 def test_listing_candidate_shape_matrix_and_merging_match_app_service() -> None:
     client = Client({"new": page(post()), "hot": page(post(score=15)), "top": page(post("b", num_comments=30))})
-    result = reddit_episode.discover_episode(payload(sortModes=["new", "hot", "top"]), client=client)
+    result = discover_episode(payload(sortModes=["new", "hot", "top"]), client=client)
     assert [row["reddit_post_id"] for row in result["candidates"]] == ["b", "a"]
     candidate = result["candidates"][1]
     assert candidate == {
@@ -125,7 +130,7 @@ def test_listing_candidate_shape_matrix_and_merging_match_app_service() -> None:
     ],
 )
 def test_episode_aliases_season_show_and_ambiguous_titles(title: str, expected: tuple[int, str] | None) -> None:
-    result = reddit_episode.discover_episode(payload(), client=Client({"new": page(post(title=title))}))
+    result = discover_episode(payload(), client=Client({"new": page(post(title=title))}))
     actual = [(row["episode_number"], row["discussion_type"]) for row in result["candidates"]]
     assert actual == ([] if expected is None else [expected])
 
@@ -133,7 +138,7 @@ def test_episode_aliases_season_show_and_ambiguous_titles(title: str, expected: 
 def test_expected_episodes_broad_search_gap_fill_and_zero_matrix_rows() -> None:
     value = payload(seasonEpisodes=[{"episode_number": 1}, {"episode_number": 2}])
     client = Client({"new": page(post(), post("out", title="RHOSLC season 6 episode 3 live thread"))})
-    result = reddit_episode.discover_episode(value, client=client)
+    result = discover_episode(value, client=client)
     assert result["expected_episode_numbers"] == [1, 2]
     assert result["coverage_expected_slots"] == 6
     assert result["coverage_found_slots"] == 1
@@ -157,7 +162,7 @@ def test_search_results_fill_all_expected_slots_and_skip_gap_queries() -> None:
     for kind in ("live", "post", "weekly"):
         query = reddit_episode._query(["the real housewives of salt lake city", "rhoslc"], 6, kind)
         client.searches[query] = page(post(kind, title=f"RHOSLC season 6 episode 1 {kind} episode discussion"))
-    result = reddit_episode.discover_episode(value, client=client)
+    result = discover_episode(value, client=client)
     assert result["coverage_found_slots"] == 3
     assert result["coverage_missing_slots"] == []
     assert result["discovery_source_summary"]["gap_fill_queries_run"] == 0
@@ -170,29 +175,29 @@ def test_flair_assignment_filters_episode_and_season() -> None:
         seasonEpisodes=[{"id": "episode-a", "episode_number": 1}],
         episodeFlairAssignments={"salt lake city": {"season_ids": ["season-a"], "episode_ids": ["episode-a"]}},
     )
-    assert len(reddit_episode.discover_episode(value, client=Client({"new": page(post())}))["candidates"]) == 1
+    assert len(discover_episode(value, client=Client({"new": page(post())}))["candidates"]) == 1
     value["episodeFlairAssignments"]["salt lake city"]["episode_ids"] = ["episode-b"]
-    assert reddit_episode.discover_episode(value, client=Client({"new": page(post())}))["candidates"] == []
+    assert discover_episode(value, client=Client({"new": page(post())}))["candidates"] == []
     value["isShowFocused"] = True
-    assert len(reddit_episode.discover_episode(value, client=Client({"new": page(post())}))["candidates"]) == 1
+    assert len(discover_episode(value, client=Client({"new": page(post())}))["candidates"]) == 1
 
 
 def test_show_focused_can_omit_patterns_and_flair_but_still_requires_show_term() -> None:
     value = payload(isShowFocused=True, episodeTitlePatterns=[], episodeRequiredFlairs=["Other"])
-    result = reddit_episode.discover_episode(value, client=Client({"new": page(post(link_flair_text=None))}))
+    result = discover_episode(value, client=Client({"new": page(post(link_flair_text=None))}))
     assert len(result["candidates"]) == 1
     assert result["candidates"][0]["match_reasons"][0] == "title pattern: live episode discussion"
 
 
 def test_period_window_boundaries_are_inclusive() -> None:
     value = payload(periodStart="2026-10-21T01:00:00Z", periodEnd="2026-10-21T01:00:00Z")
-    result = reddit_episode.discover_episode(value, client=Client({"new": page(post(), post("old", created_utc=1))}))
+    result = discover_episode(value, client=Client({"new": page(post(), post("old", created_utc=1))}))
     assert [row["reddit_post_id"] for row in result["candidates"]] == ["a"]
 
 
 def test_rhoslc_flair_normalization_and_removed_whitney_marker() -> None:
     value = payload(subreddit="realhousewivesofslc", episodeRequiredFlairs=["SALT LAKE CITY"])
-    result = reddit_episode.discover_episode(
+    result = discover_episode(
         value,
         client=Client(
             {
@@ -233,13 +238,13 @@ def test_rules_seed_bravo_patterns_and_salt_lake_city_flair_only_when_unset() ->
 def test_invalid_inputs_fail_before_http(extra: dict[str, Any]) -> None:
     client = Client()
     with pytest.raises(RedditTransportError) as error:
-        reddit_episode.discover_episode(payload(**extra), client=client)
+        discover_episode(payload(**extra), client=client)
     assert error.value.status == 400
     assert client.calls == []
 
 
 def test_partial_sort_failure_preserves_successful_candidates_and_diagnostics() -> None:
-    result = reddit_episode.discover_episode(
+    result = discover_episode(
         payload(sortModes=["new", "hot"]),
         client=Client({"new": page(post()), "hot": RedditTransportError("limited", status=429)}),
     )
@@ -260,11 +265,11 @@ def test_initial_failure_exposes_checkpoint_and_resumes_without_refetching_succe
     }
     checkpoints: list[dict[str, Any]] = []
     with pytest.raises(RedditTransportError) as error:
-        reddit_episode.discover_episode(value, client=failing, on_checkpoint=checkpoints.append)
+        discover_episode(value, client=failing, on_checkpoint=checkpoints.append)
     assert error.value.checkpoint == checkpoints[-1]
     preserved = copy.deepcopy(checkpoints[-1])
     resumed = Client()
-    result = reddit_episode.discover_episode(value, client=resumed, checkpoint=checkpoints[-1])
+    result = discover_episode(value, client=resumed, checkpoint=checkpoints[-1])
     assert all(path.endswith("/search.json") for path, _params in resumed.calls)
     assert result["candidates"][0]["reddit_post_id"] == "a"
     assert checkpoints[-1] == preserved
@@ -272,10 +277,9 @@ def test_initial_failure_exposes_checkpoint_and_resumes_without_refetching_succe
 
 def test_all_sort_non_rate_limit_failures_raise_with_checkpoint() -> None:
     with pytest.raises(RedditTransportError) as error:
-        reddit_episode.discover_episode(
-            payload(), client=Client({"new": RedditTransportError("not found", status=404)})
-        )
+        discover_episode(payload(), client=Client({"new": RedditTransportError("not found", status=404)}))
     assert error.value.status == 404
+    assert error.value.checkpoint is not None
     assert error.value.checkpoint["queries"]["listing:new"]["error"]["status"] == 404
 
 
@@ -289,7 +293,7 @@ def test_capped_query_cursor_is_saved_and_never_reported_complete() -> None:
             (query, "t3_next2"): page(after="t3_next3"),
         }
     )
-    result = reddit_episode.discover_episode(value, client=client)
+    result = discover_episode(value, client=client)
     assert result["collection_complete"] is False
     assert "search:" + query in result["unresolved_queries"]
     assert result["checkpoint"]["queries"]["search:" + query]["after"] == "t3_next3"
@@ -299,15 +303,16 @@ def test_malformed_search_does_not_erase_saved_listing_results() -> None:
     value = payload(seasonEpisodes=[{"episode_number": 1}])
     query = reddit_episode._query(["the real housewives of salt lake city", "rhoslc"], 6, "live")
     with pytest.raises(RedditTransportError) as error:
-        reddit_episode.discover_episode(value, client=Client({"new": page(post())}, {query: {"data": {}}}))
+        discover_episode(value, client=Client({"new": page(post())}, {query: {"data": {}}}))
+    assert error.value.checkpoint is not None
     assert error.value.checkpoint["queries"]["listing:new"]["rows"][0]["reddit_post_id"] == "a"
 
 
 def test_checkpoint_wrong_config_is_rejected_before_http() -> None:
-    result = reddit_episode.discover_episode(payload(), client=Client())
+    result = discover_episode(payload(), client=Client())
     client = Client()
     with pytest.raises(RedditTransportError, match="does not match"):
-        reddit_episode.discover_episode(payload(seasonNumber=7), client=client, checkpoint=result["checkpoint"])
+        discover_episode(payload(seasonNumber=7), client=client, checkpoint=result["checkpoint"])
     assert client.calls == []
 
 
@@ -364,7 +369,7 @@ def test_default_transport_binding_uses_shared_identity_and_requires_oauth(monke
 
 def test_resume_keeps_saved_search_rows_when_recovered_sort_fills_all_slots() -> None:
     value = payload(sortModes=["new", "hot"], seasonEpisodes=[{"episode_number": 1}])
-    first = reddit_episode.discover_episode(
+    first = discover_episode(
         value,
         client=Client(
             {"new": page(), "hot": RedditTransportError("limited", status=429)},
@@ -385,7 +390,7 @@ def test_resume_keeps_saved_search_rows_when_recovered_sort_fills_all_slots() ->
             )
         }
     )
-    result = reddit_episode.discover_episode(value, client=recovered, checkpoint=first["checkpoint"])
+    result = discover_episode(value, client=recovered, checkpoint=first["checkpoint"])
     assert {row["reddit_post_id"] for row in result["candidates"]} == {"saved-search", "live", "post", "weekly"}
     assert (
         result["discovery_source_summary"]["search_pages_fetched"]
@@ -395,4 +400,4 @@ def test_resume_keeps_saved_search_rows_when_recovered_sort_fills_all_slots() ->
 
 def test_non_string_post_fields_are_explicit_malformed_error() -> None:
     with pytest.raises(RedditTransportError, match="post fields"):
-        reddit_episode.discover_episode(payload(), client=Client({"new": page(post(url=123))}))
+        discover_episode(payload(), client=Client({"new": page(post(url=123))}))

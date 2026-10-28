@@ -8,6 +8,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -314,7 +315,7 @@ def producer_unowned_consumer_fixture(generation):
 
     values, source, _ = fixture()
     source = replace(source, shortcode="Zero")
-    result = mirror_snapshot(source, PureStorage(), check=lambda: None, request=lambda: None)
+    result = mirror_snapshot(source, cast(Any, PureStorage()), check=lambda: None, request=lambda: None)
     evidence = Evidence.capture(
         source_identity="instagram:media:Zero",
         captured_at=source.observed_at,

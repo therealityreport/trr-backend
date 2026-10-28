@@ -23,6 +23,7 @@ from collections import Counter
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid5
 
 import psycopg2
@@ -426,7 +427,7 @@ def schema_preflight(dsn, root, binaries):
     (root / "schema.sql").write_bytes(dump.stdout)
 
 
-def create_legacy_job(dsn, stage, config=None, *, run_id=None, claim=True):
+def create_legacy_job(dsn, stage, config=None, *, run_id=None, claim=True) -> dict[str, Any]:
     from trr_backend.db import pg
     from trr_backend.socials import social_season_analytics_impl as legacy
 
@@ -473,11 +474,19 @@ def create_legacy_job(dsn, stage, config=None, *, run_id=None, claim=True):
         existing_lookup_sql="SELECT NULL AS id",
         existing_lookup_params=[],
     )
+    if job_id is None:
+        raise RuntimeError("Fixture job insert returned no job id for stage " + stage)
     if claim:
         # The external dispatch is local. Use the maintained native atomic claim;
         # capacity is bounded to one serial fixture worker in both arms.
-        return legacy._claim_job_by_id(job_id=job_id, worker_id="fixture-worker")
-    return pg.fetch_one("SELECT * FROM social.scrape_jobs WHERE id=%s", [job_id])
+        claimed_job = legacy._claim_job_by_id(job_id=job_id, worker_id="fixture-worker")
+        if claimed_job is None:
+            raise RuntimeError("Fixture job was not claimable: " + job_id)
+        return claimed_job
+    created_job = pg.fetch_one("SELECT * FROM social.scrape_jobs WHERE id=%s", [job_id])
+    if created_job is None:
+        raise RuntimeError("Fixture job row not found: " + job_id)
+    return created_job
 
 
 def claim_legacy(job, *, token=None):
@@ -507,6 +516,7 @@ def child(args):
             + str(reservation.get("target_key", reservation.get("job_id", "unknown")))
         )
     if args.child == "candidate-worker":
+        assert raw is not None
         sys.stdin = io.TextIOWrapper(io.BytesIO(raw))
     trace = (
         []
@@ -587,10 +597,12 @@ def child(args):
             result = legacy_full(os.environ["EVAL_DATABASE_URL"], probe_only=True)
             print(json.dumps(result, default=str), flush=True)
         elif args.child == "legacy-worker":
+            from trr_backend.socials import social_season_analytics_impl as legacy
             from trr_backend.socials.control_plane import claim_and_process_social_job
 
             worker_id = "modal:fixture:" + str(os.getpid())
             assert legacy._worker_heartbeat_schema_ready()
+            assert reservation is not None
             legacy.update_worker_heartbeat(
                 worker_id,
                 stage=reservation["stage"],
@@ -624,6 +636,7 @@ def child(args):
 
             activity_started = time.monotonic()
             result = worker.main()
+            assert reservation is not None
             write_json(
                 root / ("worker-timing-" + str(os.getpid()) + ".json"),
                 {
@@ -754,8 +767,10 @@ def legacy_full(dsn, *, probe_only=False):
         },
         claim=False,
     )
+    assert listing_job is not None
     run_id = listing_job["run_id"]
     pending = []
+    detail_job: dict[str, Any] | None = None
     if not probe_only:
         detail_job = create_legacy_job(
             dsn,
@@ -825,6 +840,7 @@ def legacy_full(dsn, *, probe_only=False):
         manifest = targets.freeze_manifest(
             run_id, ACCOUNT, {"selected_tasks": ["post_details"], "details_refresh_force_detail_fetch": True}, conn=conn
         )
+        assert detail_job is not None
         config = dict(
             detail_job["config"],
             detail_contract_version=1,
@@ -869,6 +885,7 @@ def legacy_full_v2_diagnostic(dsn):
     listing_job = create_legacy_job(
         dsn, "shared_account_discovery", {"instagram_scrape_mode": "authenticated", "bidirectional_walk_enabled": False}
     )
+    assert listing_job is not None
     run_id = listing_job["run_id"]
     detail_job = create_legacy_job(dsn, "shared_account_posts", run_id=run_id, claim=False)
     comment_job = create_legacy_job(dsn, "comments_scrapling", run_id=run_id, claim=False)
@@ -897,6 +914,7 @@ def legacy_full_v2_diagnostic(dsn):
     from trr_backend.db import pg
 
     with pg.transaction() as conn, pg.db_cursor(conn=conn) as cur:
+        assert detail_job is not None
         manifest = targets.freeze_manifest(
             detail_job["run_id"],
             ACCOUNT,
@@ -1011,6 +1029,7 @@ def assert_outputs(root, states, *, candidate):
         body = objects[url]
         with Image.open(io.BytesIO(body)) as decoded:
             width, height = decoded.size
+            assert decoded.format is not None
             format_ = decoded.format.lower()
         digest = hashlib.sha256(body).hexdigest()
         if source_asset:
@@ -1252,6 +1271,7 @@ def self_checks(source_root=None):
         observer.thread.is_alive.return_value = False
         with patch.object(psycopg2, "connect", side_effect=RuntimeError("synthetic observer failure")):
             observer.observe()
+            assert observer.error is not None
             assert observer.error["class"] == "RuntimeError" and observer.stop.is_set()
             must_raise(AssertionError, observer.finish)
         report = json.loads((root / "measurement.json").read_text())
@@ -1329,7 +1349,9 @@ class Measurement:
                         )
                         field = "state" if self.kind.startswith("candidate") else "status"
                         cur.execute(f"SELECT count(*) FROM {table} WHERE {field}='completed'")
-                        if cur.fetchone()[0]:
+                        row_2 = cur.fetchone()
+                        assert row_2 is not None
+                        if row_2[0]:
                             self.complete = {"seconds": time.monotonic() - self.started, "queries": self.queries(cur)}
                     self.stop.wait(0.01)
         except BaseException as exc:
@@ -1341,6 +1363,7 @@ class Measurement:
 
     def finish(self):
         self.stop.set()
+        assert self.thread is not None
         self.thread.join(timeout=5)
         if self.thread.is_alive():
             self.error = {"class": "ObserverDidNotStop"}

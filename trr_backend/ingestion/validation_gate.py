@@ -16,7 +16,7 @@ def require_allowed_intent(intent: RunIntent) -> None:
         raise Conflict("Bravo full history is held pending fixed-post retrieval acceptance")
 
 
-class _ValidationGate:
+class _ValidationGate(Store):
     def start(self, intent, **kwargs):
         require_allowed_intent(intent)
         return super().start(intent, **kwargs)

@@ -67,6 +67,7 @@ import time
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 PROJECT_REF = "vwxfvzutyufrkhfgoeaa"
@@ -124,7 +125,7 @@ def safe_helper_result(value):
     if not isinstance(value, dict):
         return {"status": "invalid_result"}
     status = value.get("status")
-    result = {"status": status if isinstance(status, str) and status in statuses else "invalid_result"}
+    result: dict[str, Any] = {"status": status if isinstance(status, str) and status in statuses else "invalid_result"}
     code = value.get("exit_code")
     if type(code) is int and -255 <= code <= 255:
         result["exit_code"] = code
@@ -138,7 +139,11 @@ def safe_probe_diagnostics(value):
     if "helper_result" in value:
         result["helper_result"] = safe_helper_result(value["helper_result"])
     elapsed = value.get("elapsed_seconds")
-    if type(elapsed) in (float, int) and 0 <= elapsed <= DEADLINE_SECONDS + CLEANUP_SECONDS + 5:
+    if (
+        isinstance(elapsed, (float, int))
+        and not isinstance(elapsed, bool)
+        and 0 <= elapsed <= DEADLINE_SECONDS + CLEANUP_SECONDS + 5
+    ):
         result["elapsed_seconds"] = round(elapsed, 3)
     for key in ("peak_runtime_connections", "samples", "holder_backend_pid"):
         number = value.get(key)
@@ -225,7 +230,7 @@ def verify_module_origins(root):
                 "MODULE_ORIGIN_MISMATCH",
             )
         else:
-            paths = tuple(getattr(module, "__path__", ()))
+            paths: tuple[str, ...] = tuple(getattr(module, "__path__", ()))
             require(
                 bool(paths) and all(Path(value).resolve() == root / relative for value in paths),
                 "MODULE_ORIGIN_MISMATCH",
@@ -286,10 +291,12 @@ def configuration(expected):
         "RUNTIME_CONFIG_MISMATCH",
     )
     require(version("dbos") == "3.3.0", "SDK_VERSION_MISMATCH")
+    dbos_config = config.dbos_config()
+    engine_kwargs = dbos_config.get("db_engine_kwargs") or {}
     require(
-        config.dbos_config()["sys_db_pool_size"] == 1
-        and config.dbos_config()["db_engine_kwargs"]["max_overflow"] == 0
-        and config.dbos_config()["run_migrations"] is False,
+        dbos_config.get("sys_db_pool_size") == 1
+        and engine_kwargs.get("max_overflow") == 0
+        and dbos_config.get("run_migrations") is False,
         "POOL_CONFIG_MISMATCH",
     )
     validate_dsn(config.system_database_url, role=expected["runtime_role"])
@@ -343,7 +350,10 @@ class Observer:
                     "> interval '0 seconds' "
                     "and current_setting('statement_timeout')::interval <= interval '5 seconds')"
                 )
-                database, role, readonly, row_security, bounded_timeout = cur.fetchone()
+                observer_row = cur.fetchone()
+                if observer_row is None:
+                    raise ProbeError("OBSERVER_SESSION_UNSAFE")
+                database, role, readonly, row_security, bounded_timeout = observer_row
                 require(
                     database == "postgres"
                     and role != config.runtime_role
@@ -385,11 +395,17 @@ class Observer:
                 + " union all ".join(f"select count(*) n from social.{table}" for table in TABLES)
                 + ") counts"
             )
-            business = int(cur.fetchone()[0])
+            row_2 = cur.fetchone()
+            assert row_2 is not None
+            business = int(row_2[0])
             cur.execute("select count(*) from dbos.workflow_status")
-            workflows = int(cur.fetchone()[0])
+            row_3 = cur.fetchone()
+            assert row_3 is not None
+            workflows = int(row_3[0])
             cur.execute("select rolconnlimit from pg_roles where rolname=%s", (self.config.runtime_role,))
-            limit = cur.fetchone()[0]
+            row_4 = cur.fetchone()
+            assert row_4 is not None
+            limit = row_4[0]
         result = Sample(pids, locks, business, workflows, limit)
         result.safe()
         return result
@@ -400,9 +416,13 @@ class Observer:
         with psycopg.connect(self.config.system_database_url, autocommit=True, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 cur.execute("select pg_try_advisory_lock(%s,%s)", (self.config.lock_namespace, self.config.lock_key))
-                require(cur.fetchone()[0], "FRESH_LEASE_FAILED")
+                row = cur.fetchone()
+                assert row is not None
+                require(row[0], "FRESH_LEASE_FAILED")
                 cur.execute("select pg_advisory_unlock(%s,%s)", (self.config.lock_namespace, self.config.lock_key))
-                require(cur.fetchone()[0], "FRESH_UNLOCK_FAILED")
+                row = cur.fetchone()
+                assert row is not None
+                require(row[0], "FRESH_UNLOCK_FAILED")
 
     def close(self):
         self.conn.close()
@@ -476,12 +496,13 @@ def supervise(expected, observer, spawn, *, clock=time.monotonic, sleep=time.sle
         require(actual_helper_result == {"status": "completed", "exit_code": 0}, "HELPER_NOT_COMPLETED")
         require(80 <= clock() - started <= 120, "HELPER_LIFETIME_MISMATCH")
         require(3 <= peak <= 4, "CONNECTION_DEMAND_NOT_PROVEN")
+        final = None
         for _ in range(25):
             final = observer.sample()
             if not final.pids and not final.lock_pids:
                 break
             sleep(0.2)
-        require(not final.pids and not final.lock_pids, "DATABASE_CLEANUP_UNCONFIRMED")
+        require(final is not None and not final.pids and not final.lock_pids, "DATABASE_CLEANUP_UNCONFIRMED")
         observer.fresh_lease()
         require(not observer.sample().pids and not observer.sample().lock_pids, "FRESH_SESSION_CLEANUP_UNCONFIRMED")
         return {
@@ -608,7 +629,7 @@ def watchdog(expected, parent_pipe, *, timeout=DEADLINE_SECONDS):
         if child.poll() is None:
             child.wait(timeout=1)
     require(cleaned, "PROCESS_CLEANUP_UNCONFIRMED")
-    result = child_result(child) if code is None else {"status": "not_passed", "code": code}
+    result: dict[str, Any] = child_result(child) if code is None else {"status": "not_passed", "code": code}
     result["process_cleanup"] = True
     return result
 
@@ -678,6 +699,7 @@ def main(argv=None):
         def error(self, message):
             raise ProbeError("ARGUMENTS_INVALID")
 
+    result: dict[str, Any]
     try:
         parser = SafeParser(add_help=False)
         parser.add_argument("--expected-json", required=True)

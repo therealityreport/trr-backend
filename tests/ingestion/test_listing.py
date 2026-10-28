@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -33,13 +34,13 @@ def database(canonical_database):
     return Store(tx), tx
 
 
-def sql(database, statement, args=()):
+def sql(database, statement, args=()) -> Any:
     with database[1]() as conn, conn.cursor() as cur:
         cur.execute(statement, args or None)
         return cur.fetchall() if cur.description else None
 
 
-def launch(database, *, bounded=False, scope=None):
+def launch(database, *, bounded=False, scope=None) -> dict[str, Any]:
     store, _ = database
     intent = RunIntent(
         account="fixture_account",
@@ -70,7 +71,7 @@ def launch(database, *, bounded=False, scope=None):
     return {"run_id": run["run_id"], "account": intent.account, "generation": 1}
 
 
-def post(code, date):
+def post(code, date) -> dict[str, Any]:
     return {
         "__typename": "GraphImage",
         "id": "id-" + code,
@@ -84,7 +85,7 @@ def post(code, date):
     }
 
 
-def page(posts, *, more, cursor):
+def page(posts, *, more, cursor) -> dict[str, Any]:
     return {
         "data": {
             ROOT_FIELD: {
@@ -95,7 +96,7 @@ def page(posts, *, more, cursor):
     }
 
 
-def execute(database, run, payload, *, cursor=None, writer=write_post, fetch=None):
+def execute(database, run, payload, *, cursor=None, writer=write_post, fetch=None) -> Any:
     store, _ = database
     key = "page:root" if cursor is None else page_target(cursor)
     args = dict(run, stage=Stage.LISTING, target_key=key)
@@ -105,13 +106,15 @@ def execute(database, run, payload, *, cursor=None, writer=write_post, fetch=Non
     args["owner_token"] = str(reserved["owner_token"])
     if fetch is None:
 
-        def fetch(**callbacks):
+        def default_fetch(**callbacks):
             assert callbacks["cursor"] == cursor
             callbacks["pre_source_request"]()
             callbacks["source_observer"](payload, {"cookies": {"secret": "never-retained"}})
             return payload
 
-    return ListingActivity(store, writer=writer, clock=lambda: OBSERVED).execute(**args, fetch=fetch), args
+        fetch = default_fetch
+
+    return ListingActivity(store, writer=writer, clock=lambda: OBSERVED).execute(**args, fetch=fetch), args  # pyright: ignore[reportArgumentType]
 
 
 def test_bounded_mixed_and_old_pages_continue_until_explicit_exhaustion(database):

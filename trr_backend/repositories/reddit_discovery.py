@@ -187,7 +187,8 @@ def discover(payload: dict, client: Any, execution: capture.Execution) -> dict:
                 observed = sorted(set(observed + dates))
                 observed = [observed[0], observed[-1]] if observed else []
                 next_after = data.get("after")
-                reached = bool(start and dates and min(legacy._parse_iso(d) for d in dates) <= start)
+                parsed_dates = [parsed for d in dates if (parsed := legacy._parse_iso(d)) is not None]
+                reached = bool(start and parsed_dates and min(parsed_dates) <= start)
                 repeated = bool(next_after and next_after in seen)
                 pages += 1
                 if next_after:

@@ -29,7 +29,9 @@ def worker(args):
     # A separate session is necessary: transaction pooling cannot preserve this
     # lifetime lock. A lost lease session must stop the process, not reconnect.
     lease = psycopg.connect(os.environ["EVAL_DATABASE_URL"], autocommit=True, application_name="eval-lease")
-    locked = lease.execute("SELECT pg_try_advisory_lock(%s,%s)", (LOCK_NAMESPACE, LOCK_KEY)).fetchone()[0]
+    row = lease.execute("SELECT pg_try_advisory_lock(%s,%s)", (LOCK_NAMESPACE, LOCK_KEY)).fetchone()
+    assert row is not None
+    locked = row[0]
     if not locked:
         print(json.dumps({"status": "BUSY", "dbos_launched": False}), flush=True)
         lease.close()
@@ -72,7 +74,6 @@ def worker(args):
                 "pool_timeout": 5,
                 "connect_args": {"application_name": "eval-dbos", "connect_timeout": 3},
             },
-            "admin_server": False,
             "enable_otlp": False,
         }
     )
@@ -165,10 +166,12 @@ def main(args):
                     "SELECT application_name,count(*) FROM pg_stat_activity "
                     "WHERE datname=current_database() AND pid<>pg_backend_pid() GROUP BY application_name"
                 ).fetchall()
-                holders = conn.execute(
+                holder_row = conn.execute(
                     "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=%s AND objid=%s AND granted",
                     (LOCK_NAMESPACE, LOCK_KEY),
-                ).fetchone()[0]
+                ).fetchone()
+                assert holder_row is not None
+                holders = holder_row[0]
                 samples.append({"sessions": dict(grouped), "effective_coordinators": holders})
 
     def spawn(action, run_id, lifetime, fault="", inject=False):
@@ -257,6 +260,7 @@ def main(args):
         }
         # One pooled metadata session plus one detached LISTEN session.
         assert per_class.get("eval-dbos", 0) <= 2, per_class
+        assert privileges is not None
         result = {
             "status": "PASS",
             "dbos": "3.3.0",

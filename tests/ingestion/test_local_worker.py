@@ -3,6 +3,7 @@
 import threading
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -53,7 +54,9 @@ def test_acquisition_event_follows_actual_enter_and_precedes_started_callback(ca
         assert events == ["acquired"]
         assert record["status"] == "local_worker_lease_acquired"
         assert record["pid"] == os.getpid() and record["lease_backend_pid"] == 4242
-        assert datetime.fromisoformat(record["acquired_at"]).utcoffset().total_seconds() == 0
+        utcoffset = datetime.fromisoformat(record["acquired_at"]).utcoffset()
+        assert utcoffset is not None
+        assert utcoffset.total_seconds() == 0
         assert set(record) == {"status", "pid", "lease_backend_pid", "acquired_at"}
         events.append("started")
         abort.set()
@@ -119,7 +122,7 @@ def test_media_boundary_yields_after_six_comments_and_recovery_precedes_finaliza
             events.append(kwargs["stop_state"])
 
     class FakeScheduler:
-        def tick(self, item, ordinal):
+        def tick(self, item, ordinal) -> dict[str, Any]:
             if ordinal < 6:
                 dispatch.comments_submitted += 1
                 return {"ready": True}
@@ -220,7 +223,7 @@ def test_interrupted_certification_artifact_is_preserved_and_can_resume(tmp_path
 @pytest.fixture(scope="module")
 def database(base_database):
     # The shared local fixture now installs execution policy migrations itself.
-    return local_execution.database.__wrapped__(base_database)
+    return local_execution.database.__wrapped__(base_database)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _worker(database, execute, *, abort, stop, on_cycle=None, effective_comments_limit=None):
@@ -297,7 +300,7 @@ def test_comment_children_overlap_but_admission_and_policy_remain_serial(databas
         assert threading.get_ident() == owner
         return limit
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         assert kwargs["abort"] is abort and kwargs["timeout_seconds"] == 590
         args = owned(reservation)
         local.acquire(**args)
@@ -353,7 +356,7 @@ def test_comment_registry_deduplicates_and_keeps_original_partition_for_expiry()
     abort, release, entered, reaped = (threading.Event() for _ in range(4))
     calls, transitions = [], []
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         calls.append(reservation["owner_token"])
         entered.set()
         assert release.wait(5)
@@ -390,7 +393,7 @@ def test_comment_registry_deduplicates_and_keeps_original_partition_for_expiry()
 def test_comment_registry_does_not_queue_and_lower_limit_drains_existing_children(initial, lower):
     abort, release = threading.Event(), threading.Event()
 
-    def execute(*args, **kwargs):
+    def execute(*args, **kwargs) -> dict[str, Any]:
         assert release.wait(5)
         return {"outcome": "committed"}
 
@@ -417,14 +420,14 @@ def test_partition_continuation_keeps_live_comment_registry(monkeypatch):
     abort, release, entered, reaped = (threading.Event() for _ in range(4))
     transitions = []
 
-    def execute(*args, **kwargs):
+    def execute(*args, **kwargs) -> dict[str, Any]:
         entered.set()
         assert release.wait(5)
         reaped.set()
         return {"outcome": "unresolved"}
 
     class Store:
-        def decision(self, *args):
+        def decision(self, *args) -> dict[str, Any]:
             return {"kind": "wait", "seconds": 1}
 
         def transition(self, item, token, state):
@@ -437,7 +440,7 @@ def test_partition_continuation_keeps_live_comment_registry(monkeypatch):
     class Scheduler:
         clock = staticmethod(lambda: datetime.now(UTC))
 
-        def tick(self, item, ordinal):
+        def tick(self, item, ordinal) -> dict[str, Any]:
             if item["execution_id"] == "partition-0":
                 dispatch({"owner_token": "continued", "stage": "comments"})
                 assert entered.wait(5)
@@ -471,7 +474,7 @@ def test_partition_continuation_keeps_live_comment_registry(monkeypatch):
 def test_policy_fence_aborts_and_reaps_comment_child_before_lease_release():
     abort, entered, reaped = (threading.Event() for _ in range(3))
 
-    def execute(*args, **kwargs):
+    def execute(*args, **kwargs) -> dict[str, Any]:
         entered.set()
         assert abort.wait(5)
         reaped.set()
@@ -523,7 +526,7 @@ def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation(st
     abort, release, entered, reaped = (threading.Event() for _ in range(4))
     order = []
 
-    def execute(*args, **kwargs):
+    def execute(*args, **kwargs) -> dict[str, Any]:
         entered.set()
         assert release.wait(5)
         order.append("reaped")
@@ -531,7 +534,7 @@ def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation(st
         return {"outcome": "committed"}
 
     class Store:
-        def decision(self, *args):
+        def decision(self, *args) -> dict[str, Any]:
             release.set()
             return {"kind": "target", "stage": stage}
 
@@ -541,7 +544,7 @@ def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation(st
     class Scheduler:
         clock = staticmethod(lambda: datetime.now(UTC))
 
-        def tick(self, *args):
+        def tick(self, *args) -> dict[str, Any]:
             assert reaped.is_set() and not dispatch.active
             order.append("noncomment-reservation")
             return {"stop": "completed"}
@@ -569,7 +572,7 @@ def test_phase_change_waits_for_comment_reaping_before_noncomment_reservation(st
 
 
 def _commit(local, calls, abort):
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         assert kwargs["execution_placement"] == "local" and kwargs["abort"] is abort
         args = owned(reservation)
         local.acquire(**args)
@@ -676,7 +679,7 @@ def _service(database, profile="public"):
     store, _, _ = database
     return CommandService(
         store,
-        None,
+        None,  # pyright: ignore[reportArgumentType]
         engine="dbos",
         workflow_version=WORKFLOW_VERSION,
         enabled=True,
@@ -711,8 +714,8 @@ def test_explicit_authenticated_relay_local_launch_freezes_family_and_placement(
     payload = InstagramIngestionLaunchV2(
         execution_placement="local",
         backfill_scope="bounded_window",
-        date_start="2026-01-01T00:00:00Z",
-        date_end="2026-02-01T00:00:00Z",
+        date_start="2026-01-01T00:00:00Z",  # pyright: ignore[reportArgumentType]
+        date_end="2026-02-01T00:00:00Z",  # pyright: ignore[reportArgumentType]
         detail_worker_count=1,
         comments_worker_count=1,
         comments_enable_media_followups=False,
@@ -759,7 +762,7 @@ def test_due_media_waits_for_one_slot_before_owner_reservation_and_keeps_five_co
     freed_at = []
     item = {"run_id": "fair-run", "generation": 1}
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         if reservation["stage"] == "comments":
             index = int(reservation["owner_token"])
             entered[index].set()
@@ -789,7 +792,7 @@ def test_due_media_waits_for_one_slot_before_owner_reservation_and_keeps_five_co
         def candidate_settled(self, *args):
             return False
 
-        def reserve_decision(self, *args, **kwargs):
+        def reserve_decision(self, *args, **kwargs) -> dict[str, Any]:
             assert len(dispatch.active) == 5 and freed_at
             reservations.append(time.monotonic())
             return {"owner_token": "one-media", "stage": "media"}
@@ -812,11 +815,11 @@ def test_due_media_waits_for_one_slot_before_owner_reservation_and_keeps_five_co
         waiting.set()
         original_wait(seconds)
 
-    dispatch.wait = observed_wait
+    dispatch.wait = observed_wait  # pyright: ignore[reportAttributeAccessIssue]
     for index in range(6):
         dispatch({"owner_token": str(index), "stage": "comments"})
         assert entered[index].wait(2)
-    scheduler = Scheduler(store, admit=lambda _: True, dispatch=dispatch, reconcile=lambda _: "unknown")
+    scheduler = Scheduler(store, admit=lambda _: True, dispatch=dispatch, reconcile=lambda _: "unknown")  # pyright: ignore[reportArgumentType]
 
     def serve():
         try:
@@ -858,7 +861,7 @@ def test_partial_batch_wait_keeps_media_due_across_partition_continuations_and_s
     item = {"run_id": "partial-run", "generation": 1}
     seen, media_occupancy = [], []
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         if reservation["stage"] == "comments":
             entered.set()
             assert release.wait(5)
@@ -867,7 +870,7 @@ def test_partial_batch_wait_keeps_media_due_across_partition_continuations_and_s
         return {"outcome": "committed"}
 
     class Store:
-        def decision(self, item, *args):
+        def decision(self, item, *args) -> dict[str, Any]:
             return {"kind": "wait", "seconds": 0.01}
 
         def complete_partition(self, *args, **kwargs):
@@ -876,7 +879,7 @@ def test_partial_batch_wait_keeps_media_due_across_partition_continuations_and_s
     class FakeScheduler:
         clock = staticmethod(lambda: None)
 
-        def tick(self, part, ordinal):
+        def tick(self, part, ordinal) -> dict[str, Any]:
             seen.append(bool(part.get("prefer_media")))
             if len(seen) < 3:
                 # A partial comment wait followed by the eight-candidate
@@ -918,7 +921,7 @@ def test_denied_media_retains_due_turn_and_uses_existing_backoff_before_reservat
     waits, attempts = [], []
 
     class Store:
-        def decision(self, part, *args):
+        def decision(self, part, *args) -> dict[str, Any]:
             assert part["prefer_media"]
             return {"kind": "target", "stage": "media", "target_key": "ready"}
 
@@ -934,9 +937,9 @@ def test_denied_media_retains_due_turn_and_uses_existing_backoff_before_reservat
     dispatch = LocalDispatch(lambda *_args, **_kwargs: pytest.fail("Denied media executed"), abort)
     dispatch.bind(item, 6)
     dispatch.media_fairness[(item["run_id"], 1)]["due"] = True
-    dispatch.wait = waits.append
+    dispatch.wait = waits.append  # pyright: ignore[reportAttributeAccessIssue]
     scheduler = Scheduler(
-        Store(),
+        Store(),  # pyright: ignore[reportArgumentType]
         admit=lambda _: attempts.append(True) and False,
         dispatch=dispatch,
         reconcile=lambda _: "unknown",
@@ -964,12 +967,12 @@ def test_six_submission_fairness_counter_survives_partition_boundaries_without_w
     calls = []
     submissions = []
 
-    def execute(reservation, **kwargs):
+    def execute(reservation, **kwargs) -> dict[str, Any]:
         calls.append(reservation["stage"])
         return {"outcome": "committed"}
 
     class Store:
-        def decision(self, part, *args):
+        def decision(self, part, *args) -> dict[str, Any]:
             return {"kind": "target", "stage": "media" if part.get("prefer_media") else "comments"}
 
         def complete_partition(self, *args, **kwargs):
@@ -978,7 +981,7 @@ def test_six_submission_fairness_counter_survives_partition_boundaries_without_w
     class FakeScheduler:
         clock = staticmethod(lambda: None)
 
-        def tick(self, part, ordinal):
+        def tick(self, part, ordinal) -> dict[str, Any]:
             submissions.append("media" if part.get("prefer_media") else "comments")
             dispatch(
                 {
@@ -1019,7 +1022,7 @@ def test_media_turn_abort_or_fence_reaps_existing_comment_children(monkeypatch, 
     abort, entered, reaped = (threading.Event() for _ in range(3))
     item = {"run_id": "fenced-run", "generation": 1}
 
-    def execute(*args, **kwargs):
+    def execute(*args, **kwargs) -> dict[str, Any]:
         entered.set()
         assert abort.wait(3)
         reaped.set()

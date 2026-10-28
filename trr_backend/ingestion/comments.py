@@ -13,7 +13,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -28,6 +28,7 @@ from trr_backend.ingestion.authenticated_relay_contract import (
     continuation_matches,
     valid_provenance,
 )
+from trr_backend.ingestion.callable_attributes import with_attributes
 from trr_backend.ingestion.canonical import normalize_comment_source, write_comments
 from trr_backend.ingestion.domain import Conflict, Failure, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
 from trr_backend.ingestion.evidence import Evidence
@@ -158,7 +159,7 @@ class CommentSource(Protocol):
 
 def native_child_rejection(payload: Mapping[str, Any]) -> bool:
     """Operation-local native denial; HTTP and authentication guards still win."""
-    pending = [payload]
+    pending: list[Any] = [payload]
     native_code = False
     while pending:
         value = pending.pop()
@@ -291,7 +292,7 @@ def comment_page_failure(value: Any) -> tuple[str, float | None] | None:
     if rate:
         retry = value.get("retry_after")
         try:
-            retry = float(retry) if type(retry) in (int, float) else None
+            retry = float(retry) if type(retry) in (int, float) and isinstance(retry, (int, float)) else None
         except OverflowError:
             retry = None
         return "rate_limited", retry if retry is not None and math.isfinite(retry) and retry >= 0 else None
@@ -646,7 +647,7 @@ def _advance(state: dict[str, Any], page: CommentPage, *, scan_started_at: datet
     def advance_lane(key: str, cursor: str | None, exhausted: bool, param: str | None) -> None:
         # Page preparation shares untouched records with its prior checkpoint.
         # Copy the changed lane and its lists before adding native progress.
-        lane = dict(state["lanes"].get(key) or {"cursors": [], "exhausted": False, "repeated": False})
+        lane: dict[str, Any] = dict(state["lanes"].get(key) or {"cursors": [], "exhausted": False, "repeated": False})
         lane["cursors"] = list(lane.get("cursors") or [])
         lane["cursor_keys"] = list(lane.get("cursor_keys") or [])
         state["lanes"][key] = lane
@@ -1034,31 +1035,36 @@ class CommentActivity:
         # The production source gate can fence ownership and count its permit
         # atomically after cooldown admission. Older/custom sources keep the
         # ordinary callback above.
-        pre_source_request.in_transaction = lambda conn: self.store.check_owner(
-            **owned, record_request=True, connection=conn
-        )
-        pre_source_request.in_transaction.release_in_transaction = (
-            lambda conn, permit: self.store.release_unsent_request(**owned, permit=permit, connection=conn)
+        in_transaction = with_attributes(
+            lambda conn: self.store.check_owner(**owned, record_request=True, connection=conn),
+            release_in_transaction=lambda conn, permit: self.store.release_unsent_request(
+                **owned, permit=permit, connection=conn
+            ),
         )
         if type(self.store) is Store:
-            pre_source_request.in_transaction.finalize_in_transaction = (
-                lambda conn, sql, params: self.store.finalize_request_admission(
+            with_attributes(
+                in_transaction,
+                finalize_in_transaction=lambda conn, sql, params: self.store.finalize_request_admission(
                     **owned, connection=conn, lane_update=sql, lane_params=params
-                )
+                ),
             )
-        pre_source_request.run_id = run_id
-        pre_source_request.run_generation = generation
-        pre_source_request.owner_generation = target["owner_generation"]
-        pre_source_request.observation_clock = self.clock
+        with_attributes(
+            pre_source_request,
+            in_transaction=in_transaction,
+            run_id=run_id,
+            run_generation=generation,
+            owner_generation=target["owner_generation"],
+            observation_clock=self.clock,
+        )
         # Observation clocks may be controlled for replay. Reservation expiry is
         # physical wall time; leave two seconds to cancel and reap HTTP tasks.
         expires = target.get("owner_expires_at")
         if expires is not None:
             remaining = (expires - datetime.now(UTC)).total_seconds() - 2
-            pre_source_request.deadline = time.monotonic() + max(0, remaining)
+            with_attributes(pre_source_request, deadline=time.monotonic() + max(0, remaining))
         bounded_deadline = source_deadline(getattr(pre_source_request, "deadline", None))
         if bounded_deadline is not None:
-            pre_source_request.deadline = bounded_deadline
+            with_attributes(pre_source_request, deadline=bounded_deadline)
         summary = source(
             shortcode=target_key,
             checkpoint=json.loads(stable_json(current_checkpoint)),
@@ -1326,22 +1332,20 @@ class CommentActivity:
         page_transaction=None,
     ) -> str:
         """Canonical page, receipt and checkpoint share Store's lock/fence order."""
-        with (
-            (
-                nullcontext(page_transaction.connection) if page_transaction is not None else self.store.transaction()
-            ) as conn,
-            conn.cursor(cursor_factory=RealDictCursor) as cur,
-        ):
+        page_scope: AbstractContextManager[Any] = (
+            nullcontext(page_transaction.connection) if page_transaction is not None else self.store.transaction()
+        )
+        with page_scope as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             if page_transaction is not None:
                 target = page_transaction.target
-            elif self.writer is write_comments:
-                # The production writer changes only post-scoped comment rows.
-                # Arbitrary custom writers may update the run and must retain
-                # an exclusive fence rather than upgrade a shared row lock.
-                run = self.store._execution_run(cur, owned["run_id"], owned["account"], shared_fence=True)
             else:
-                run = self.store._run(cur, owned["run_id"], owned["account"])
-            if page_transaction is None:
+                if self.writer is write_comments:
+                    # The production writer changes only post-scoped comment rows.
+                    # Arbitrary custom writers may update the run and must retain
+                    # an exclusive fence rather than upgrade a shared row lock.
+                    run = self.store._execution_run(cur, owned["run_id"], owned["account"], shared_fence=True)
+                else:
+                    run = self.store._run(cur, owned["run_id"], owned["account"])
                 if run["generation"] != owned["generation"] or run["state"] not in {"queued", "running"}:
                     raise LostOwnership("Comment page belongs to a superseded execution")
                 target = self._lock_checkpoint(cur, owned, expected_checkpoint, expected_checkpoint_hash)

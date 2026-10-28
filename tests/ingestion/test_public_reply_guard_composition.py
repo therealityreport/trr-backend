@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -15,7 +16,7 @@ from trr_backend.ingestion.domain import fingerprint
 NOW = public.OBSERVED + timedelta(minutes=5)
 
 
-def checkpoint(mode):
+def checkpoint(mode) -> dict[str, Any]:
     technical = {
         "version": 1,
         "code": "source_incomplete",
@@ -25,7 +26,7 @@ def checkpoint(mode):
     }
     access = {"lanes": ["bad"]}
     if mode == "server":
-        access.update(retry_source="server_retry_after", next_attempt_at=(NOW + timedelta(hours=1)).isoformat())
+        access.update(retry_source="server_retry_after", next_attempt_at=(NOW + timedelta(hours=1)).isoformat())  # pyright: ignore[reportArgumentType]
     return {
         "comment_pages": {
             "adapter_family": "instagram_public_relay",
@@ -83,7 +84,7 @@ def test_normal_source_sends_only_healthy_parent_when_either_overlap_guard_defer
     def before():
         pass
 
-    before.observation_clock = lambda: NOW
+    before.observation_clock = lambda: NOW  # pyright: ignore[reportFunctionMemberAccess]
     inventory = tuple(CommentResumeNode(public.actual_parent_shape(name), public.OBSERVED) for name in ("bad", "good"))
     result = fetch(
         shortcode="fixture",
@@ -147,7 +148,7 @@ def test_top_restart_does_not_send_deferred_reply_requests(monkeypatch, mode):
     def before():
         pass
 
-    before.observation_clock = lambda: NOW
+    before.observation_clock = lambda: NOW  # pyright: ignore[reportFunctionMemberAccess]
     fetch(
         shortcode="fixture",
         checkpoint=saved,

@@ -255,7 +255,7 @@ def test_independent_watchdog_deadline_or_eof_cleans_child_group(monkeypatch, me
     try:
         if disconnect:
             os.close(write_fd)
-        result = probe.watchdog(metadata[0], read_fd, timeout=0.15)
+        result = probe.watchdog(metadata[0], read_fd, timeout=0.15)  # pyright: ignore[reportArgumentType]
     finally:
         os.close(read_fd)
         if not disconnect:

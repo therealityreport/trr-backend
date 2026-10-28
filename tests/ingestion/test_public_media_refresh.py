@@ -118,6 +118,7 @@ def test_public_native_refresh_has_no_credential_selection_and_preserves_storage
         "select stage,source_identity,payload from social.instagram_ingestion_evidence where run_id=%s",
         (owned["run_id"],),
     )
+    assert retained is not None
     assert retained[:2] == ("media", "instagram:post:AAAABC")
     assert "fresh-private-signature" not in retained[2] and "image_versions2" in retained[2]
     assert row(tx, "select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],)) == (
@@ -153,6 +154,7 @@ def test_public_post_refresh_accepts_verified_cdn_relocation(lanes):
     assert "Cookie" not in session.sent[0][0].headers and "Authorization" not in session.sent[0][0].headers
     assert refresh._snapshot is original and original.media_urls == (old, SECOND)
     retained = row(tx, "select payload from social.instagram_ingestion_evidence where run_id=%s", (owned["run_id"],))
+    assert retained is not None
     assert "fresh-private-signature" not in retained[0]
     assert row(
         tx, "select requests,outcome from social.instagram_ingestion_targets where run_id=%s", (owned["run_id"],)
@@ -192,6 +194,7 @@ def test_public_avatar_refresh_uses_anonymous_profile_once_without_credentials(l
         "select source_identity,payload from social.instagram_ingestion_evidence where run_id=%s",
         (owned["run_id"],),
     )
+    assert retained is not None
     assert retained[0] == "instagram:profile:writer" and "fresh-signature" not in retained[1]
     assert row(
         tx,

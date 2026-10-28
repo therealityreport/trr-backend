@@ -37,7 +37,7 @@ def _counters(phase, metrics):
         raise ValueError("Progress metrics must be a mapping")
     if phase == "media":
         return {(key,): _nonnegative_count(metrics.get(key, 0)) for key in _MEDIA_METRICS}
-    counters = {("canonical_ids",): _nonnegative_count(metrics.get("canonical_ids", 0))}
+    counters: dict[tuple[str, ...], int] = {("canonical_ids",): _nonnegative_count(metrics.get("canonical_ids", 0))}
     targets = metrics.get("targets", {})
     if not isinstance(targets, Mapping):
         raise ValueError("Comment targets must be a mapping")

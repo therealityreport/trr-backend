@@ -152,6 +152,7 @@ def test_bounded_projection_drops_secrets_invalid_numbers_and_nested_extension_d
         * 33,
     )
     result = project_diagnostics(value)
+    assert result is not None
     assert result["envelope"] == {"code": MAX_CODE, "severity": "OTHER", "extensions": {"code": 123}}
     assert result["body_sha256"] is None and result["body_complete"] is False
     assert result["errors_truncated"] is True and len(result["errors"]) == 32
@@ -287,7 +288,7 @@ def test_diagnostic_variation_preserves_exact_legacy_failure_fingerprint_and_hol
         assert previous["request_fingerprint"] == original_hash
         assert previous["failure_count"] == index and previous["technical_hold"] == (index >= 3)
         assert previous["content_hash"] == captured.content_hash and captured.payload_json == before
-        assert previous["diagnostic_version"] == 1
+        assert previous["diagnostic_version"] == 1  # pyright: ignore[reportTypedDictNotRequiredAccess]
         assert previous["next_attempt_at"] == (public.OBSERVED + timedelta(seconds=60 * 2 ** (index - 1))).isoformat()
     assert len(hashes) == 4
     # Only this validated new metadata is excluded. Native source changes retain
@@ -359,7 +360,7 @@ def test_normal_resume_prioritizes_only_eligible_missing_diagnostic_version(monk
     def before():
         pass
 
-    before.observation_clock = lambda: public.OBSERVED + timedelta(minutes=5)
+    before.observation_clock = lambda: public.OBSERVED + timedelta(minutes=5)  # pyright: ignore[reportFunctionMemberAccess]
     fetch(
         shortcode="fixture",
         checkpoint=checkpoint,
@@ -397,7 +398,7 @@ def test_qualified_retention_retires_priority_without_resetting_hold_or_waits():
     updated = record_failure(
         initial, payload=qualified_payload, evidence=qualified, evidence_id="new", owner_generation=2, now=now
     )
-    assert updated["diagnostic_version"] == 1 and updated["failure_count"] == 2
+    assert updated["diagnostic_version"] == 1 and updated["failure_count"] == 2  # pyright: ignore[reportTypedDictNotRequiredAccess]
     assert updated["request_fingerprint"] == initial["request_fingerprint"]
     assert "needs_diagnostics" not in resume_failure(updated, now=now + timedelta(days=1))
     for changed in [{"technical_hold": True}, {"next_attempt_at": (now + timedelta(hours=1)).isoformat()}]:

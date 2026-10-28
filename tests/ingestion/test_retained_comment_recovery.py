@@ -304,7 +304,7 @@ def test_stream_never_selects_page_checkpoints_and_no_matching_page_roundtrips(d
     queries = []
 
     class CountingCursor(RealDictCursor):
-        def execute(self, sql, args=None):
+        def execute(self, sql, args=None):  # pyright: ignore[reportIncompatibleMethodOverride]
             queries.append(str(sql))
             return super().execute(sql, args)
 

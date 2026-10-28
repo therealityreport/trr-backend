@@ -145,7 +145,7 @@ def test_legacy_catalog_routes_reject_instagram_only_while_v2_owns_launches(monk
     with pytest.raises(HTTPException) as caught:
         _reject_legacy_instagram_launch("Instagram")
     assert caught.value.status_code == 409
-    assert caught.value.detail["code"] == "instagram_v2_owns_launches"
+    assert caught.value.detail["code"] == "instagram_v2_owns_launches"  # pyright: ignore[reportArgumentType]
     _reject_legacy_instagram_launch("tiktok")
     monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_POLICY", "canary")
     _reject_legacy_instagram_launch("instagram")
@@ -171,7 +171,7 @@ class _Capabilities:
 )
 def test_capabilities_follow_the_policy(monkeypatch, policy, expected):
     service = object.__new__(composition.CanaryCommandService)
-    service.store = type("Store", (), {"policy": policy})()
+    service.store = type("Store", (), {"policy": policy})()  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr(composition.CommandService, "capabilities", lambda self, handle: _Capabilities(handle))
     assert service.capabilities("bravotv").supported_actions == expected
     blocked = service.capabilities("someone_else")

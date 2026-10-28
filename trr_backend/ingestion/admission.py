@@ -306,7 +306,7 @@ class Admission:
                 requested = effective_comments_limit_from_run(run, run.get("execution_policy"))
             window = run.get("_bounded_window") or {}
             if (window.get("stop_policy") or {}).get("mode") == "useful_progress":
-                allowed_stage = {"comments": "comments", "media": "media_mirror"}.get(window.get("phase"))
+                allowed_stage = {"comments": "comments", "media": "media_mirror"}.get(window.get("phase") or "")
                 if stage != allowed_stage:
                     return False
             elif stage == "media_mirror" and window and run.get("_comments_ready"):

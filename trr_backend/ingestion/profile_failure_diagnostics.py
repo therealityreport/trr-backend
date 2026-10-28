@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime
+from typing import Any
 
 PARSER_VERSION = "instagram-public-profile-failure-v1"
 PHASES = frozenset(
@@ -101,18 +102,23 @@ def _integer(value, maximum=2**63 - 1):
     return type(value) is int and 0 <= value <= maximum
 
 
+def _exact_type(value: Any, expected: type) -> bool:
+    """Reject subclasses; keeps the checked value untyped for the strict field reads below."""
+    return type(value) is expected
+
+
 def _digits(value):
     return value is None or isinstance(value, str) and re.fullmatch(r"[0-9]{1,64}", value) is not None
 
 
-def validate_payload(payload):
+def validate_payload(payload: Any) -> dict[str, Any]:
     """Parser-specific strict projection: unknown fields/types fail closed."""
 
     def require(condition):
         if not condition:
             raise ValueError("Invalid bounded public profile failure evidence")
 
-    require(type(payload) is dict and set(payload) == _TOP)
+    require(_exact_type(payload, dict) and set(payload) == _TOP)
     require(type(payload["version"]) is int and payload["version"] == 1 and payload["kind"] == "public_profile_failure")
     require(isinstance(payload["username"], str) and re.fullmatch(r"[a-z0-9._]{1,30}", payload["username"]) is not None)
     require(_digits(payload["user_id"]) and _digits(payload["relay_doc_id"]))
@@ -124,10 +130,10 @@ def validate_payload(payload):
         and payload["code"] in REASONS
         and _integer(payload["count"], 2)
     )
-    require(type(payload["basis"]) is list and len(payload["basis"]) <= 2)
+    require(_exact_type(payload["basis"], list) and len(payload["basis"]) <= 2)
     ordinals = []
     for fact in payload["basis"]:
-        require(type(fact) is dict and set(fact) == _FACT)
+        require(_exact_type(fact, dict) and set(fact) == _FACT)
         require(
             type(fact["phase"]) is str
             and type(fact["code"]) is str
@@ -146,12 +152,12 @@ def validate_payload(payload):
             or (not fact["body_observed"] and digest is None and fact["bytes"] == 0)
         )
         require(
-            type(fact["native_codes"]) is list
+            _exact_type(fact["native_codes"], list)
             and len(fact["native_codes"]) <= 8
             and all(_integer(code, 2**31 - 1) for code in fact["native_codes"])
         )
         shape = fact["shape"]
-        require(type(shape) is dict and set(shape) == SHAPE_BOOLEANS | {"errors_count"})
+        require(_exact_type(shape, dict) and set(shape) == SHAPE_BOOLEANS | {"errors_count"})
         require(all(type(shape[key]) is bool for key in SHAPE_BOOLEANS) and _integer(shape["errors_count"], 33))
         try:
             stamp = datetime.fromisoformat(fact["observed_at"])
@@ -215,10 +221,10 @@ def shape_and_codes(payload):
 
 class ResponseFacts:
     def __init__(self):
-        self.facts = []
+        self.facts: list[dict[str, Any]] = []
         self.phase = "request"
-        self.current = None
-        self.hasher = None
+        self.current: dict[str, Any] | None = None
+        self.hasher: Any = None
 
     def begin(self, phase, ordinal, permit):
         self.phase = "request"

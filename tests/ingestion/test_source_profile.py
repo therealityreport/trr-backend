@@ -73,7 +73,7 @@ def test_profile_round_trip_and_immutability(mode):
     assert restored.digest == intent.digest
     assert intent.digest != RunIntent(account="bravotv").digest
     with pytest.raises(FrozenInstanceError):
-        profile.access_mode = "other"
+        profile.access_mode = "other"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @pytest.mark.parametrize(

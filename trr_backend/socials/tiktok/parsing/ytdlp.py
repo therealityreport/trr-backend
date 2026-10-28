@@ -3,7 +3,7 @@
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.tiktok.constants import (
     ENV_SOCIAL_TIKTOK_COOKIES_FILE,
@@ -125,6 +125,14 @@ def parse_ytdlp_payload(payload: dict[str, Any]) -> tuple[list[str], str | None]
 
 class YtDlpParsingMixin:
     """Convert yt-dlp metadata into ``TikTokPost`` records."""
+
+    if TYPE_CHECKING:
+        # Sibling-mixin helpers supplied by ``TikTokScraper``'s other parsing mixins.
+        @staticmethod
+        def _safe_int_metric(value: Any) -> int: ...
+        def _extract_hashtags(self, text: str) -> list[str]: ...
+        def _extract_mentions(self, text: str) -> list[str]: ...
+        def _pick_best_avatar_url(self, *candidates: Any) -> str | None: ...
 
     def _parse_ytdlp_metadata(self, data: dict, config: TikTokScrapeConfig) -> TikTokPost:
         """Convert yt-dlp JSON metadata into a TikTokPost."""

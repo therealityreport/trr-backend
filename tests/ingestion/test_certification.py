@@ -19,7 +19,7 @@ for _name, _value in vars(offline_comments).items():
     if isinstance(_value, type) and _value.__module__ == offline_comments.__name__:
         globals()["TestRetained" + _name] = _value
 
-del _name, _value
+del _name, _value  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 @pytest.fixture(autouse=True)
@@ -260,8 +260,8 @@ def test_rate_limit_pauses_queued_reads_and_preserves_retry_after():
     item = hosted.physical_plan(report(), BASE)[0]
     client = Client(png())
     stop = Event()
-    Session.response = Response(png(), status=429)
-    Session.response.headers["Retry-After"] = "120"
+    Session.response = Response(png(), status=429)  # pyright: ignore[reportAttributeAccessIssue]
+    Session.response.headers["Retry-After"] = "120"  # pyright: ignore[reportAttributeAccessIssue]
     with patch("requests.Session", Session):
         result = hosted.inspect_object(item, client, SimpleNamespace(bucket="trr-media-prod"), stop=stop)
         paused = hosted.inspect_object(item, client, SimpleNamespace(bucket="trr-media-prod"), stop=stop)

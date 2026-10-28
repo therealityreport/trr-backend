@@ -429,7 +429,7 @@ class BoundedSource:
         self.source, self.budget, self.post = source, budget, post
         self.comments, self.interrupt_after = comments, interrupt_after
         self.check_exclusive = check_exclusive
-        self.pause = None
+        self.pause: str | None = None
 
     def __call__(self, **callbacks):
         key = "pre_source_request" if self.comments else "on_request"
@@ -462,7 +462,13 @@ class BoundedSource:
             from trr_backend.ingestion.comments import comment_page_failure, native_child_rejection
 
             successful_page = not comment_page_failure(payload) and not native_child_rejection(payload)
-            if self.comments and self.interrupt_after and lane == self.interrupt_after and successful_page:
+            if (
+                self.comments
+                and self.interrupt_after
+                and lane is not None
+                and lane == self.interrupt_after
+                and successful_page
+            ):
                 self.pause = "validation_interrupted_" + lane
                 raise ValidationPause(self.pause, datetime.now(UTC))
 

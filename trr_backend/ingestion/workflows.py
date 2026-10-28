@@ -14,16 +14,20 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import version
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.ingestion.domain import Conflict, LostOwnership, Stage
 from trr_backend.ingestion.workflow_store import PARTITION_SIZE, WorkflowStore
+
+if TYPE_CHECKING:
+    from dbos import DBOSConfig
 
 
 class ControlPlaneError(RuntimeError):
     """Safe error classification; never serialize a connection string or token."""
 
 
-def control_call(operation: Callable, *args, **kwargs):
+def control_call(operation: Callable, *args, **kwargs) -> Any:
     """Retry only one idempotent control operation, never a provider callback."""
     for attempt in range(3):
         try:
@@ -133,7 +137,7 @@ class RuntimeConfig:
         if not 1 <= self.lifetime_seconds <= 110:
             raise ValueError("Runtime budget must leave cleanup time before the existing 120s wakeup")
 
-    def dbos_config(self):
+    def dbos_config(self) -> DBOSConfig:
         return {
             "name": "trr-instagram-ingestion",
             "application_version": self.workflow_version,
@@ -143,7 +147,6 @@ class RuntimeConfig:
             "sys_db_polling_concurrency": 1,
             "max_executor_threads": 2,
             "run_migrations": False,
-            "admin_server": False,
             "enable_otlp": False,
             "db_engine_kwargs": {
                 "max_overflow": 0,

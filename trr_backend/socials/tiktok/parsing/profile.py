@@ -12,7 +12,7 @@ namespace through ``_configure_legacy_provider``; this module never imports it.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.provider_registry import register_legacy_patchable_namespace
 from trr_backend.socials.tiktok.models import _dict_or_empty
@@ -20,6 +20,12 @@ from trr_backend.socials.tiktok.models import _dict_or_empty
 
 class ProfileParsingMixin:
     """Build TikTok profile snapshots from user-detail and HTML payloads."""
+
+    if TYPE_CHECKING:
+        # Sibling-mixin helpers supplied by ``TikTokScraper``'s other parsing mixins.
+        @staticmethod
+        def _safe_int_metric(value: Any) -> int: ...
+        def _pick_best_avatar_url(self, *candidates: Any) -> str | None: ...
 
     def _extract_user_detail_avatar_url(self, user_data: dict | None) -> str | None:
         if not isinstance(user_data, dict):

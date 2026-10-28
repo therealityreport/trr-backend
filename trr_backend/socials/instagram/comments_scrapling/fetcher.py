@@ -22,7 +22,7 @@ import re
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -3519,6 +3519,12 @@ class InstagramCommentsScraplingFetcher:
         self._http_client_lock = asyncio.Lock()
         self._api_pace_lock = asyncio.Lock()
 
+    def _require_fetcher(self) -> Any:
+        """Return the browser fetcher, which public-only runs never construct."""
+        if self._fetcher is None:
+            raise RuntimeError("Browser fetcher is unavailable for public-only Instagram comment runs")
+        return self._fetcher
+
     # -------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------
@@ -5823,7 +5829,7 @@ class InstagramCommentsScraplingFetcher:
         try:
             self._browser_used = True
             self._scrapling_fetcher_invoked = "StealthyFetcher"
-            response = await self._fetcher.async_fetch(
+            response = await self._require_fetcher().async_fetch(
                 post_url,
                 locale=SCRAPLING_BROWSER_LOCALE,
                 headless=self._headless,
@@ -6182,7 +6188,7 @@ class InstagramCommentsScraplingFetcher:
         try:
             self._browser_used = True
             self._scrapling_fetcher_invoked = "StealthyFetcher"
-            response = await self._fetcher.async_fetch(
+            response = await self._require_fetcher().async_fetch(
                 post_url,
                 locale=SCRAPLING_BROWSER_LOCALE,
                 headless=self._headless,
@@ -7485,6 +7491,7 @@ class InstagramCommentsScraplingFetcher:
                 ]
             parent_complete = False
             technical_branch_failed = False
+            stop_reason: str | None = None
             for friendly_name, doc_id in parent_attempts:
                 if not relay_is_logged_in and rejection_state["count"] >= rejection_limit:
                     metadata["rejection_circuit_open"] = True
@@ -7506,7 +7513,7 @@ class InstagramCommentsScraplingFetcher:
                 same_resume_doc = strict_native_exhaustion and lane_resume.get("relay_doc_id") == normalized_doc_id
                 cursor: str | None = lane_resume.get("after") if same_resume_doc else None
                 seen_cursors: set[str] = set(lane_resume.get("seen_cursors") or []) if same_resume_doc else set()
-                stop_reason: str | None = None
+                stop_reason = None
 
                 # Per-attempt child page-size downgrade (mirrors the parent path):
                 # downgrade once to the safe floor and retry the same cursor if a
@@ -7566,7 +7573,7 @@ class InstagramCommentsScraplingFetcher:
                     *,
                     payload_ref: Mapping[str, Any] | None = None,
                     decode_retry_limit_ref: int = decode_retry_limit,
-                ) -> bool:
+                ) -> Generator[Delay, bool, bool]:
                     nonlocal decode_retry_count
                     block_reason = _public_relay_block_reason_from_response(
                         response_ref, payload=payload_ref, child_operation=not relay_is_logged_in
@@ -7588,14 +7595,14 @@ class InstagramCommentsScraplingFetcher:
 
                 page_index = 0
                 while max_pages is None or page_index < max_pages:
-                    if bounded_public and flattened_comment_count(child_comments) >= reply_budget:
+                    if reply_budget is not None and flattened_comment_count(child_comments) >= reply_budget:
                         stop_reason = "max_comments_reached"
                         break
                     page_index += 1
                     variables: dict[str, Any] = {
                         "__relay_internal__pv__PolarisIsLoggedInrelayprovider": relay_is_logged_in,
                         "first": min(effective_page_size, reply_budget - flattened_comment_count(child_comments))
-                        if bounded_public
+                        if reply_budget is not None
                         else effective_page_size,
                         "is_chronological": False,
                         "media_id": media_id,
@@ -7846,7 +7853,7 @@ class InstagramCommentsScraplingFetcher:
                             for comment in page_comments
                             if str(comment.comment_id or "").strip() not in existing_reply_ids
                         ]
-                    if bounded_public:
+                    if reply_budget is not None:
                         appended, _ = _merge_bounded_public_comments(
                             child_comments,
                             page_comments,
@@ -7877,7 +7884,7 @@ class InstagramCommentsScraplingFetcher:
                         if type(more) is not bool or (more and not next_cursor):
                             stop_reason = "graphql_child_relay_unproved_pagination"
                             break
-                    if bounded_public and flattened_comment_count(child_comments) >= reply_budget:
+                    if reply_budget is not None and flattened_comment_count(child_comments) >= reply_budget:
                         stop_reason = "max_comments_reached"
                         break
                     if not page_metadata.get("has_next_page") or not next_cursor:
@@ -7991,6 +7998,7 @@ class InstagramCommentsScraplingFetcher:
 
         def before_dispatch(request):
             admitted = False
+            state: dict[str, Any] | None = None
             try:
                 self._prepare_credentials(public_client.cookies)
                 permit = self._before_source("graphql_replies")
@@ -8015,7 +8023,7 @@ class InstagramCommentsScraplingFetcher:
                 state["descriptor"] = descriptor
                 return descriptor
             except BaseException:
-                if admitted:
+                if admitted and state is not None:
                     self._retry_strict_public_refund(state)
                     dispatch_turns.pop(request.parent_id, None)
                     refund_states.pop(request.parent_id)
@@ -8100,7 +8108,7 @@ class InstagramCommentsScraplingFetcher:
             canary_run = os.environ.get("SOCIAL_INSTAGRAM_PUBLIC_REPLY_CANARY_RUN_ID")
             canary_run_generation = os.environ.get("SOCIAL_INSTAGRAM_PUBLIC_REPLY_CANARY_RUN_GENERATION")
             if any((canary_target, canary_generation, canary_run, canary_run_generation)):
-                if not all((canary_target, canary_generation, canary_run, canary_run_generation)) or not (
+                if not (canary_target and canary_generation and canary_run and canary_run_generation) or not (
                     canary_generation.isdecimal() and canary_run_generation.isdecimal()
                 ):
                     raise ValueError("Reply canary requires exact run, target, run generation and owner generation")
@@ -8138,6 +8146,10 @@ class InstagramCommentsScraplingFetcher:
             delays = [value for value in delays if value is not None]
             self._public_retry_after_seconds = max(delays) if delays else None
 
+        def cancel_pacing() -> None:
+            for turn in tuple(dispatch_turns.values()):
+                turn.cancel()
+
         unresolved_refund_error = None
         try:
             scheduled_parents = []
@@ -8168,7 +8180,7 @@ class InstagramCommentsScraplingFetcher:
                     pace=pace,
                     before_dispatch=before_dispatch,
                     discard=discard if self._public_only and strict_native_exhaustion else None,
-                    cancel_pacing=lambda: [turn.cancel() for turn in tuple(dispatch_turns.values())],
+                    cancel_pacing=cancel_pacing,
                     concurrency=concurrency,
                     telemetry=telemetry,
                     stop=lambda: halted or rejection_state["count"] >= rejection_limit,
@@ -8681,7 +8693,7 @@ class InstagramCommentsScraplingFetcher:
             try:
                 self._browser_used = True
                 self._scrapling_fetcher_invoked = "StealthyFetcher"
-                response = await self._fetcher.async_fetch(
+                response = await self._require_fetcher().async_fetch(
                     post_url,
                     locale=SCRAPLING_BROWSER_LOCALE,
                     headless=self._headless,
@@ -9130,14 +9142,15 @@ class InstagramCommentsScraplingFetcher:
         `csrftoken` / session state.
         """
         new_cookies = _extract_response_cookies(response)
-        if getattr(self, "_credential_identity", None) is not None:
-            snapshot = self._credential_identity.merge(self._raw_cookies, new_cookies)
-            self._credential_identity.validate_snapshot(self._parser.cookies)
-            jars = [self._parser.session.cookies]
+        identity = getattr(self, "_credential_identity", None)
+        if identity is not None:
+            snapshot = identity.merge(self._raw_cookies, new_cookies)
+            identity.validate_snapshot(self._parser.cookies)
+            jars: list[Any] = [self._parser.session.cookies]
             if self._http_client is not None:
                 jars.append(self._http_client.cookies)
             for jar in jars:
-                self._credential_identity.prepare_jar(jar, snapshot)
+                identity.prepare_jar(jar, snapshot)
             for jar in jars:
                 jar.clear()
                 jar.update(snapshot)
@@ -9255,7 +9268,7 @@ class InstagramCommentsScraplingFetcher:
         )
         self._browser_used = True
         self._scrapling_fetcher_invoked = "StealthyFetcher"
-        response = await self._fetcher.async_fetch(
+        response = await self._require_fetcher().async_fetch(
             url,
             locale=SCRAPLING_BROWSER_LOCALE,
             headless=self._headless,
@@ -9482,7 +9495,7 @@ class InstagramCommentsScraplingFetcher:
 
         self._browser_used = True
         self._scrapling_fetcher_invoked = "StealthyFetcher"
-        container_response = await self._fetcher.async_fetch(
+        container_response = await self._require_fetcher().async_fetch(
             referer,
             locale=SCRAPLING_BROWSER_LOCALE,
             headless=self._headless,
@@ -9541,7 +9554,7 @@ class InstagramCommentsScraplingFetcher:
         try:
             self._browser_used = True
             self._scrapling_fetcher_invoked = "StealthyFetcher"
-            fetch_task = self._fetcher.async_fetch(
+            fetch_task = self._require_fetcher().async_fetch(
                 request_url,
                 locale=SCRAPLING_BROWSER_LOCALE,
                 headless=self._headless,

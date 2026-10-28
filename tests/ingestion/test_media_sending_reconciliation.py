@@ -38,6 +38,7 @@ def setup(database, *, proof=True):
     item = store.seed(run)
     decision = {"kind": "target", "stage": "media", "target_key": owned["target_key"]}
     reservation = store.reserve_decision(item, decision)
+    assert reservation is not None
     token = str(reservation["owner_token"])
     store.transition(item, token, "sending")
     with tx() as conn, conn.cursor() as cur:
@@ -47,7 +48,7 @@ def setup(database, *, proof=True):
             " and target_key=%s",
             (owned["run_id"], owned["target_key"]),
         )
-    return owned, tx, store, dict(item, prefer_media=True), token
+    return owned, tx, store, dict(item, prefer_media=True), token  # pyright: ignore[reportArgumentType, reportCallIssue]
 
 
 def test_actual_decision_scheduler_reconciliation_reopens_admission_with_pending_comments(snapshot_workflow_database):

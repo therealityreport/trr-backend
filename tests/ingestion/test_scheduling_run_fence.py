@@ -76,7 +76,9 @@ def ready(database, *, cls=WorkflowStore):
         "stage": Stage.COMMENTS,
         "target_key": key,
     }
-    writer["owner_token"] = str(store.reserve(**writer)["owner_token"])
+    reserve = store.reserve(**writer)
+    assert reserve is not None
+    writer["owner_token"] = str(reserve["owner_token"])
     store.acquire(**writer)
     retained = Evidence.capture(
         source_identity=f"instagram:comments:{key}:comments_api",
@@ -98,7 +100,7 @@ def ready(database, *, cls=WorkflowStore):
     }
     item = dict(owned, engine="dbos", workflow_version="fixture", prefer_media=True)
     part = store.seed(item)
-    return store, tx, dict(part, prefer_media=True), (writer, payload), owned["target_key"]
+    return store, tx, dict(part, prefer_media=True), (writer, payload), owned["target_key"]  # pyright: ignore[reportArgumentType, reportCallIssue]
 
 
 def hold_proof(monkeypatch):
@@ -269,7 +271,7 @@ def test_different_partitions_serialize_media_cursor_and_resume_after_eight(pipe
             "values(%s,'comments','Blocked',12,'source_gap')",
             (owned["run_id"],),
         )
-    part = dict(store.seed(item), prefer_media=True)
+    part = dict(store.seed(item), prefer_media=True)  # pyright: ignore[reportArgumentType, reportCallIssue]
     with tx() as conn, conn.cursor() as cur:
         other_id = store._insert(cur, part, 1)
     other = dict(part, execution_id=other_id)
@@ -321,7 +323,9 @@ def test_profile_inventory_decision_has_no_upgrade_and_rolls_back_atomically(pro
         store.decision(item, 0, NOW)
     assert inventory.profiles(profiles_db, run) == []
     assert not query(
-        tx, "select * from social.instagram_ingestion_decisions where execution_id=%s", (item["execution_id"],)
+        tx,
+        "select * from social.instagram_ingestion_decisions where execution_id=%s",
+        (item["execution_id"],),  # pyright: ignore[reportArgumentType]
     )
     assert (
         query(
@@ -357,7 +361,9 @@ def test_profile_inventory_decision_has_no_upgrade_and_rolls_back_atomically(pro
     assert (
         len(
             query(
-                tx, "select * from social.instagram_ingestion_decisions where execution_id=%s", (item["execution_id"],)
+                tx,
+                "select * from social.instagram_ingestion_decisions where execution_id=%s",
+                (item["execution_id"],),  # pyright: ignore[reportArgumentType]
             )
         )
         == 1
@@ -475,7 +481,7 @@ def test_failed_readiness_rolls_back_cursor_and_decision(pipeline_database, monk
             "where run_id=%s",
             (owned["run_id"],),
         )
-    part = dict(store.seed(item), prefer_media=True)
+    part = dict(store.seed(item), prefer_media=True)  # pyright: ignore[reportArgumentType, reportCallIssue]
     before = query(
         tx,
         "select cursor_state from social.instagram_ingestion_manifests where run_id=%s and stage='media'",

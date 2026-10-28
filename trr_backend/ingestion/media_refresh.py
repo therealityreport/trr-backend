@@ -14,6 +14,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -51,7 +52,7 @@ LOGGER = logging.getLogger(__name__)
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
-def _retained_payload(value):
+def _retained_payload(value: Any) -> Any:
     # Delivery signatures are needed only for this attempt. The retained native
     # shape still contains public asset paths and all parser identity fields.
     if isinstance(value, dict):
@@ -148,7 +149,7 @@ class MediaRefresh:
         self._avatars = {}
         self._avatar_native_ids = {}
         self._avatar_attempted = set()
-        self._snapshot = None
+        self._snapshot: MediaSnapshot | None = None
         self._fresh = None
         self._attempted = False
 
@@ -468,11 +469,15 @@ class MediaRefresh:
                     pinned=True,
                 )
                 validate_detail(parsed)
+                if parsed.post is None or parsed.post.source_id is None:
+                    raise InvalidSourceError("Detail evidence has no native post identity")
                 native_post_id = parsed.post.source_id.split("_", 1)[0]
                 if native_post_id != ExplicitDetailClient._shortcode_to_media_id(self.owned["target_key"]):
                     raise InvalidSourceError("Native post identity mismatch")
                 live = normalize_post_source(payload, account=self.owned["account"])
                 snapshot = self._snapshot
+                if snapshot is None:
+                    raise MediaIncomplete("media_refresh_snapshot_required")
                 if len(live.media_urls) != snapshot.expected_media_count:
                     raise InvalidSourceError("Native media coverage changed")
 

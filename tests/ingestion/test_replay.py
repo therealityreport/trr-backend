@@ -90,8 +90,10 @@ def test_native_envelope_rich_content_and_comment_media_survive_safe_projection(
         source_identity="instagram:one", captured_at=now, parser_version=PARSER_VERSION, payload=source
     )
     parsed = parse_evidence(evidence, account="bravotv", stage=Stage.DETAILS, target_key="one")
+    assert parsed.post is not None
     assert parsed.post.caption.is_edited is True
     assert parsed.post.flags["paid_partnership"] is True
+    assert parsed.post.music_info is not None
     assert parsed.post.music_info["music_asset_info"]["title"] == "Public song"
     assert "private" not in evidence.payload_json
     comments = Evidence.capture(

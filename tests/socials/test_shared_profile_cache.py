@@ -58,6 +58,7 @@ def test_separate_clients_share_values_and_invalidate_inflight(server, monkeypat
     other = redis.Redis(connection_pool=server.connection_pool)
     monkeypatch.setattr(cache, "_client", lambda: other)
     assert cache.begin(key)[1] == {"value": "old"}
+    assert ticket is not None
     assert 0 < server.ttl(ticket.payload_key) <= 30
     cache.invalidate()
     assert cache.begin(key)[1] is None
@@ -70,8 +71,10 @@ def test_separate_clients_share_values_and_invalidate_inflight(server, monkeypat
 def test_generation_loss_does_not_resurrect_old_payload(server):
     ticket, _ = cache.begin(("summary", "x"))
     cache.publish(ticket, {"value": "old"}, 10)
+    assert ticket is not None
     server.delete(ticket.generation_key)
     new, payload = cache.begin(("summary", "x"))
+    assert new is not None
     assert new.generation != ticket.generation
     assert payload is None
     cache.publish(ticket, {"value": "late"}, 10)
@@ -81,6 +84,7 @@ def test_generation_loss_does_not_resurrect_old_payload(server):
 def test_payload_expiry_and_limits(server):
     ticket, _ = cache.begin(("summary", "x"))
     cache.publish(ticket, {"value": "small"}, 1)
+    assert ticket is not None
     server.pexpire(ticket.payload_key, 1)
     time.sleep(0.01)
     assert cache.begin(("summary", "x"))[1] is None

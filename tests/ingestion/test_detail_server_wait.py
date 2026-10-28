@@ -56,7 +56,7 @@ def test_repeated_detail_failures_never_create_local_waits(lanes, transport, mon
         error = failure(code)
         current._outcome(error)
         assert error.next_attempt_at is None
-    state = row(lanes, current)
+    state = row(lanes, current)  # pyright: ignore[reportPossiblyUnboundVariable]
     assert state["failure_generation"] == state["consecutive_failures"] == 5
     assert state["server_retry_after_until"] is state["cooldown_until"] is None
     assert len(state["request_times"]) == 5
@@ -191,6 +191,7 @@ def test_source_auth_replacement_waits_for_actual_server_deadline(lanes):
     original = old.finish_failure("unauthorized", retry_after_seconds=120)
     with pytest.raises(IdentityDeferred, match="identity_cooldown") as blocked:
         gate(lanes, subject=subject, session="new").before_request()
+    assert original is not None
     assert blocked.value.next_attempt_at == original.retry_at
     assert row(lanes, old)["blocked"]
     assert len(row(lanes, old)["request_times"]) == 1
@@ -228,8 +229,8 @@ def test_detail_controlled_http_errors_wait_only_with_real_retry_after(lanes, tr
         assert len(sent) == 1
     else:
         assert len(sent) == 5
-        assert row(lanes, current)["server_retry_after_until"] is None
-    assert len(row(lanes, current)["request_times"]) == len(sent)
+        assert row(lanes, current)["server_retry_after_until"] is None  # pyright: ignore[reportPossiblyUnboundVariable]
+    assert len(row(lanes, current)["request_times"]) == len(sent)  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 def test_detail_rate_capacity_remains_even_without_local_cooldowns(lanes, transport):

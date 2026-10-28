@@ -159,7 +159,7 @@ def test_progress_below_inactivity_timeout_cannot_extend_absolute_cap(tmp_path, 
         kwargs.update(Body=b"finished-before-response", IfNoneMatch="*", ContentType="image/png")
     started = time.monotonic()
     with pytest.raises(MediaIncomplete, match="target_deadline"):
-        service._storage_call(operation, check=ownership(0.8), **kwargs)
+        service._storage_call(operation, check=ownership(0.8), **kwargs)  # pyright: ignore[reportArgumentType]
     assert (tmp_path / "pid").exists(), "SDK started before its wall-clock cap"
     assert time.monotonic() - started < 2.5
     assert len(children) == 1 and children[0].poll() is not None and client._active is None
@@ -233,6 +233,7 @@ client.call('head_object',check=MediaOwnershipCheck(lambda:None,deadline=time.mo
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    assert wrapper.stdin is not None
     wrapper.stdin.write(json.dumps(envelope).encode())
     wrapper.stdin.close()
     try:
@@ -300,8 +301,9 @@ def test_production_factory_builds_owner_bounded_proxy_without_eager_sdk_or_avat
     from trr_backend.ingestion.media_storage_io import MAX_BODY_BYTES
 
     assert service.max_bytes == MAX_BODY_BYTES == 50 * 1024 * 1024
-    assert service.prefix == "retained-prefix" and service.refresh.store is store
-    assert callable(service.refresh.public_avatar_source_factory) and service.refresh.public_only is True
+    assert service.refresh is not None
+    assert service.prefix == "retained-prefix" and service.refresh.store is store  # pyright: ignore[reportFunctionMemberAccess]
+    assert callable(service.refresh.public_avatar_source_factory) and service.refresh.public_only is True  # pyright: ignore[reportFunctionMemberAccess]
 
 
 def test_child_reconstructs_the_exact_session_and_explicit_sdk_configuration(tmp_path, monkeypatch):

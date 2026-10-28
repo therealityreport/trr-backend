@@ -67,6 +67,6 @@ def test_missing_reply_count_zero_when_fully_observed():
 def test_reported_count_distinguishes_unknown_zero_and_positive():
     from trr_backend.socials.instagram.comments_scrapling.counts import reported_reply_count
 
-    assert reported_reply_count(_Comment(reply_count=None, child_comment_count=None)) is None
-    assert reported_reply_count(_Comment(reply_count=None, child_comment_count=0)) == 0
+    assert reported_reply_count(_Comment(reply_count=None, child_comment_count=None)) is None  # pyright: ignore[reportArgumentType]
+    assert reported_reply_count(_Comment(reply_count=None, child_comment_count=0)) == 0  # pyright: ignore[reportArgumentType]
     assert reported_reply_count(_Comment(reply_count=2, child_comment_count=5)) == 5

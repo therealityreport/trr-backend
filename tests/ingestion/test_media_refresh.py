@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -38,8 +39,8 @@ def no_ambient_http(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", forbidden)
 
 
-def native_payload(*, urls=(FRESH, SECOND_FRESH), shortcode="ABC", native_id="66"):
-    def image(url):
+def native_payload(*, urls=(FRESH, SECOND_FRESH), shortcode="ABC", native_id="66") -> dict[str, Any]:
+    def image(url) -> dict[str, Any]:
         return {"image_versions2": {"candidates": [{"url": url, "width": 100, "height": 100}]}}
 
     return {
@@ -66,7 +67,7 @@ def fixture_snapshot(**kwargs):
     return snapshot(shortcode="ABC", media_urls=(SOURCE, SECOND), expected_media_count=2, **kwargs)
 
 
-def cookies(subject="123456"):
+def cookies(subject="123456") -> dict[str, Any]:
     return {
         "raw_cookies": {"sessionid": "synthetic-session", "csrftoken": "synthetic-csrf", "ds_user_id": subject},
         "browser_account_id": "fixture_ingest_account",
@@ -172,6 +173,7 @@ def test_native_refresh_counts_once_retains_sanitized_evidence_and_preserves_sna
     assert refresh(source_reference=source_reference(SECOND), check_cancelled=check, on_request=count) == SECOND_FRESH
     assert len(credentials) == len(factories) == len(session.sent) == 1
     assert session.closed and events == ["get", "send", "close"]
+    assert original is not None
     assert refresh._snapshot is original and original.media_urls == (SOURCE, SECOND)
     assert original.observed_at == fixture_snapshot().observed_at and original.storage_keys() == {}
     assert row(
@@ -188,6 +190,7 @@ def test_native_refresh_counts_once_retains_sanitized_evidence_and_preserves_sna
         "from social.instagram_ingestion_evidence where run_id=%s",
         (owned["run_id"],),
     )
+    assert retained is not None
     assert retained[:2] == ("instagram:post:ABC", "instagram-ingestion-v1")
     assert retained[2] > original.observed_at and "fresh-private-signature" not in retained[3]
     identity = hashlib.sha256(subject.encode()).hexdigest()
@@ -402,7 +405,7 @@ def test_narrow_detail_protocol_cannot_merge_ambient_or_response_credentials(mon
         assert "Authorization" not in client.session.headers and not session.cookies
         session.cookies.set("ds_user_id", "forbidden-replacement")
         assert client._request_cookies()["ds_user_id"] == "123456" and not session.cookies
-        assert client.session.get_adapter("https://www.instagram.com").max_retries.total == 0
+        assert client.session.get_adapter("https://www.instagram.com").max_retries.total == 0  # pyright: ignore[reportAttributeAccessIssue]
     finally:
         client.session.close()
 
@@ -436,7 +439,7 @@ def avatar_adapter(store, owned, session, *, subject, payload=None, cancel_on_co
     return refresh, credentials
 
 
-def avatar_payload(username="writer", url=AVATAR_FRESH):
+def avatar_payload(username="writer", url=AVATAR_FRESH) -> dict[str, Any]:
     return {"status": "ok", "data": {"user": {"username": username, "profile_pic_url_hd": url}}}
 
 
@@ -464,6 +467,7 @@ def test_avatar_expiry_refresh_is_counted_once_per_username_without_registry_or_
         )
     assert credentials == [1] and len(session.sent) == 1 and session.closed
     assert events == ["count", "get", "send", "close"]
+    assert original is not None
     assert refresh._snapshot is original and original.avatars[0].source_url == AVATAR_OLD
     assert row(
         tx,
@@ -475,6 +479,7 @@ def test_avatar_expiry_refresh_is_counted_once_per_username_without_registry_or_
         "select source_identity,parser_version,payload from social.instagram_ingestion_evidence where run_id=%s",
         (owned["run_id"],),
     )
+    assert retained is not None
     assert retained[:2] == ("instagram:profile:writer", "instagram-profile-avatar-v1")
     assert "fresh-signature" not in retained[2] and "avatar.png" in retained[2]
     assert row(tx, "select count(*) from social.instagram_ingestion_receipts where run_id=%s", (owned["run_id"],)) == (
@@ -495,7 +500,7 @@ def test_avatar_refresh_requires_same_username_and_asset_and_never_marks_unavail
     elif case == "changed_path":
         payload = avatar_payload(url=AVATAR_FRESH.replace("avatar.png", "different.png"))
     else:
-        payload = avatar_payload(url=None)
+        payload = avatar_payload(url=None)  # pyright: ignore[reportArgumentType]
     subject = str(int(uuid4().hex[:12], 16))
     session = RecordingSession([], payload=payload)
     refresh, _ = avatar_adapter(store, owned, session, subject=subject)

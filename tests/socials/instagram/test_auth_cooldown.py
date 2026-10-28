@@ -238,6 +238,7 @@ def test_cooldown_backoff_seconds_respects_env(monkeypatch: pytest.MonkeyPatch) 
 def test_instagram_failure_counters_never_create_a_timed_cooldown(store):
     for count in range(1, 5):
         recorded = auth_cooldown.record_auth_block("instagram", "acct", "http_401")
+        assert recorded is not None
         assert recorded.consecutive_auth_failures == count
         assert recorded.cooldown_until == store.now
         assert auth_cooldown.get_active_cooldown("instagram", "acct") is None

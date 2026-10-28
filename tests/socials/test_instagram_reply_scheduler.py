@@ -43,7 +43,7 @@ def test_descriptor_freezes_snapshots_and_validates_bounds():
     assert request.public_cookie_snapshot == (("name", "value", "domain", "/"),)
     assert "value" not in repr(request)
     with pytest.raises(FrozenInstanceError):
-        request.page_size = 50
+        request.page_size = 50  # pyright: ignore[reportAttributeAccessIssue]
     for size in (0, 51, True):
         with pytest.raises(ValueError):
             descriptor("a", page_size=size)
@@ -437,7 +437,7 @@ def test_spool_handles_short_disk_writes_without_truncation():
     spool = DiskResponseSpool()
     spool.close()
     writer = ShortWriter()
-    spool._file = writer
+    spool._file = writer  # pyright: ignore[reportAttributeAccessIssue]
     spool.write(b"complete-body")
     assert bytes(writer.data) == b"complete-body" and spool.size == len(b"complete-body")
 
@@ -458,7 +458,7 @@ def test_owner_keeps_one_thread_and_context_across_yields_and_close(offload_owne
         owner_threads = []
         across_yield = ContextVar("reply_owner_across_yield", default="outside")
         deadline, permit, observed = time.monotonic() + 60, object(), object()
-        tokens = [execution_deadline.set(deadline), request_permit.set(permit), response_observed_at.set(observed)]
+        tokens = [execution_deadline.set(deadline), request_permit.set(permit), response_observed_at.set(observed)]  # pyright: ignore[reportArgumentType]
         trace = []
 
         def lane():

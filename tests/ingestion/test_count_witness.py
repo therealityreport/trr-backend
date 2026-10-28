@@ -92,8 +92,9 @@ class FakeSource:
         }
         payload.update(self.payload_extra)
         source_observer("details", payload)
-        if type(self).after:
-            type(self).after()
+        after = type(self).after
+        if after:
+            after()
         return payload
 
     def finish_success(self):

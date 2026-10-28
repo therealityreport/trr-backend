@@ -527,7 +527,8 @@ class InstagramScraper:
             self.session.trust_env = False
             self.session.auth = None
             for adapter in self.session.adapters.values():
-                adapter.max_retries = Retry(total=0, redirect=0)
+                if isinstance(adapter, HTTPAdapter):
+                    adapter.max_retries = Retry(total=0, redirect=0)
             for name in ("Cookie", "Authorization", "Proxy-Authorization"):
                 self.session.headers.pop(name, None)
             self.cookies = self._credential_identity.prepare_jar(self.session.cookies, self.cookies)
@@ -1594,7 +1595,8 @@ class InstagramScraper:
             self.session.trust_env = False
             self.session.auth = None
             for adapter in self.session.adapters.values():
-                adapter.max_retries = Retry(total=0, redirect=0)
+                if isinstance(adapter, HTTPAdapter):
+                    adapter.max_retries = Retry(total=0, redirect=0)
             preserved_cookies = guard.prepare_jar(self.session.cookies, preserved_cookies)
         if isinstance(self._request_client, InstagramRequestClient):
             self._request_client = InstagramRequestClient(session=self.session)

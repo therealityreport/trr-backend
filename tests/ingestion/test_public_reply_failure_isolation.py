@@ -118,7 +118,7 @@ def test_backoff_unchanged_failure_hold_and_resume_order():
         previous = record_failure(
             previous,
             payload=payload,
-            evidence=evidence,
+            evidence=evidence,  # pyright: ignore[reportArgumentType]
             evidence_id="retained",
             owner_generation=9,
             now=public.OBSERVED,

@@ -46,10 +46,10 @@ def test_async_fetcher_closes_and_disables_ambient_proxy(monkeypatch):
         transport = AsyncTransport("fetcher_session", Budget())
         async with transport:
             assert transport.inner.trust_env is False
-            assert transport.inner.proxies == {}
-            assert transport.inner.curl_options[CurlOpt.PROXY] == ""
+            assert transport.inner.proxies == {}  # pyright: ignore[reportAttributeAccessIssue]
+            assert transport.inner.curl_options[CurlOpt.PROXY] == ""  # pyright: ignore[reportAttributeAccessIssue]
             assert transport.inner.auth is None
-        assert transport.client._async_curl_session is None
+        assert transport.client._async_curl_session is None  # pyright: ignore[reportAttributeAccessIssue]
 
     asyncio.run(check())
 

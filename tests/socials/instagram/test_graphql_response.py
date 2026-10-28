@@ -57,6 +57,7 @@ def test_only_known_ancillary_field_is_accepted_with_complete_connection_and_pol
     decision = classify_graphql_response(payload)
     assert decision.accepted and decision.reason is None and not decision.auth_failed
     proof = project_graphql_provenance(payload)
+    assert proof is not None
     assert proof["policy_version"] == GRAPHQL_RESPONSE_POLICY_VERSION
     assert proof["error_count"] == 2 and len(proof["errors"]) == 2
     assert proof["errors"][0]["path"] == ancillary_error()["path"]
@@ -81,7 +82,9 @@ def test_only_known_ancillary_field_is_accepted_with_complete_connection_and_pol
 def test_unknown_pathless_malformed_mixed_and_oversized_errors_reject(errors):
     payload = {**native_page(), "errors": errors}
     assert not classify_graphql_response(payload).accepted
-    assert project_graphql_provenance(payload)["classification"] == "rejected"
+    provenance = project_graphql_provenance(payload)
+    assert provenance is not None
+    assert provenance["classification"] == "rejected"
 
 
 @pytest.mark.parametrize("index", [True, False, -1, 12, "5", None, 2**40])
@@ -132,7 +135,9 @@ def test_top_failure_auth_permission_and_rate_markers_override_ancillary_path(ma
     payload = {**partial_page(), **marker}
     decision = classify_graphql_response(payload)
     assert not decision.accepted and decision.auth_failed is auth
-    assert project_graphql_provenance(payload)["classification"] == "rejected"
+    provenance = project_graphql_provenance(payload)
+    assert provenance is not None
+    assert provenance["classification"] == "rejected"
 
 
 @pytest.mark.parametrize(
@@ -155,7 +160,9 @@ def test_error_context_auth_rate_and_permission_markers_are_never_ancillary(mark
     payload["errors"][0].update(marker)
     decision = classify_graphql_response(payload)
     assert not decision.accepted and decision.auth_failed is auth
-    assert project_graphql_provenance(payload)["classification"] == "rejected"
+    provenance = project_graphql_provenance(payload)
+    assert provenance is not None
+    assert provenance["classification"] == "rejected"
 
 
 def test_error_provenance_does_not_retain_arbitrary_paths_messages_traces_or_auth_values():
@@ -173,6 +180,7 @@ def test_error_provenance_does_not_retain_arbitrary_paths_messages_traces_or_aut
     }
     proof = project_graphql_provenance(payload)
     assert "private-token" not in str(proof) and "sessionid" not in str(proof)
+    assert proof is not None
     assert proof["errors"] == [{"path": [], "index": None, "severity": "OTHER", "classification": "rejected"}]
 
 
@@ -197,6 +205,7 @@ def test_error_provenance_is_bounded_and_connection_direction_is_revalidated():
     assert not classify_graphql_response(payload).accepted
     payload["errors"] *= 100
     proof = project_graphql_provenance(payload)
+    assert proof is not None
     assert proof["error_count"] == 100 and len(proof["errors"]) == MAX_ERROR_ITEMS
     assert proof["classification"] == "rejected"
 

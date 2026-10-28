@@ -11,6 +11,17 @@
     "**/node_modules",
     "**/__pycache__",
     "**/.*",
-    "scripts/ingestion_engine_eval/evidence"
+    "scripts/ingestion_engine_eval/evidence",
+    // Frozen evaluation harness: evidence manifests pin these files' SHA-256, so they stay byte-identical.
+    "scripts/ingestion_engine_eval/dbos_partitioned.py",
+    "scripts/ingestion_engine_eval/dbos_worker.py",
+    "scripts/ingestion_engine_eval/details_phase_resource.py",
+    "scripts/ingestion_engine_eval/full_pipeline_sources.py",
+    "scripts/ingestion_engine_eval/legacy_resource_baseline.py",
+    "scripts/ingestion_engine_eval/run.py",
+    "scripts/ingestion_engine_eval/store.py",
+    "scripts/ingestion_engine_eval/temporal_pinning.py",
+    "scripts/ingestion_engine_eval/temporal_worker.py",
+    "tests/ingestion_engine_eval/test_fenced_adapter.py"
   ]
 }

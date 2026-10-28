@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from types import SimpleNamespace
+from typing import Any
 from urllib.parse import parse_qs
 
 import httpx
@@ -297,8 +298,8 @@ def test_public_cookie_guard_allows_attempt_local_ancillary_and_rejects_any_supp
     guard = PublicCookieIdentity({})
     for initial in ({"csrftoken": "prior-attempt"}, {"sessionid": ""}, None):
         with pytest.raises(CredentialIdentityMismatch):
-            PublicCookieIdentity(initial)
-    jar = requests.cookies.RequestsCookieJar()
+            PublicCookieIdentity(initial)  # pyright: ignore[reportArgumentType]
+    jar = requests.cookies.RequestsCookieJar()  # pyright: ignore[reportAttributeAccessIssue]
     jar.set("csrftoken", "local-csrf", domain=".instagram.com")
     assert guard.prepare_jar(jar, {}) == {"csrftoken": "local-csrf"}
     assert guard.merge({"csrftoken": "local-csrf"}, {"mid": "local-mid"}) == {
@@ -396,14 +397,14 @@ def test_native_public_html_with_incidental_auth_words_and_login_navigation_is_a
 def rejected_response(kind, retry_after):
     options = {"headers": {"retry-after": retry_after, "content-type": "application/json"}}
     if kind in ("unauthorized", "forbidden", "rate_limited"):
-        options["status"] = {"unauthorized": 401, "forbidden": 403, "rate_limited": 429}[kind]
+        options["status"] = {"unauthorized": 401, "forbidden": 403, "rate_limited": 429}[kind]  # pyright: ignore[reportArgumentType]
     elif kind == "redirect_login":
-        options.update(status=302)
+        options.update(status=302)  # pyright: ignore[reportArgumentType]
         options["headers"]["location"] = "/accounts/login/"
     elif kind == "login_required":
         options["payload"] = {"message": "login_required"}
     elif kind == "challenge_required":
-        options["body"] = "<title>Security Check • Instagram</title>"
+        options["body"] = "<title>Security Check • Instagram</title>"  # pyright: ignore[reportArgumentType]
         options["headers"]["content-type"] = "text/html"
     else:
         assert kind == "public_access_backoff"
@@ -618,7 +619,7 @@ def test_explicit_authenticated_catalog_mode_still_selects_auth(monkeypatch):
     assert catalog_ingest._shared_instagram_frontier_auth_validation(config) == (True, None)
 
 
-def anonymous_payload(*, cursor="native-next", username="bravotv", identity="123", private=False):
+def anonymous_payload(*, cursor="native-next", username="bravotv", identity="123", private=False) -> dict[str, Any]:
     return {
         "data": {
             "user": {
@@ -644,7 +645,7 @@ def test_anonymous_listing_observes_bootstrap_and_native_continuation():
         AnonymousListingSource,
         [
             {"payload": bootstrap, "cookies": {"csrftoken": "anon"}},
-            {"body": "for(;;);" + json.dumps(anonymous_payload(cursor=None))},
+            {"body": "for(;;);" + json.dumps(anonymous_payload(cursor=None))},  # pyright: ignore[reportArgumentType]
         ],
         account="bravotv",
     )
@@ -693,7 +694,7 @@ def test_anonymous_page_replays_native_root_without_source():
     from trr_backend.ingestion.anonymous_listing import ANONYMOUS_FAMILY, ANONYMOUS_VERSION
     from trr_backend.ingestion.replay import _listing
 
-    payload = anonymous_payload(cursor=None)
+    payload = anonymous_payload(cursor=None)  # pyright: ignore[reportArgumentType]
     payload.update(
         adapter_family=ANONYMOUS_FAMILY,
         adapter_version=ANONYMOUS_VERSION,
@@ -706,7 +707,7 @@ def test_anonymous_page_replays_native_root_without_source():
         source_identity="test", captured_at=datetime.now(UTC), parser_version=PARSER_VERSION, payload=payload
     )
     replay = _listing(evidence, account="bravotv", target_key="page:root", parser_version=PARSER_VERSION, pinned=True)
-    assert [item.post.shortcode for item in replay.posts] == ["ABC"]
+    assert [item.post.shortcode for item in replay.posts] == ["ABC"]  # pyright: ignore[reportOptionalMemberAccess]
     assert replay.has_next_page is False
 
 
@@ -724,7 +725,7 @@ def test_anonymous_access_failure_never_rotates_or_retries(status):
 def test_anonymous_native_page_cannot_mask_source_failure(failure):
     from trr_backend.ingestion.anonymous_listing import AnonymousListingSource
 
-    payload = anonymous_payload(cursor=None)
+    payload = anonymous_payload(cursor=None)  # pyright: ignore[reportArgumentType]
     payload.update(failure)
     case = source_case(AnonymousListingSource, [{"payload": payload}], account="bravotv")
     with pytest.raises((InvalidSourceError, SourceFailure)):
@@ -737,7 +738,7 @@ def test_anonymous_replay_revalidates_identity_and_request_binding(change):
     from trr_backend.ingestion.listing import page_target
     from trr_backend.ingestion.replay import _listing
 
-    payload = anonymous_payload(cursor=None)
+    payload = anonymous_payload(cursor=None)  # pyright: ignore[reportArgumentType]
     payload.update(
         adapter_family=ANONYMOUS_FAMILY,
         adapter_version=ANONYMOUS_VERSION,

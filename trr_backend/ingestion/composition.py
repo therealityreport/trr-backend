@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from psycopg2.extras import RealDictCursor
 
+from trr_backend.ingestion.callable_attributes import with_attributes
 from trr_backend.ingestion.command_service import CommandService, ServiceUnavailableError
 from trr_backend.ingestion.domain import Conflict, RunIntent, SourceProfile
 from trr_backend.ingestion.queries import Queries
@@ -220,7 +221,7 @@ def configured_run_policy():
 
 
 class CanaryStore(Store):
-    def __init__(self, policy: CanaryPolicy | None, *args, **kwargs):
+    def __init__(self, policy: CanaryPolicy | AccountRunPolicy | None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.policy = policy
 
@@ -275,7 +276,7 @@ class CanaryCapacity:
 class CanaryCommandService(CommandService):
     def capabilities(self, handle):
         capabilities = super().capabilities(handle)
-        policy = self.store.policy
+        policy = getattr(self.store, "policy", None)
         if policy is None or not policy.allows_account(capabilities.account):
             return capabilities.model_copy(
                 update={
@@ -457,19 +458,25 @@ class _GatedSource:
             before()
             return permit
 
-        for name in ("run_id", "run_generation", "owner_generation", "observation_clock", "deadline"):
-            if hasattr(before, name):
-                setattr(guarded_request, name, getattr(before, name))
-        guarded_request.record_terminal_failure = record_terminal_failure
-        guarded_request.mark_sent = getattr(self.gate, "mark_sent", lambda _permit: None)
-        guarded_request.release_unsent = getattr(self.gate, "release_unsent", lambda _permit: False)
-        # The optional private diagnostic shares this activity's exact permits;
-        # it never enters the canonical comment observer.
-        guarded_request.diagnostic_public_only = getattr(self.gate, "public_only", False)
-        guarded_request.diagnostic_network_lane = getattr(self.gate, "network_lane", None)
-        guarded_request.diagnostic_success = lambda permit: self.gate.record_success(permit=permit)
-        guarded_request.diagnostic_failure = lambda permit, code: self.gate.record_failure(code, permit=permit)
-        guarded_request.diagnostic_check_owner = getattr(self.gate, "check_cancelled", None)
+        inherited = {
+            name: getattr(before, name)
+            for name in ("run_id", "run_generation", "owner_generation", "observation_clock", "deadline")
+            if hasattr(before, name)
+        }
+        with_attributes(
+            guarded_request,
+            **inherited,
+            record_terminal_failure=record_terminal_failure,
+            mark_sent=getattr(self.gate, "mark_sent", lambda _permit: None),
+            release_unsent=getattr(self.gate, "release_unsent", lambda _permit: False),
+            # The optional private diagnostic shares this activity's exact permits;
+            # it never enters the canonical comment observer.
+            diagnostic_public_only=getattr(self.gate, "public_only", False),
+            diagnostic_network_lane=getattr(self.gate, "network_lane", None),
+            diagnostic_success=lambda permit: self.gate.record_success(permit=permit),
+            diagnostic_failure=lambda permit, code: self.gate.record_failure(code, permit=permit),
+            diagnostic_check_owner=getattr(self.gate, "check_cancelled", None),
+        )
 
         def diagnostic_cancel():
             # A cancellation/admission failure is not source health evidence.
@@ -479,14 +486,14 @@ class _GatedSource:
             finally:
                 self.finished = True
 
-        guarded_request.diagnostic_cancel = diagnostic_cancel
+        with_attributes(guarded_request, diagnostic_cancel=diagnostic_cancel)
         deadlines = [
             value
             for value in (getattr(before, "deadline", None), getattr(self.gate, "deadline", None))
             if value is not None
         ]
         if deadlines:
-            guarded_request.deadline = min(deadlines)
+            with_attributes(guarded_request, deadline=min(deadlines))
 
         def guarded_observer(*args, **kwargs):
             try:
@@ -494,7 +501,7 @@ class _GatedSource:
             except Exception as error:
                 permit = request_permit.get()
                 if permit is not None:
-                    error._instagram_request_permit = permit
+                    vars(error)["_instagram_request_permit"] = permit
                 raise
             if not self.gate.request_count:
                 from trr_backend.ingestion.providers import InvalidSourceError
@@ -530,7 +537,7 @@ class _GatedSource:
             self.gate.record_failure("source_incomplete", permit=permit)
             self.branch_failure_recorded = True
 
-        rejected_response.record_branch_failure = record_branch_failure
+        with_attributes(rejected_response, record_branch_failure=record_branch_failure)
 
         try:
             result = self.source(
@@ -551,7 +558,7 @@ class _GatedSource:
                 )
                 error = SourceFailure(failure)
                 if terminal_permit is not None:
-                    error._instagram_request_permit = terminal_permit
+                    vars(error)["_instagram_request_permit"] = terminal_permit
                 raise error
             return result
         except Exception as error:

@@ -6,6 +6,7 @@ Instaloader's anonymous Profile.get_posts path, not its authenticated posts tab.
 
 import json
 import re
+from typing import Any
 from urllib.parse import urlencode
 
 from trr_backend.ingestion.post_transport import _CallbackAbort
@@ -83,12 +84,11 @@ class AnonymousListingSource(_PublicSource):
         from trr_backend.ingestion.listing import parse_listing_page
 
         session = None
-        observed = None
+        observed_pages: list[dict[str, Any]] = []
         request_cursor = None
         native_id = None
 
         def retain(payload):
-            nonlocal observed
             observed_id = native_id
             if request_cursor is None:
                 try:
@@ -105,7 +105,13 @@ class AnonymousListingSource(_PublicSource):
                 listing_profile_id=observed_id,
                 listing_profile_username=self.account,
             )
+            observed_pages[:] = [observed]
             source_observer(observed)
+
+        def observed_page() -> dict[str, Any]:
+            if not observed_pages:
+                raise InvalidSourceError("Anonymous listing source response missing")
+            return observed_pages[0]
 
         try:
             if cursor is not None and (not isinstance(cursor, str) or not cursor.strip()):
@@ -119,9 +125,12 @@ class AnonymousListingSource(_PublicSource):
             )
             payload = decode_public_json(response)
             native_id = _profile(payload, self.account)
+            observed = observed_page()
             parse_listing_page(observed)
             if cursor is None:
                 return observed
+            if native_id is None:
+                raise InvalidSourceError("Anonymous profile ID missing or conflicting")
             csrf = session.raw_cookies.get("csrftoken")
             if not csrf:
                 raise InvalidSourceError("Anonymous bootstrap did not supply CSRF token")
@@ -152,6 +161,7 @@ class AnonymousListingSource(_PublicSource):
             )
             payload = decode_public_json(response)
             _profile(payload, self.account, expected_id=native_id)
+            observed = observed_page()
             parse_listing_page(observed)
             return observed
         except _CallbackAbort as error:

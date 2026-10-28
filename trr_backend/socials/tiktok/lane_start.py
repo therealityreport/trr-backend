@@ -8,6 +8,7 @@ same-named wrappers that delegate through ``_LOCAL_ROOM_FUNCTIONS``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published_legacy_module
@@ -24,9 +25,11 @@ if TYPE_CHECKING:
     from trr_backend.socials.model_types import SeasonContext
 
     # Repository names resolved through the published provider namespace.
-    class SocialIngestConflictError: ...
+    class SocialIngestConflictError(ValueError):
+        def __init__(self, code: str, message: str, *, detail: Mapping[str, Any] | None = None) -> None: ...
 
-    class SocialIngestValidationError: ...
+    class SocialIngestValidationError(ValueError):
+        def __init__(self, code: str, message: str, *, detail: Mapping[str, Any] | None = None) -> None: ...
 
     def _assert_social_account_profile_exists(*args: Any, **kwargs: Any) -> Any: ...
     def _create_job(*args: Any, **kwargs: Any) -> Any: ...

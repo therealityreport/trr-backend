@@ -26,7 +26,7 @@ def _numeric(value: Any) -> int | None:
 def _context(value: Any, *, severity: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         value = {}
-    result = {key: number for key in _CODES if (number := _numeric(value.get(key))) is not None}
+    result: dict[str, Any] = {key: number for key in _CODES if (number := _numeric(value.get(key))) is not None}
     extension = value.get("extensions")
     if isinstance(extension, Mapping):
         safe = {key: number for key in _CODES if (number := _numeric(extension.get(key))) is not None}
@@ -81,7 +81,7 @@ def capture_diagnostics(payload: Mapping[str, Any], response: Any, *, failure_cl
     spool = getattr(response, "spool", None)
     complete = getattr(response, "body_complete", False) is True and callable(getattr(spool, "iter_chunks", None))
     body_hash = None
-    if complete:
+    if complete and spool is not None:
         digest = hashlib.sha256()
         for chunk in spool.iter_chunks():
             digest.update(chunk)

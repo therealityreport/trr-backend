@@ -140,7 +140,7 @@ def _fail_once(lanes, code, *, lane="modal", retry_after=None):
 
 def test_lane_keys_separate_modal_local_and_the_legacy_shared_lane():
     lanes = _Lanes()
-    modal, local, shared = _gate(lanes, lane="modal"), _gate(lanes, lane="local"), _gate(lanes, lane=None)
+    modal, local, shared = _gate(lanes, lane="modal"), _gate(lanes, lane="local"), _gate(lanes, lane=None)  # pyright: ignore[reportArgumentType]
     assert modal.identity_key == hashlib.sha256(b"public:modal").hexdigest()
     assert local.identity_key == hashlib.sha256(b"public:local").hexdigest()
     assert shared.identity_key == hashlib.sha256(b"public").hexdigest()
@@ -159,7 +159,7 @@ def test_logged_out_rejections_never_synthesize_a_wait():
         failure, row = _fail_once(lanes, "unauthorized")
         assert failure.code == "public_access_backoff" and failure.retry_at is None
         assert row["server_retry_after_until"] is row["cooldown_until"] is None
-    assert row["consecutive_failures"] == 5
+    assert row["consecutive_failures"] == 5  # pyright: ignore[reportPossiblyUnboundVariable]
     assert _gate(lanes).before_request().request_number == 1
 
 
@@ -192,13 +192,13 @@ def test_success_resets_diagnostics_without_a_backoff_ladder():
 
 def test_legacy_shared_public_lane_has_no_local_wait():
     lanes = _Lanes()
-    gate = _gate(lanes, lane=None)
+    gate = _gate(lanes, lane=None)  # pyright: ignore[reportArgumentType]
     key = gate.identity_key
     permit = gate.before_request()
     failure = gate.record_failure("unauthorized", permit=permit)
     assert failure.retry_at is None
     lanes.rows[key].update(cooldown_until=None, consecutive_failures=3, last_error_code="public_access_backoff")
-    gate = _gate(lanes, lane=None)
+    gate = _gate(lanes, lane=None)  # pyright: ignore[reportArgumentType]
     gate.finish_success(gate.before_request())
     assert lanes.rows[key]["consecutive_failures"] == 0
     assert lanes.rows[key]["last_error_code"] is None
@@ -223,6 +223,7 @@ def test_public_requests_above_180_remain_accounted_and_obey_server_cooldown(lan
     assert gate.request_count == 181
     assert len(lanes.rows[gate.identity_key]["request_times"]) == 181
     failure = gate.finish_failure("rate_limited", retry_after_seconds=1200)
+    assert failure is not None
     assert failure.retry_at == lanes.now + timedelta(seconds=1200)
     deferred = _gate(lanes, lane=lane)
     with pytest.raises(identity_policy.IdentityDeferred, match="identity_cooldown"):
@@ -235,8 +236,8 @@ def test_repeated_non_rate_failures_keep_accounting_without_a_wait():
     lanes = _Lanes()
     for _ in range(3):
         failure, row = _fail_once(lanes, "request_failed", lane="local")
-    assert row["consecutive_failures"] == 3
-    assert failure.retry_at is None
+    assert row["consecutive_failures"] == 3  # pyright: ignore[reportPossiblyUnboundVariable]
+    assert failure.retry_at is None  # pyright: ignore[reportPossiblyUnboundVariable]
     listing = _gate(lanes, lane="local")
     assert listing.before_request().request_number == 1
     assert _gate(lanes, lane="modal").before_request().request_number == 1
@@ -253,8 +254,9 @@ def test_content_absence_is_neutral_for_a_network_lane(finish):
         else:
             failure = gate.record_content_absence("request_failed", permit=permit)
             gate.finish_failure()
+        assert failure is not None
         assert failure.code == identity_policy.CONTENT_ABSENT_CODE and failure.retry_at is None
-    row = lanes.rows[gate.identity_key]
+    row = lanes.rows[gate.identity_key]  # pyright: ignore[reportPossiblyUnboundVariable]
     assert row["consecutive_failures"] == 0 and row["last_error_code"] is None
     assert row["cooldown_until"] is None and row["failure_generation"] == 0
     # Listing and comments on the same egress remain admitted.
@@ -283,7 +285,7 @@ def test_content_absence_releases_probe_without_changing_health_or_server_marker
 
 def test_content_absence_keeps_original_accounting_on_lanes_without_network_scope():
     lanes = _Lanes()
-    gate = _gate(lanes, lane=None)
+    gate = _gate(lanes, lane=None)  # pyright: ignore[reportArgumentType]
     failure = gate.record_content_absence("request_failed", permit=gate.before_request())
     row = lanes.rows[gate.identity_key]
     assert failure.code == "request_failed"
@@ -319,7 +321,7 @@ def test_content_absence_detects_only_404_and_explicit_null_users(error, payload
 
 def test_404_with_server_delay_keeps_failure_handling():
     error = _StatusError(404)
-    error.retry_after_seconds = 7200
+    error.retry_after_seconds = 7200  # pyright: ignore[reportAttributeAccessIssue]
     assert not identity_policy.is_content_absence(error=error)
 
 

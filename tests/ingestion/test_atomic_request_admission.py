@@ -124,7 +124,7 @@ def test_scheduler_returns_only_exact_unsent_permit(lanes, stop_kind):
     def account(conn):
         store.check_owner(**owned, record_request=True, connection=conn)
 
-    account.release_in_transaction = lambda conn, permit: store.release_unsent_request(
+    account.release_in_transaction = lambda conn, permit: store.release_unsent_request(  # pyright: ignore[reportFunctionMemberAccess]
         **owned, permit=permit, connection=conn
     )
 
@@ -204,7 +204,7 @@ def test_uncertain_refund_commit_replays_receipt_without_touching_sibling(lanes)
     def account(conn):
         store.check_owner(**owned, record_request=True, connection=conn)
 
-    account.release_in_transaction = lambda conn, permit: store.release_unsent_request(
+    account.release_in_transaction = lambda conn, permit: store.release_unsent_request(  # pyright: ignore[reportFunctionMemberAccess]
         **owned, permit=permit, connection=conn
     )
     sent = lane.before_counted_request(account)
@@ -241,7 +241,7 @@ def test_combined_production_admission_fences_and_counts_once(lanes, rejection):
     def account(_conn):
         pytest.fail("Redundant accounting callback")
 
-    account.finalize_in_transaction = lambda conn, sql, params: store.finalize_request_admission(
+    account.finalize_in_transaction = lambda conn, sql, params: store.finalize_request_admission(  # pyright: ignore[reportFunctionMemberAccess]
         **owned, connection=conn, lane_update=sql, lane_params=params
     )
     lane = gate(lanes, deadline=10, monotonic=iter([0, 0, 10]).__next__) if rejection == "deadline" else gate(lanes)

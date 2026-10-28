@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import psycopg2
@@ -75,7 +76,7 @@ def scheduler(database, *, admit=lambda _: True, dispatch=None, reconcile=lambda
     return Scheduler(store, admit=admit, dispatch=dispatch or settle, reconcile=reconcile, **kwargs)
 
 
-def sql(database, statement, args=()):
+def sql(database, statement, args=()) -> Any:
     with database[1]() as conn, conn.cursor() as cur:
         cur.execute(statement, args)
         return cur.fetchall() if cur.description else None
@@ -720,7 +721,9 @@ DBOSAdapter(scheduler,config).run_bounded(lambda:psycopg2.connect(sys.argv[2]))
         lease.autocommit = True
         with lease.cursor() as cur:
             cur.execute("select pg_try_advisory_lock(%s,%s)", (48112, 20261016))
-            assert cur.fetchone()[0]
+            fetchone = cur.fetchone()
+            assert fetchone is not None
+            assert fetchone[0]
             cur.execute("select pg_advisory_unlock(%s,%s)", (48112, 20261016))
     # The recovered sleep wakes ~4s into this process; leave scheduling margin
     # beyond the 5s shutdown allowance so host load cannot end the loop first.
@@ -894,14 +897,14 @@ def test_runtime_startup_consumes_shared_deadline_and_retains_lease_until_exit(
 
     adapter = DBOSAdapter.__new__(DBOSAdapter)
     adapter.config = RuntimeConfig("postgresql://synthetic", "test-v1", runtime_role="test_runtime")
-    adapter.dbos = DBOS()
-    adapter.scheduler = SimpleNamespace(
+    adapter.dbos = DBOS()  # pyright: ignore[reportAttributeAccessIssue]
+    adapter.scheduler = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
         store=SimpleNamespace(
             dispatch_pending=lambda *a, **kw: work("pending"),
             dispatch_partitions=lambda *a, **kw: work("partitions"),
         )
     )
-    adapter.reconcile_engine_failures = lambda: work("reconcile")
+    adapter.reconcile_engine_failures = lambda: work("reconcile")  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr(workflows.time, "monotonic", lambda: clock.now)
     monkeypatch.setattr(workflows.threading, "Event", Event)
     monkeypatch.setattr(workflows.threading, "Thread", Thread)

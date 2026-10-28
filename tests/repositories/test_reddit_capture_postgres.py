@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import psycopg2
@@ -26,6 +27,18 @@ from trr_backend.repositories import reddit_workflows as workflows
 MIGRATIONS = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 CAPTURE_MIGRATION = "20261021210000_reddit_capture_v2.sql"
 WORKFLOW_MIGRATION = "20261021210100_reddit_workflows.sql"
+
+
+def fetch_row(query: str, params: list[Any] | None = None) -> dict[str, Any]:
+    row = pg.fetch_one(query, params)
+    assert row is not None
+    return row
+
+
+def claimed_run(run_id: str, worker: str) -> dict[str, Any]:
+    run = capture.claim_run(run_id, worker)
+    assert run is not None
+    return run
 
 
 @pytest.fixture(scope="module")
@@ -137,7 +150,7 @@ def database(postgres_cluster, monkeypatch):
     return SimpleNamespace(connection=postgres_cluster.connection, season=season, community=str(uuid4()))
 
 
-def intent(database, **extra):
+def intent(database, **extra) -> dict[str, Any]:
     return {
         "community_id": database.community,
         "season_id": database.season,
@@ -201,7 +214,7 @@ def test_concurrent_identical_create_is_one_atomic_run_manifest_and_outbox(datab
     assert len({str(run["id"]) for run in runs}) == 1
     assert sum(not run["reused"] for run in runs) == 1
     for table in ("reddit_refresh_runs", "reddit_run_manifests", "reddit_dispatch_outbox"):
-        assert pg.fetch_one(f"select count(*) as total from social.{table}")["total"] == 1
+        assert fetch_row(f"select count(*) as total from social.{table}")["total"] == 1
 
 
 def test_conflicting_config_claims_are_serialized_by_scope(database):
@@ -257,7 +270,7 @@ def test_pause_resume_cancel_fences_owner_and_preserves_satisfied_targets(databa
     }
     with pytest.raises(capture.LostClaim):
         capture.finish_target(run_id, "media", "pending", next_claim["claim_token"], "committed")
-    assert pg.fetch_one("select state from social.reddit_dispatch_outbox where run_id=%s", [run_id])["state"] == "done"
+    assert fetch_row("select state from social.reddit_dispatch_outbox where run_id=%s", [run_id])["state"] == "done"
 
 
 def test_manual_retry_links_new_run_and_preserves_parent_evidence_and_satisfied_work(database):
@@ -287,7 +300,9 @@ def test_manual_retry_links_new_run_and_preserves_parent_evidence_and_satisfied_
     assert targets["post1"]["attempt_count"] == 0
     assert targets["post2"]["state"] == "committed"
     assert targets["post2"]["result"] == {"evidence": "kept"}
-    assert capture.manifest_for_run(str(child["id"]))["coverage"] == {"state": "partial", "cursor": "coverage-kept"}
+    manifest = capture.manifest_for_run(str(child["id"]))
+    assert manifest is not None
+    assert manifest["coverage"] == {"state": "partial", "cursor": "coverage-kept"}
 
 
 def test_target_uniqueness_preserves_first_checkpoint_under_concurrency(database):
@@ -354,6 +369,7 @@ def test_rls_and_grants_deny_operational_tables_to_public_roles(database, role):
             "select has_table_privilege(%s,%s,'SELECT,INSERT,UPDATE,DELETE') as allowed",
             [role, "social." + table["relname"]],
         )
+        assert allowed is not None
         assert allowed["allowed"] is False
         with pytest.raises(psycopg2.errors.InsufficientPrivilege), database.connection() as conn, conn.cursor() as cur:
             cur.execute(sql.SQL("set local role {}").format(sql.Identifier(role)))
@@ -372,10 +388,11 @@ def test_lifecycle_comment_tombstone_retains_ids_and_blocks_recapture(database):
     with pg.transaction() as conn:
         workflows._redact_source("post1", "comment1", "deleted", conn)
     saved = pg.fetch_one("select * from social.reddit_comments where reddit_comment_id='comment1'")
+    assert saved is not None
     assert saved["reddit_post_id"] == "post1"
     assert saved["body"] == "[deleted]" and saved["author"] is None and saved["body_html"] is None
     assert saved["raw_payload"] == {}
-    assert pg.fetch_one("select * from social.reddit_comment_tombstones where id='comment1'")["signal"] == "deleted"
+    assert fetch_row("select * from social.reddit_comment_tombstones where id='comment1'")["signal"] == "deleted"
     assert workflows.filter_comment_tombstones([{"reddit_post_id": "post1", "reddit_comment_id": "comment1"}]) == []
     assert capture.list_targets(str(run["id"]))[0]["checkpoint"] == {}
 
@@ -419,19 +436,18 @@ def test_lifecycle_job_deletes_only_unreferenced_asset_and_keeps_shared_copy(dat
 
     reconcile("post1")
     assert deleted == []
-    assert pg.fetch_one("select state from social.reddit_assets where id=%s", [asset["id"]])["state"] == "mirrored"
-    assert pg.fetch_one("select count(*) as total from social.reddit_asset_links")["total"] == 1
+    assert fetch_row("select state from social.reddit_assets where id=%s", [asset["id"]])["state"] == "mirrored"
+    assert fetch_row("select count(*) as total from social.reddit_asset_links")["total"] == 1
     reconcile("post2")
     assert deleted == ["shared-key"]
     assert (
-        pg.fetch_one("select state from social.reddit_assets where id=%s", [asset["id"]])["state"]
-        == "source_unavailable"
+        fetch_row("select state from social.reddit_assets where id=%s", [asset["id"]])["state"] == "source_unavailable"
     )
     assert pg.fetch_one("select title,author from social.reddit_posts where reddit_post_id='post1'") == {
         "title": "[deleted]",
         "author": None,
     }
-    assert pg.fetch_one("select count(*) as total from social.reddit_posts")["total"] == 2
+    assert fetch_row("select count(*) as total from social.reddit_posts")["total"] == 2
 
 
 def test_author_tombstone_retains_content_and_redacts_cross_post_identity(database):
@@ -458,7 +474,7 @@ def test_author_tombstone_retains_content_and_redacts_cross_post_identity(databa
     with pg.transaction() as conn:
         affected = workflows._redact_author("post1", None, conn)
     assert affected == {"post1", "post2"}
-    assert pg.fetch_one("select count(*) as total from social.reddit_author_tombstones")["total"] == 1
+    assert fetch_row("select count(*) as total from social.reddit_author_tombstones")["total"] == 1
     for post in pg.fetch_all("select * from social.reddit_posts where reddit_post_id<>'legacy'"):
         assert post["author"] is None
         assert post["title"] == "Kept title" and post["selftext"] == "Kept text"
@@ -468,6 +484,7 @@ def test_author_tombstone_retains_content_and_redacts_cross_post_identity(databa
         "raw_payload": {"author": "SameAuthor", "title": "Legacy title"},
     }
     comment = pg.fetch_one("select * from social.reddit_comments where reddit_comment_id='comment1'")
+    assert comment is not None
     assert comment["author"] is None and comment["body"] == "Kept comment"
     fresh = workflows.scrub_tombstoned_authors(
         [
@@ -500,7 +517,7 @@ def _make_retries_due(run_id):
     )
 
 
-def _raw_page(post_id, posted_at, after=None):
+def _raw_page(post_id, posted_at, after=None) -> dict[str, Any]:
     return {
         "data": {
             "after": after,
@@ -553,7 +570,7 @@ def test_engine_discovery_failure_resumes_saved_page_without_refetch(database, m
     run_id = str(run["id"])
     first = reddit_execution.execute(run)
     assert first["status"] == "queued"
-    assert pg.fetch_one("select count(*) as total from social.reddit_posts")["total"] == 1
+    assert fetch_row("select count(*) as total from social.reddit_posts")["total"] == 1
     query = next(row for row in capture.list_targets(run_id) if row["target_key"] == "listing:new")
     assert query["state"] == "retry_wait"
     assert query["checkpoint"]["after"] == "t3_next" and query["checkpoint"]["pages"] == 1
@@ -564,16 +581,17 @@ def test_engine_discovery_failure_resumes_saved_page_without_refetch(database, m
     _make_retries_due(run_id)
     resumed = capture.claim_run(run_id, "retry-discovery")
     assert resumed is not None
+    assert resumed is not None
     final = reddit_execution.execute(resumed)
     assert final["status"] == "completed"
     assert len(calls) == 3
     assert [call[1].get("after") for call in calls] == [None, "t3_next", "t3_next"]
-    assert pg.fetch_one("select count(*) as total from social.reddit_posts")["total"] == 2
-    assert pg.fetch_one("select count(*) as total from social.reddit_period_post_matches")["total"] == 2
+    assert fetch_row("select count(*) as total from social.reddit_posts")["total"] == 2
+    assert fetch_row("select count(*) as total from social.reddit_period_post_matches")["total"] == 2
     assert capture.run_contract(run_id)["coverage"]["state"] == "complete"
     assert all(row["state"] == "committed" for row in capture.list_targets(run_id))
     assert (
-        pg.fetch_one("select count(*) as total from social.reddit_run_post_observations where run_id=%s", [run_id])[
+        fetch_row("select count(*) as total from social.reddit_run_post_observations where run_id=%s", [run_id])[
             "total"
         ]
         == 2
@@ -600,7 +618,7 @@ def test_engine_incomplete_comments_retry_with_same_reported_count_and_deduplica
     }
 
     class Client:
-        def get_comments(self, post_id, checkpoint=None, on_checkpoint=None):
+        def get_comments(self, post_id, checkpoint=None, on_checkpoint=None) -> dict[str, Any]:
             calls.append(copy_checkpoint := json.loads(json.dumps(checkpoint)))
             complete = len(calls) > 1
             if complete:
@@ -613,6 +631,7 @@ def test_engine_incomplete_comments_retry_with_same_reported_count_and_deduplica
                 "pending_children": [] if complete else [{"id": "comment2", "parent_id": "t3_post1", "depth": 0}],
                 "pending_continuations": [],
             }
+            assert on_checkpoint is not None
             on_checkpoint(saved)
             return {
                 "comments": [row],
@@ -629,16 +648,19 @@ def test_engine_incomplete_comments_retry_with_same_reported_count_and_deduplica
     assert first["status"] == "queued"
     assert capture.list_targets(run_id)[0]["state"] == "retry_wait"
     state = pg.fetch_one("select * from social.reddit_capture_state where reddit_post_id='post1' and phase='comments'")
+    assert state is not None
     assert state["state"] == "retry_wait" and state["successful_at"] is None
     _make_retries_due(run_id)
     resumed = capture.claim_run(run_id, "retry-comments")
+    assert resumed is not None
     final = reddit_execution.execute(resumed)
     assert final["status"] == "completed"
     assert len(calls) == 2 and calls[0] is None
-    assert pg.fetch_one("select count(*) as total from social.reddit_comments")["total"] == 1
+    assert fetch_row("select count(*) as total from social.reddit_comments")["total"] == 1
     assert capture.list_targets(run_id)[0]["attempt_count"] == 2
     assert capture.list_targets(run_id)[0]["state"] == "committed"
     state = pg.fetch_one("select * from social.reddit_capture_state where reddit_post_id='post1' and phase='comments'")
+    assert state is not None
     assert state["state"] == "committed" and state["successful_at"] is not None
     assert pg.fetch_one(
         "select comments_state,saved_comments from social.reddit_run_post_observations "
@@ -682,14 +704,15 @@ def test_engine_media_failure_then_success_preserves_retry_targets(database, mon
     assert pg.fetch_all("select * from social.reddit_assets") == []
     _make_retries_due(run_id)
     resumed = capture.claim_run(run_id, "retry-media")
+    assert resumed is not None
     final = reddit_execution.execute(resumed)
     assert final["status"] == "completed"
     assert len(uploads) == 2
     assert all(target["state"] == "committed" for target in capture.list_targets(run_id))
-    assert pg.fetch_one("select count(*) as total from social.reddit_assets")["total"] == 1
-    assert pg.fetch_one("select count(*) as total from social.reddit_asset_links")["total"] == 1
+    assert fetch_row("select count(*) as total from social.reddit_assets")["total"] == 1
+    assert fetch_row("select count(*) as total from social.reddit_asset_links")["total"] == 1
     assert (
-        pg.fetch_one("select media_state from social.reddit_run_post_observations where run_id=%s", [run_id])[
+        fetch_row("select media_state from social.reddit_run_post_observations where run_id=%s", [run_id])[
             "media_state"
         ]
         == "committed"
@@ -751,14 +774,14 @@ def test_failed_page_transaction_retries_original_cursor(database, monkeypatch):
     )
     run_id = str(run["id"])
     reddit_execution.execute(run)
-    assert pg.fetch_one("select count(*) as n from social.reddit_posts")["n"] == 0
+    assert fetch_row("select count(*) as n from social.reddit_posts")["n"] == 0
     target = capture.list_targets(run_id)[0]
     assert target["checkpoint"] == {}
     _make_retries_due(run_id)
-    result = reddit_execution.execute(capture.claim_run(run_id, "retry"))
+    result = reddit_execution.execute(claimed_run(run_id, "retry"))
     assert result["status"] == "completed"
     assert calls == [None, None]
-    assert pg.fetch_one("select count(*) as n from social.reddit_posts")["n"] == 1
+    assert fetch_row("select count(*) as n from social.reddit_posts")["n"] == 1
 
 
 def test_missing_selected_post_is_explicit_unresolved_work(database, monkeypatch):
@@ -787,6 +810,7 @@ def test_abandoned_fifth_attempt_becomes_failed(database):
     assert target["state"] == "failed"
     assert "exhausted" in target["error"]
     state = pg.fetch_one("select * from social.reddit_capture_state where reddit_post_id='post1'")
+    assert state is not None
     assert state["state"] == "failed" and state["next_retry_at"] is None
     assert "exhausted" in state["evidence"]["error"]
 
@@ -799,7 +823,7 @@ def test_episode_retry_retains_checkpoint_and_respects_due_time(database, monkey
     monkeypatch.setattr(reddit_transport, "build_client", lambda **kw: client)
     checkpoints = []
 
-    def discover(payload, *, client, checkpoint, on_checkpoint):
+    def discover(payload, *, client, checkpoint, on_checkpoint) -> dict[str, Any]:
         checkpoints.append(checkpoint)
         if len(checkpoints) == 1:
             on_checkpoint({"version": 1, "queries": {"listing:new": {"rows": [], "after": "t3_saved"}}})
@@ -840,6 +864,7 @@ def test_episode_snapshot_blocks_tombstoned_content_and_invalidates_claim(databa
         workflows.lock_content(post_ids=["post1"], conn=conn)
         workflows._redact_snapshots("post1", conn)
     invalidated = jobs.get_job(str(job["id"]))
+    assert invalidated is not None
     assert invalidated["state"] == "failed" and invalidated["claim_token"] is None
     pg.execute("update social.reddit_lifecycle_enrollment set state='deleted' where reddit_post_id='post1'")
     with pg.transaction() as conn:
@@ -891,11 +916,11 @@ def test_media_upload_without_database_commit_retries_existing_object(database, 
     run = owned(database, requested_phases=["media"])
     run_id = str(run["id"])
     assert reddit_execution.execute(run)["status"] == "queued"
-    assert pg.fetch_one("select count(*) as n from social.reddit_assets")["n"] == 0
+    assert fetch_row("select count(*) as n from social.reddit_assets")["n"] == 0
     _make_retries_due(run_id)
-    assert reddit_execution.execute(capture.claim_run(run_id, "retry"))["status"] == "completed"
+    assert reddit_execution.execute(claimed_run(run_id, "retry"))["status"] == "completed"
     assert len(uploads) == 2
-    assert pg.fetch_one("select count(*) as n from social.reddit_asset_links")["n"] == 1
+    assert fetch_row("select count(*) as n from social.reddit_asset_links")["n"] == 1
 
 
 @pytest.mark.parametrize("author", ["[deleted]", "[removed]", "", None, "RealAccount"])
@@ -933,7 +958,9 @@ def test_author_redaction_stays_within_locked_account_scope(database, monkeypatc
     other_comment = pg.fetch_one(
         "select author,body,raw_payload from social.reddit_comments where reddit_comment_id='other-comment'"
     )
+    assert other is not None
     assert other["author"] == (None if author == "RealAccount" else author)
+    assert other_comment is not None
     assert other_comment["author"] == (None if author == "RealAccount" else author)
     assert other_comment["body"] == "preserved"
     if author != "RealAccount":
@@ -944,8 +971,9 @@ def test_author_redaction_stays_within_locked_account_scope(database, monkeypatc
     target = pg.fetch_one(
         f"select author from social.{target_table} where {target_column}=%s", [comment_id or "scope-a"]
     )
+    assert target is not None
     assert target["author"] is None
-    count = pg.fetch_one("select count(*) as n from social.reddit_author_tombstones")["n"]
+    count = fetch_row("select count(*) as n from social.reddit_author_tombstones")["n"]
     assert count == (1 if author == "RealAccount" else 0)
 
 
@@ -1009,6 +1037,7 @@ def test_parent_redaction_preserves_public_comments_and_comment_media(database, 
     with pg.transaction() as conn:
         workflows._redact_source("post1", None, signal, conn)
     public = pg.fetch_one("select * from social.reddit_comments where reddit_comment_id='public'")
+    assert public is not None
     assert public["body"] == "public text" and public["author"] == "reader"
     assert public["raw_payload"] == {"body": "public text", "author": "reader"}
     assert pg.fetch_all("select * from social.reddit_comment_tombstones") == []
@@ -1044,14 +1073,13 @@ def test_parent_redaction_preserves_public_comments_and_comment_media(database, 
         object_deleter=deleted.append,
     )
     assert result["checked"] == result["enrolled"] == 1
-    assert pg.fetch_one("select body from social.reddit_comments where reddit_comment_id='gone'")["body"] == "[deleted]"
+    assert fetch_row("select body from social.reddit_comments where reddit_comment_id='gone'")["body"] == "[deleted]"
     assert workflows.filter_comment_tombstones([row]) == [row]
     assert (
-        pg.fetch_one("select body from social.reddit_comments where reddit_comment_id='public'")["body"]
-        == "public text"
+        fetch_row("select body from social.reddit_comments where reddit_comment_id='public'")["body"] == "public text"
     )
     assert set(deleted) == {"reddit/post", "reddit/gone"}
-    assert pg.fetch_one("select state,next_check_at>now() as rescheduled from social.reddit_lifecycle_enrollment")[
+    assert fetch_row("select state,next_check_at>now() as rescheduled from social.reddit_lifecycle_enrollment")[
         "rescheduled"
     ]
 

@@ -1,7 +1,7 @@
 """TikTok comment parsing: comment records and comment media URL extraction."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from trr_backend.socials.tiktok.constants import URL_RE
@@ -10,6 +10,14 @@ from trr_backend.socials.tiktok.models import TikTokComment, _dict_or_empty
 
 class CommentParsingMixin:
     """Parse TikTok comment payloads into ``TikTokComment`` records."""
+
+    if TYPE_CHECKING:
+        # Sibling-mixin helpers supplied by ``TikTokScraper``'s other parsing mixins.
+        @staticmethod
+        def _coerce_timestamp(value: Any) -> int: ...
+        @staticmethod
+        def _extract_video_id_from_url(url: str | None) -> str: ...
+        def _pick_best_avatar_url(self, *candidates: Any) -> str | None: ...
 
     def _parse_comment(
         self,

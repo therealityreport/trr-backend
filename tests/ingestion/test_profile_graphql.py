@@ -98,7 +98,7 @@ class Session(requests.Session):
         self.calls = []
         self.payload = payload if payload is not None else native()
 
-    def request(self, method, url, **kwargs):
+    def request(self, method, url, **kwargs):  # pyright: ignore[reportIncompatibleMethodOverride]
         self.calls.append((method, url, kwargs))
         response = requests.Response()
         response.status_code = 200

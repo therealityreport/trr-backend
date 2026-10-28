@@ -95,7 +95,7 @@ def test_incremental_checkpoint_delta_matches_full_snapshot_with_deletions():
 def test_embedded_connection_never_replaces_saved_child_query(complete):
     thread = {"count": 0 if complete else None, "edges": [], "page_info": {"has_next_page": False, "end_cursor": None}}
     page = comments_fixture.native_count_page({}, thread=thread)
-    provenance = {**page.cursor_provenance, "request_cursor": "top-tail"}
+    provenance = {**page.cursor_provenance, "request_cursor": "top-tail"}  # pyright: ignore[reportGeneralTypeIssues]
     binding = {key: provenance[key] for key in ("relay_doc_id", "relay_friendly_name", "sort_order", "page_size")}
     child = {
         **binding,

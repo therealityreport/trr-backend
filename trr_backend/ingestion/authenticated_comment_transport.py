@@ -127,6 +127,8 @@ class AuthenticatedRelayCommentSource:
             client.bootstrap(shortcode)
             # A resumed query must retain the same media and provider semantics.
             context = client._context
+            if context is None:
+                raise CommentSourceError("Authenticated Relay bootstrap missing")
             expected_binding = {
                 "media_id": media_id,
                 "relay_logged_in": context.logged_in,

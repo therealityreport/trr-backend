@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import psycopg2
@@ -70,7 +71,7 @@ def seed(database, *, original=1, scope="bounded_window"):
     return policy, item, setter
 
 
-def records(database, run_id):
+def records(database, run_id) -> Any:
     with database[2]() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("select * from social.instagram_ingestion_runs where run_id=%s", (run_id,))
         run = dict(cur.fetchone())
@@ -172,7 +173,7 @@ def test_expanded_limits_reject_unsupported_values_in_python_and_sql(database, l
     policy.set_limits(**setter)
     run, row = records(database, item["run_id"])
     with pytest.raises(Conflict, match="malformed"):
-        effective_comments_limit_from_run(run, dict(row, comments_parallelism=limit))
+        effective_comments_limit_from_run(run, dict(row, comments_parallelism=limit))  # pyright: ignore[reportArgumentType, reportCallIssue]
     if type(limit) is int:
         with pytest.raises(psycopg2.errors.CheckViolation):
             with database[2]() as conn, conn.cursor() as cur:
@@ -285,7 +286,7 @@ def test_admission_preserves_original_but_workers_stay_serial_without_current_po
         {"execution_placement": "modal"},
         {"run_id": str(uuid4())},
     ):
-        stale = dict(current, **changes, comments_parallelism=3)
+        stale = dict(current, **changes, comments_parallelism=3)  # pyright: ignore[reportArgumentType, reportCallIssue]
         assert effective_comments_limit_from_run(run, stale) == original
     with database[2]() as conn, conn.cursor() as cur:
         cur.execute("update social.instagram_ingestion_runs set generation=2 where run_id=%s", (item["run_id"],))
@@ -355,7 +356,7 @@ def test_malformed_current_policy_fails_closed(database, changes):
     policy.set_limits(**setter)
     run, row = records(database, item["run_id"])
     with pytest.raises(Conflict):
-        effective_comments_limit_from_run(run, dict(row, **changes))
+        effective_comments_limit_from_run(run, dict(row, **changes))  # pyright: ignore[reportArgumentType, reportCallIssue]
     with pytest.raises(Conflict):
         effective_comments_limit_from_run(run, {})
 

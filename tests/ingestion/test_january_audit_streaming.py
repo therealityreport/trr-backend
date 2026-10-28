@@ -197,7 +197,7 @@ def test_many_large_checkpoints_have_bounded_residency_and_compact_ledger(audit_
         _, memory_peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    del value
+    del value  # pyright: ignore[reportPossiblyUnboundVariable]
     gc.collect()
     assert seen == 60 and streams[0].closed
     assert peak <= 3 and live == 0

@@ -666,6 +666,7 @@ def test_safe_diagnostic_preserves_warmup_classification_and_single_operation(
         headers={},
         url="https://www.instagram.com/bravotv/?secret=private-token",
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
     fetcher._fetch_graphql = AsyncMock()
     if rejected:
@@ -676,6 +677,7 @@ def test_safe_diagnostic_preserves_warmup_classification_and_single_operation(
         asyncio.run(fetcher.warmup("bravotv"))
     assert requests == ["browser_warmup"] and fetcher._request_count == 1
     assert fetcher._fetcher.async_fetch.await_count == 1
+    assert fetcher._fetcher.async_fetch.await_args is not None
     assert fetcher._fetcher.async_fetch.await_args.kwargs["retries"] == 1
     fetcher._fetch_graphql.assert_not_awaited()
     assert len(events) == 2
@@ -709,7 +711,7 @@ def test_safe_diagnostic_restricts_values_and_contains_callback_failure(_mock_sc
         phase="private-token",
         event="private-token",
         classification="private-token",
-        auth_body_marker="secret",
+        auth_body_marker="secret",  # pyright: ignore[reportArgumentType]
         classification_path_class="private-token",
     )
     assert events == [
@@ -750,14 +752,15 @@ def test_safe_diagnostic_reports_graphql_response_before_auth_observer(_mock_scr
         cookies={},
         text="private-token",
     )
-    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response))  # pyright: ignore[reportAttributeAccessIssue]
     fetcher._pace_api_requests = AsyncMock()
     assert (
         asyncio.run(fetcher._fetch_graphql("https://www.instagram.com/graphql/query/", data={}, headers={})) is response
     )
     assert events[0]["phase"] == "graphql" and events[0]["http_status"] == 401
     assert events[1] == "source_auth_failed"
-    assert fetcher._request_count == 1 and fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == 1 and fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     assert "private-token" not in json.dumps(events)
 
 
@@ -782,13 +785,13 @@ def _guarded_graphql_fetcher(_mock_scrapling, text, *, status=200):
     response = httpx.Response(
         status, text=text, request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
     )
-    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response), cookies=httpx.Cookies())
+    fetcher._http_client = SimpleNamespace(post=AsyncMock(return_value=response), cookies=httpx.Cookies())  # pyright: ignore[reportAttributeAccessIssue]
     fetcher._pace_api_requests = AsyncMock()
     fetcher._doc_ids_configured = ("fixture-doc",)
     return fetcher, events
 
 
-def _native_graphql_page():
+def _native_graphql_page() -> dict[str, Any]:
     return {
         "status": "ok",
         "data": {
@@ -817,13 +820,14 @@ def test_document_context_normal_parser_uses_error_truth_and_one_request(_mock_s
     assert len(result.posts) == (0 if rejected else 1)
     assert result.fetch_reason == ("graphql_error" if rejected else None)
     assert events == [("retained", payload)]
-    assert operations == ["graphql"] and fetcher._request_count == fetcher._http_client.post.await_count == 1
-    form = fetcher._http_client.post.await_args.kwargs["data"]
+    assert fetcher._http_client is not None
+    assert operations == ["graphql"] and fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
+    form = fetcher._http_client.post.await_args.kwargs["data"]  # pyright: ignore[reportFunctionMemberAccess]
     assert form["fb_dtsg"] == "direct-secret" and form["__user"] == "0"
     assert "hsi" not in form and form["__hsi"] == "900"
 
 
-def _optional_location_error(index=0):
+def _optional_location_error(index=0) -> dict[str, Any]:
     return {
         "severity": "ERROR",
         "message": "A server field error occurred",
@@ -854,7 +858,8 @@ def test_connection_contract_two_pages_accept_only_ancillary_error_after_retaini
         page["data"][root]["edges"][0]["node"]["location"] = {"id": "place", "profile_pic_url": None}
     fetcher, events = _guarded_graphql_fetcher(_mock_scrapling, "")
     fetcher._doc_ids_configured = ("39229011733413759",)
-    fetcher._http_client.post.side_effect = [
+    assert fetcher._http_client is not None
+    fetcher._http_client.post.side_effect = [  # pyright: ignore[reportFunctionMemberAccess]
         httpx.Response(
             200,
             text="for(;;);" + json.dumps(page),
@@ -875,7 +880,7 @@ def test_connection_contract_two_pages_accept_only_ancillary_error_after_retaini
     assert not following.fetch_failed and not following.has_next_page
     assert events == [("retained", first), ("retained", second)]
     assert operations == ["graphql", "graphql"] and fetcher._request_count == 2
-    calls = fetcher._http_client.post.await_args_list
+    calls = fetcher._http_client.post.await_args_list  # pyright: ignore[reportFunctionMemberAccess]
     assert len(calls) == 2
     for call in calls:
         assert call.kwargs["data"]["doc_id"] == "39229011733413759"
@@ -922,7 +927,8 @@ def test_connection_contract_partial_data_does_not_hide_legitimate_failure(_mock
         else []
     )
     assert events[1:] == expected_failures
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 def test_connection_contract_reverse_partial_error_requires_reverse_pagination_proof(_mock_scrapling):
@@ -936,7 +942,8 @@ def test_connection_contract_reverse_partial_error_requires_reverse_pagination_p
     result = asyncio.run(fetcher.fetch_posts_page("bravotv", cursor="before-cursor", direction="reverse"))
     assert not result.fetch_failed and len(result.posts) == 1
     assert events == [("retained", payload)]
-    variables = json.loads(fetcher._http_client.post.await_args.kwargs["data"]["variables"])
+    assert fetcher._http_client is not None
+    variables = json.loads(fetcher._http_client.post.await_args.kwargs["data"]["variables"])  # pyright: ignore[reportFunctionMemberAccess]
     assert variables["before"] == "before-cursor" and variables["after"] is None
     assert variables["first"] is None and variables["last"] == fetcher._page_size
     assert fetcher._request_count == 1
@@ -972,7 +979,8 @@ def test_nested_machine_failure_retained_before_one_callback_and_request(
     assert result.fetch_failed and result.posts == [] and result.auth_failed is auth
     assert events == [("retained", payload), ("failure", callback)]
     assert operations == ["graphql"]
-    assert result.request_count == fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert result.request_count == fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 @pytest.mark.parametrize("auth_state", ["authenticated", "public"])
@@ -1011,10 +1019,11 @@ def test_document_context_absent_dtsg_preserves_warmup_and_request_budget(
     response = httpx.Response(
         200, json=_native_graphql_page(), request=httpx.Request("POST", "https://www.instagram.com/graphql/query")
     )
-    fetcher._http_client = SimpleNamespace(
+    fetcher._http_client = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
         get=AsyncMock(return_value=warmup), post=AsyncMock(return_value=response), cookies=httpx.Cookies()
     )
     if auth_state != "public":
+        assert fetcher._fetcher is not None
         fetcher._fetcher.async_fetch = AsyncMock(return_value=warmup)
     fetcher._rebuild_http_client = AsyncMock()
     fetcher._pace_api_requests = AsyncMock()
@@ -1028,14 +1037,17 @@ def test_document_context_absent_dtsg_preserves_warmup_and_request_budget(
     assert not result.fetch_failed and len(result.posts) == 1
     warmup_phase = "http_warmup" if auth_state == "public" else "browser_warmup"
     assert operations == [warmup_phase, "graphql"] and result.request_count == 2
-    warmup_call = fetcher._http_client.get if auth_state == "public" else fetcher._fetcher.async_fetch
-    assert warmup_call.await_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    if auth_state != "public":
+        assert fetcher._fetcher is not None
+    warmup_call = fetcher._http_client.get if auth_state == "public" else fetcher._fetcher.async_fetch  # pyright: ignore[reportOptionalMemberAccess]
+    assert warmup_call.await_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     assert fetcher.runtime_metadata["http_client"] == "httpx"
     assert fetcher.runtime_metadata["browser_used"] is (auth_state != "public")
     assert fetcher.runtime_metadata["scrapling_fetcher_class"] == (
         None if auth_state == "public" else "StealthyFetcher"
     )
-    form = fetcher._http_client.post.await_args.kwargs["data"]
+    form = fetcher._http_client.post.await_args.kwargs["data"]  # pyright: ignore[reportFunctionMemberAccess]
     assert "fb_dtsg" not in form and "jazoest" not in form
     assert form["av"] == ("0" if auth_state == "public" else "viewer") and form["__user"] == "0"
 
@@ -1050,7 +1062,8 @@ def test_guarded_structured_graphql_success_retains_evidence_without_text_auth(_
     assert not result.fetch_failed and not result.auth_failed and len(result.posts) == 1
     assert not result.has_next_page
     assert events == [("retained", payload)]
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 @pytest.mark.parametrize("with_connection", [False, True])
@@ -1065,7 +1078,8 @@ def test_guarded_graphql_1357001_retained_before_one_auth_failure(_mock_scraplin
     assert result.fetch_failed and result.auth_failed and result.posts == []
     assert result.fetch_reason == "login_required" and not result.retryable
     assert events == [("retained", payload), ("failure", "source_auth_failed")]
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 @pytest.mark.parametrize(
@@ -1089,7 +1103,8 @@ def test_guarded_graphql_error_or_missing_connection_never_succeeds(_mock_scrapl
     assert result.fetch_reason == reason
     assert events[0] == ("retained", payload)
     assert events[1:] == ([("failure", "source_auth_failed")] if auth else [])
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 @pytest.mark.parametrize(
@@ -1103,7 +1118,8 @@ def test_guarded_graphql_invalid_or_unrecognized_payload_stays_unresolved(_mock_
     assert result.fetch_failed and not result.auth_failed and result.posts == []
     assert result.fetch_reason == "non_json_response" and not result.retryable
     assert events == []
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 @pytest.mark.parametrize(
@@ -1168,7 +1184,8 @@ def test_guarded_malformed_connection_is_retained_and_fails_without_more_request
     assert result.fetch_reason == "graphql_invalid_connection"
     assert not result.has_next_page and not result.retryable
     assert events == [("retained", payload)]
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
     assert fetcher._doc_id_used is None and not fetcher._doc_id_success_counts
 
 
@@ -1185,7 +1202,8 @@ def test_guarded_valid_empty_connection_requires_explicit_direction_terminal(_mo
     assert not result.fetch_failed and not result.auth_failed and result.posts == []
     assert not result.has_next_page and result.end_cursor is None
     assert events == [("retained", payload)]
-    assert fetcher._request_count == fetcher._http_client.post.await_count == 1
+    assert fetcher._http_client is not None
+    assert fetcher._request_count == fetcher._http_client.post.await_count == 1  # pyright: ignore[reportFunctionMemberAccess]
 
 
 def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
@@ -1206,6 +1224,7 @@ def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     fake_resp.status_code = 200
     fake_resp.text = "<html>LSD token stuff</html>"
     fake_resp.cookies = {"fresh_cookie": "v"}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
 
     with caplog.at_level("INFO", logger="socials.instagram.posts_scrapling.fetcher"):
@@ -1235,6 +1254,7 @@ def test_warmup_raises_auth_error_code(_mock_scrapling):
     fake_resp.status_code = 200
     fake_resp.text = '<form action="/accounts/login/"><input name="username"><input type="password"></form>'
     fake_resp.cookies = {}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
 
     with pytest.raises(InstagramPostsWarmupError) as exc_info:
@@ -1311,6 +1331,7 @@ def test_warmup_structured_auth_documents_ignore_incidental_copy(_mock_scrapling
     response = SimpleNamespace(
         status_code=200, text=body, cookies={}, headers={}, url="https://www.instagram.com/bravotv/"
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
     fetcher._fetch_graphql = AsyncMock()
     fetcher._activate_requests_fallback = MagicMock(return_value=False)
@@ -1370,6 +1391,7 @@ def test_warmup_retains_http_and_relative_absolute_redirect_stops(
         allow_requests_recovery=False,
         source_failure_observer=lambda *args: failures.append(args),
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(
         return_value=SimpleNamespace(
             status_code=status, url=url, headers={"location": location}, text="<html>profile</html>", cookies={}
@@ -1410,6 +1432,7 @@ def test_warmup_transport_error_activates_requests_fallback(_mock_scrapling, mon
         raw_cookies={"sessionid": "existing", "csrftoken": "csrf"},
         browser_account_id="t",
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(side_effect=RuntimeError("Page.goto failed"))
 
     asyncio.run(fetcher.warmup("bravotv"))
@@ -1436,6 +1459,7 @@ def test_warmup_redirect_loop_stops_after_one_document_without_graphql(_mock_scr
         raw_cookies={"sessionid": "existing", "csrftoken": "csrf"},
         browser_account_id="t",
     )
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(
         side_effect=RuntimeError(
             "Page.goto: net::ERR_TOO_MANY_REDIRECTS at "
@@ -1497,6 +1521,7 @@ def test_warmup_terminal_redirect_signals_do_not_fallback_or_fetch_graphql(
     )
     response = MagicMock(status_code=200, text="<html></html>", cookies={})
     response.url = final_url
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=response)
     fetcher._fetch_graphql = AsyncMock()
 
@@ -1528,6 +1553,7 @@ def test_warmup_raises_no_cookie_when_no_prior_session(_mock_scrapling):
     fake_resp.status_code = 200
     fake_resp.text = _fixture_text("no_cookie_warmup.html")
     fake_resp.cookies = {}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
     fetcher._rebuild_http_client = AsyncMock()
 
@@ -1555,6 +1581,7 @@ def test_warmup_allows_no_new_cookies_when_prior_session_exists(_mock_scrapling)
     fake_resp.status_code = 200
     fake_resp.text = _fixture_text("no_cookie_warmup.html")
     fake_resp.cookies = {}
+    assert fetcher._fetcher is not None
     fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
     fetcher._rebuild_http_client = AsyncMock()
 
@@ -1582,6 +1609,7 @@ def test_shared_warmup_pool_reuses_tokens_without_second_browser_fetch(_mock_scr
     fake_resp.status_code = 200
     fake_resp.text = '"LSD",[],{"token":"pooled_lsd"} bloks_version":"deadbeef1234567890abcdef12345678"'
     fake_resp.cookies = {"csrftoken": "fresh-csrf"}
+    assert first._fetcher is not None
     first._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
 
     asyncio.run(first.warmup("bravotv"))
@@ -1591,6 +1619,7 @@ def test_shared_warmup_pool_reuses_tokens_without_second_browser_fetch(_mock_scr
         raw_cookies={"sessionid": "x", "csrftoken": "old", "ds_user_id": "1"},
         browser_account_id="test-account",
     )
+    assert second._fetcher is not None
     second._fetcher.async_fetch = AsyncMock(side_effect=AssertionError("warmup should come from pool"))
 
     asyncio.run(second.warmup("bravotv"))
@@ -1675,7 +1704,7 @@ def test_doc_id_pin_tries_successful_id_first_after_initial_fallback(_mock_scrap
 
     attempted: list[str] = []
 
-    async def fake_fetch_json_response(*_args, **kwargs):
+    async def fake_fetch_json_response(*_args, **kwargs) -> dict[str, Any]:
         doc_id = kwargs["data"]["doc_id"]
         attempted.append(doc_id)
         if doc_id != "healthy-c":
@@ -1727,7 +1756,7 @@ def test_empty_page_with_pagination_state_is_doc_id_stale_not_complete(_mock_scr
     )
     fetcher._doc_ids_configured = ("stale-doc",)
 
-    async def fake_fetch_json_response(*_args, **_kwargs):
+    async def fake_fetch_json_response(*_args, **_kwargs) -> dict[str, Any]:
         return {
             "failed": False,
             "auth_failed": False,
@@ -1870,7 +1899,7 @@ def test_bidirectional_probe_executes_reverse_request_when_enabled(_mock_scrapli
 
     requests: list[dict[str, str]] = []
 
-    async def fake_fetch_json_response(*_args, **kwargs):
+    async def fake_fetch_json_response(*_args, **kwargs) -> dict[str, Any]:
         requests.append(kwargs["data"])
         return {
             "failed": False,
@@ -1932,6 +1961,7 @@ def test_public_posts_reject_learned_identity_before_another_send(
             if identity_source == "snapshot":
                 await fetcher.apply_warmup_snapshot({"cookie_state": {"ds_user_id": "forbidden"}})
             elif identity_source == "jar":
+                assert fetcher._http_client is not None
                 fetcher._http_client.cookies.set(" ds_User_ID ", "forbidden", domain=".instagram.com")
                 await fetcher._fetch_graphql("https://www.instagram.com/graphql/query", data={}, headers={})
             else:
@@ -1964,14 +1994,14 @@ def test_public_posts_ignore_identity_and_proxy_rotation_and_never_activate_requ
         browser_account_id="ambient-account",
         auth_state=auth_state,
         identity_provider=provider,
-        proxy_config=proxy,
+        proxy_config=proxy,  # pyright: ignore[reportArgumentType]
     )
     monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_REQUESTS_FALLBACK_ENABLED", "true")
 
     async def execute():
-        assert await fetcher.rotate_session(proxy_config=proxy) is False
-        await fetcher.set_api_proxy_config(proxy, reason="legacy-anonymous-canary")
-        fetcher._apply_proxy_config(proxy, reason="legacy-internal-rotation")
+        assert await fetcher.rotate_session(proxy_config=proxy) is False  # pyright: ignore[reportArgumentType]
+        await fetcher.set_api_proxy_config(proxy, reason="legacy-anonymous-canary")  # pyright: ignore[reportArgumentType]
+        fetcher._apply_proxy_config(proxy, reason="legacy-internal-rotation")  # pyright: ignore[reportArgumentType]
 
     asyncio.run(execute())
     fetcher._raw_cookies = {"sessionid": "forbidden", "ds_user_id": "forbidden"}

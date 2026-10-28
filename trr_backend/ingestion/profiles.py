@@ -48,6 +48,9 @@ _BOOL_FIELDS = frozenset({"is_verified", "is_private"})
 
 
 class ProfileError(ValueError):
+    # Declared only: set by the projector for provider-classified failures and probed with hasattr().
+    error_code: str
+
     def __init__(self, code):
         self.code = code
         self.failure = Failure(code)
@@ -111,7 +114,9 @@ def project_profile_payload(
             error = ProfileError("profile_source_capability_missing")
             error.error_code = code
             raise error
-        flags = provenance.get("profile_provider_flags") if isinstance(provenance, dict) else None
+        if not isinstance(provenance, dict):
+            raise ProfileError("profile_provenance_invalid")
+        flags = provenance.get("profile_provider_flags")
         if (
             not isinstance(flags, dict)
             or set(flags) != set(PROVIDERS)
@@ -145,7 +150,7 @@ def project_profile_payload(
                 if name in _BOOL_FIELDS
                 else isinstance(value, str)
             )
-            if valid and value and name.startswith("profile_pic_url"):
+            if valid and value and isinstance(value, str) and name.startswith("profile_pic_url"):
                 try:
                     validate_media_url(value, policy=_POLICY)
                     source_reference(value)
@@ -432,11 +437,14 @@ def cached_profile(store, *, expected_id, username, target_key, now):
             or source_reference(avatar["hosted_url"]) != avatar["hosted_url"]
         ):
             return None
+        expected_hosted = None
         if observation.avatar_url:
+            if not isinstance(avatar, dict):
+                return None
             avatar_time = datetime.fromisoformat(avatar["observed_at"].replace("Z", "+00:00"))
             if avatar_time.utcoffset() is None:
                 return None
-        expected_hosted = avatar["hosted_url"] if observation.avatar_url else None
+            expected_hosted = avatar["hosted_url"]
         if any(row[name] != expected_hosted for name in ("hosted_profile_pic_url", "hosted_profile_pic_url_hd")):
             return None
         return observation, {
@@ -531,6 +539,7 @@ class ProfileActivity:
         sends = 0
         try:
             source, gate = provider()
+            request_gate = gate
             parser_version = getattr(source, "parser_version", PROFILE_PARSER)
             budget = 2 if parser_version == "instagram-public-commenter-profile-graphql-v1" else 1
             if getattr(source, "request_budget", 1) != budget:
@@ -541,7 +550,7 @@ class ProfileActivity:
                 if sends >= budget:
                     raise ProfileError("profile_hidden_retry_forbidden")
                 self.store.check_owner(**owned)
-                gate.before_request()
+                request_gate.before_request()
                 self.store.check_owner(**owned, record_request=True)
                 sends += 1
 
@@ -594,7 +603,14 @@ class ProfileActivity:
                 if avatar:
                     from trr_backend.ingestion.media import write_avatar_version
 
-                    proof = write_avatar_version(conn, **dict(avatar, observed_at=observation.observed_at))
+                    proof = write_avatar_version(
+                        conn,
+                        username=avatar["username"],
+                        source_url=avatar["source_url"],
+                        hosted_url=avatar["hosted_url"],
+                        content_hash=avatar["content_hash"],
+                        observed_at=observation.observed_at,
+                    )
                     proof = dict(proof, observed_at=utc_timestamp(proof["observed_at"]))
                 identity = write_profile(
                     conn, observation=observation, evidence_id=evidence_id, run_id=run_id, complete=True, avatar=proof

@@ -371,7 +371,7 @@ def test_cooling_down_probe_does_not_make_network_requests() -> None:
     client = transport.RedditHttpClient(session=Session())
     client._cooldown_until = transport.time.time() + 60
     assert client.token_probe()["cooling_down"] is True
-    assert client.session.calls == []
+    assert client.session.calls == []  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_unfinished_initial_checkpoint_fetches_instead_of_becoming_complete() -> None:

@@ -753,7 +753,8 @@ def recover(snapshot, *, loader, store, owned, storage_factory, callbacks):
                 historical_handle, origin_clock = root["origin"]["historical_handle"], root["origin"]["source_clock"]
             historical = read_cohort(cur, historical_handle, cached.slot(avatar)["source_reference"])
             selected = candidate(historical, cached.slot(avatar)["source_reference"], origin_clock)
-            require(selected is not None, "saved_owner_asset_historical_unproved")
+            if selected is None:
+                raise MediaIncomplete("saved_owner_asset_historical_unproved")
             old_url, sha = selected["hosted_url"], selected["sha256"]
             byte_clock = selected["observed_at"]
             current = read_cohort(cur, avatar.username, cached.slot(avatar)["source_reference"])

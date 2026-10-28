@@ -318,7 +318,7 @@ def test_two_workers_share_mixed_send_spacing_after_slow_admission(monkeypatch, 
                 shared_lock.release()
 
     module = ModuleType("trr_backend.socials.instagram.comments_scrapling.reply_dispatch_turn")
-    module.DispatchTurn = FakeTurn
+    module.DispatchTurn = FakeTurn  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     async def handler(request):
@@ -405,7 +405,7 @@ def test_strict_root_turn_cleanup_never_records_an_unsent_request(monkeypatch, f
             finished.append(sent)
 
     module = ModuleType("trr_backend.socials.instagram.comments_scrapling.reply_dispatch_turn")
-    module.DispatchTurn = FakeTurn
+    module.DispatchTurn = FakeTurn  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, module.__name__, module)
     instance = _build_fetcher()
     instance._prepare_credentials = MagicMock()
@@ -417,7 +417,7 @@ def test_strict_root_turn_cleanup_never_records_an_unsent_request(monkeypatch, f
 
     instance._before_source = MagicMock(side_effect=admit)
     hooks = SimpleNamespace(deadline=None, mark_sent=MagicMock(), release_unsent=MagicMock())
-    instance._before_source_request = hooks
+    instance._before_source_request = hooks  # pyright: ignore[reportAttributeAccessIssue]
     client = MagicMock()
     client.get = AsyncMock()
 
@@ -484,7 +484,7 @@ def test_actual_root_helper_retries_exact_refund_state(monkeypatch, kind, failur
             self.closed = True
 
     module = ModuleType("trr_backend.socials.instagram.comments_scrapling.reply_dispatch_turn")
-    module.DispatchTurn = FakeTurn
+    module.DispatchTurn = FakeTurn  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, module.__name__, module)
     instance = _build_fetcher()
     instance._prepare_credentials = MagicMock()
@@ -504,7 +504,7 @@ def test_actual_root_helper_retries_exact_refund_state(monkeypatch, kind, failur
         return bool(charged)
 
     hooks = SimpleNamespace(deadline=None, mark_sent=MagicMock(), release_unsent=MagicMock(side_effect=release))
-    instance._before_source_request = hooks
+    instance._before_source_request = hooks  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr(fetcher, "_deadline_remaining_seconds", lambda _deadline: 0)
     client = MagicMock()
     client.get = client.post = AsyncMock()
@@ -531,12 +531,12 @@ def test_actual_root_helper_retries_exact_refund_state(monkeypatch, kind, failur
         client.get.assert_not_awaited()
         if failure.startswith("persistent"):
             error = raised.value
-            assert len(error.failures) == 2 and len(error.descriptors) == 1
-            assert error.descriptors[0].request_permit is permit and error.descriptors[0].source_kind == kind
-            assert error.admission_states[0]["permit"] is permit
-            assert error.admission_states[0]["local_corrected"] is False
+            assert len(error.failures) == 2 and len(error.descriptors) == 1  # pyright: ignore[reportAttributeAccessIssue]
+            assert error.descriptors[0].request_permit is permit and error.descriptors[0].source_kind == kind  # pyright: ignore[reportAttributeAccessIssue]
+            assert error.admission_states[0]["permit"] is permit  # pyright: ignore[reportAttributeAccessIssue]
+            assert error.admission_states[0]["local_corrected"] is False  # pyright: ignore[reportAttributeAccessIssue]
             if failure == "persistent_with_cleanup_failure":
-                assert len(error.cleanup_failures) == 1
+                assert len(error.cleanup_failures) == 1  # pyright: ignore[reportAttributeAccessIssue]
             assert "https://" not in str(error)
         if failure != "persistent_with_cleanup_failure":
             assert turns[0].closed
@@ -547,7 +547,7 @@ def test_actual_root_helper_retries_exact_refund_state(monkeypatch, kind, failur
 
 def test_none_permits_and_no_release_hook_remain_separate_admissions():
     instance = _build_fetcher()
-    instance._before_source_request = SimpleNamespace(release_unsent=None)
+    instance._before_source_request = SimpleNamespace(release_unsent=None)  # pyright: ignore[reportAttributeAccessIssue]
     instance._request_count = 2
     turns = [MagicMock(), MagicMock()]
     states = [{"permit": None, "local_corrected": False, "turn": turn} for turn in turns]
@@ -582,7 +582,7 @@ def test_actual_child_discard_retries_turn_close_without_repeating_local_refund(
                 raise RuntimeError("fixture close acknowledgment lost")
 
     module = ModuleType("trr_backend.socials.instagram.comments_scrapling.reply_dispatch_turn")
-    module.DispatchTurn = FakeTurn
+    module.DispatchTurn = FakeTurn  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setitem(sys.modules, module.__name__, module)
     transport = AsyncMock(side_effect=AssertionError("Unsent descriptor reached transport"))
     monkeypatch.setattr(reply_http, "fetch_reply", transport)
@@ -591,7 +591,7 @@ def test_actual_child_discard_retries_turn_close_without_repeating_local_refund(
     instance._prepare_credentials = MagicMock()
     permit = object()
     hooks = SimpleNamespace(deadline=time.monotonic() + 1, mark_sent=MagicMock(), release_unsent=MagicMock())
-    instance._before_source_request = hooks
+    instance._before_source_request = hooks  # pyright: ignore[reportAttributeAccessIssue]
 
     def admit(_kind):
         hooks.deadline = time.monotonic() - 1

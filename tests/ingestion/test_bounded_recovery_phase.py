@@ -274,7 +274,7 @@ def test_workflow_and_direct_reservations_fence_old_comments_and_enter_media(aut
 
     monkeypatch.setattr(WorkflowStore, "_eligible_media", staticmethod(proved_media))
     assert workflow.decision(item, 2, datetime.now(UTC)) == media_decision
-    assert proof_calls == [("media", item["execution_id"], True, True)]
+    assert proof_calls == [("media", item["execution_id"], True, True)]  # pyright: ignore[reportArgumentType]
     assert workflow.reserve_decision(item, old, ordinal=0) is None
     assert store.reserve(**reserve, stage=Stage.COMMENTS, target_key="post1") is None
     assert store.reserve(**reserve, stage=Stage.MEDIA, target_key="post1") is not None

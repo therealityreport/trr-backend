@@ -30,7 +30,7 @@ def test_actual_public_reply_owner_deadline_is_not_source_health_failure(monkeyp
         gate.failures.append((code, kwargs))
         return Failure(code) if code else None
 
-    gate.finish_failure = finish
+    gate.finish_failure = finish  # pyright: ignore[reportAttributeAccessIssue]
 
     async def handler(request):
         if request.method == "GET":
@@ -151,7 +151,7 @@ def test_received_rate_limit_wins_over_primary_expected_deadline(monkeypatch):
         gate.failures.append((code, kwargs))
         return Failure(code) if code else None
 
-    gate.finish_failure = finish
+    gate.finish_failure = finish  # pyright: ignore[reportAttributeAccessIssue]
 
     async def handler(request):
         if request.method == "GET":

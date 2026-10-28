@@ -18,7 +18,7 @@ class PinnedCookieIdentity:
     _sessionid: str = field(repr=False)
     _user_id: str = field(repr=False)
 
-    def __init__(self, cookies: Mapping[str, str]):
+    def __init__(self, cookies: Mapping[str, str] | None):
         if not isinstance(cookies, Mapping) or any(
             not isinstance(cookies.get(key), str) or not cookies[key].strip() for key in _IDENTITY_FIELDS
         ):

@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass, field
@@ -34,6 +34,9 @@ class ReplyDiscardUnresolved(RuntimeError):  # noqa: N818 - public scheduler int
     def __init__(self, descriptors: tuple[ReplyRequest, ...], failures: tuple[Exception, ...]):
         self.descriptors = descriptors
         self.failures = failures
+        # Recovery context attached by the owner that catches an unresolved refund.
+        self.admission_states: tuple[dict[str, Any], ...] = ()
+        self.cleanup_failures: tuple[BaseException, ...] = ()
         super().__init__("Unsent reply admission refund remains unresolved after two attempts")
 
 
@@ -234,7 +237,7 @@ class DiskResponseSpool:
                     raise self.limit_error("json_nesting_limit")
                 self.take()
                 is_object = first == "{"
-                result = {} if is_object else []
+                result: Any = {} if is_object else []
                 closing = "}" if is_object else "]"
                 self.whitespace()
                 if self.peek() == closing:
@@ -402,7 +405,7 @@ async def run_reply_lanes(
     owner_context = copy_context() if offload_owner else None
 
     async def owner_call(callback, *args, **kwargs):
-        if owner_executor is None:
+        if owner_executor is None or owner_context is None:
             return callback(*args, **kwargs)
         # One persistent context also keeps generator-held ContextVar tokens
         # valid across advances and close. Cancellation joins a committing
@@ -422,9 +425,11 @@ async def run_reply_lanes(
         captured.append(descriptor)
         return descriptor
 
-    def discard_owned(descriptor: ReplyRequest, outcome: list[Exception | None]) -> None:
+    def discard_owned(
+        callback: Callable[[ReplyRequest], None], descriptor: ReplyRequest, outcome: list[Exception | None]
+    ) -> None:
         try:
-            discard(descriptor)
+            callback(descriptor)
         except Exception as error:
             outcome.append(error)
             raise
@@ -442,7 +447,7 @@ async def run_reply_lanes(
             return False
         outcome: list[Exception | None] = []
         try:
-            await owner_call(discard_owned, captured[0], outcome)
+            await owner_call(discard_owned, discard, captured[0], outcome)
         except Exception as error:
             # Keep the descriptor until a successful retry reconciles the gate's
             # idempotency receipt. Do not replace an active cancellation.
@@ -492,7 +497,7 @@ async def run_reply_lanes(
             metrics.owner_seconds += max(0.0, clock() - started)
         halted = should_stop()
 
-    def launch(key: str, kind: str, item: ReplyRequest | Delay, awaitable: Awaitable[Any]) -> None:
+    def launch(key: str, kind: str, item: ReplyRequest | Delay, awaitable: Coroutine[Any, Any, Any]) -> None:
         task = asyncio.create_task(awaitable)
         pending[task] = key, kind, item
 
@@ -526,7 +531,7 @@ async def run_reply_lanes(
             except TimeoutError:
                 raise ReplyDeadlineExceeded("Reply response deadline expired") from None
         except Exception as error:
-            error._instagram_request_permit = item.request_permit
+            vars(error)["_instagram_request_permit"] = item.request_permit
             raise
         finally:
             metrics.network_seconds += max(0.0, clock() - started)
@@ -541,11 +546,15 @@ async def run_reply_lanes(
         return True
 
     async def close(value: Any) -> None:
-        callback = close_response or getattr(value, "aclose", None) or getattr(value, "close", None)
-        if callback is not None:
-            result = callback(value) if close_response else callback()
-            if inspect.isawaitable(result):
-                await result
+        if close_response:
+            result = close_response(value)
+        else:
+            callback = getattr(value, "aclose", None) or getattr(value, "close", None)
+            if callback is None:
+                return
+            result = callback()
+        if inspect.isawaitable(result):
+            await result
 
     async def drain_received(*, suppress_source_errors: bool = False) -> None:
         received = sorted(
@@ -639,6 +648,8 @@ async def run_reply_lanes(
             if kind == "request":
                 metrics.completed_queue_seconds += max(0.0, clock() - finished_at)
             if kind == "pace":
+                if not isinstance(item, ReplyRequest):
+                    raise TypeError("Reply pacing tasks must carry a ReplyRequest")
                 dispatch = None
                 transport_launched = False
                 try:

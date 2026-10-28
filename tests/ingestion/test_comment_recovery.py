@@ -1,5 +1,6 @@
 """Recovery journal fences and preservation, using isolated PostgreSQL."""
 
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -95,7 +96,7 @@ def test_progress_frontier_tracks_fresh_coverage_and_preserves_legacy_baseline()
 
 
 def test_canonical_shortfall_priority_is_ordering_only():
-    def row(key, expected):
+    def row(key, expected) -> dict[str, Any]:
         return {"target_key": key, "checkpoint": {"comment_pages": {"expected": expected}}}
 
     counts = {"short": 4, "matched": 5, "over": 6}
@@ -183,7 +184,7 @@ def test_first_unresolved_recovery_seeds_frontier_from_retained_observations(dat
     assert unchanged_passes(current, "committed") == 1
 
 
-def completed(database, monkeypatch):
+def completed(database, monkeypatch) -> Any:
     store, tx, args = public.setup(database, bounded=True, seed_missing=True)
 
     def handler(request):
@@ -199,7 +200,7 @@ def completed(database, monkeypatch):
     return store, tx, args, fetch
 
 
-def command(tx, args):
+def command(tx, args) -> dict[str, Any]:
     checkpoint = fixtures.query(
         tx,
         "select checkpoint from social.instagram_ingestion_targets where run_id=%s and stage='comments'",
@@ -358,7 +359,7 @@ def test_january_completion_replay_sees_reopened_work(database, monkeypatch):
     assert commands == [{"n": 1}]
 
 
-def january_binding(tx, args):
+def january_binding(tx, args) -> dict[str, Any]:
     from dataclasses import replace
     from datetime import UTC, datetime
 
@@ -547,10 +548,11 @@ def test_summary_keys_for_all_settled_targets_are_queried_in_one_batch(database,
     batches = []
 
     class RecordingCursor(RealDictCursor):
-        def execute(self, sql, params=None):
-            if "idempotency_key=any" in str(sql):
-                batches.append(list(params[2]))
-            return super().execute(sql, params)
+        def execute(self, query, vars=None):
+            if "idempotency_key=any" in str(query):
+                assert vars is not None
+                batches.append(list(vars[2]))
+            return super().execute(query, vars)
 
     monkeypatch.setattr(recovery, "RealDictCursor", RecordingCursor)
     first = recovery.enqueue_next_recovery(store, **kwargs)

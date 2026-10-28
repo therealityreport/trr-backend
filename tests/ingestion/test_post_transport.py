@@ -129,9 +129,9 @@ def test_native_listing_rejection_aborts_before_internal_retry(status, code, ret
             self._before_source_request = kwargs["before_source_request"]
             self._source_failure_observer = kwargs["source_failure_observer"]
             self._request_count = 0
-            self._http_client = self
+            self._http_client = self  # pyright: ignore[reportAttributeAccessIssue]
 
-        async def warmup(self, account):
+        async def warmup(self, account):  # pyright: ignore[reportIncompatibleMethodOverride]
             pass
 
         async def _pace_api_requests(self):

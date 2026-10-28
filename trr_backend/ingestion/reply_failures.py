@@ -98,8 +98,8 @@ def record_failure(
     request_fingerprint = fingerprint(
         {"query": query, "parent": payload["parent_comment_id"], "content_hash": native_hash}
     )
-    previous = previous or {}
-    counts = dict(previous.get("fingerprint_counts") or {})
+    prior: dict[str, Any] = dict(previous) if previous else {}
+    counts = dict(prior.get("fingerprint_counts") or {})
     counts[request_fingerprint] = counts.get(request_fingerprint, 0) + 1
     count = max(counts.values())
     result: PublicReplyFailure = {
@@ -110,7 +110,7 @@ def record_failure(
         "content_hash": evidence.content_hash,
         "request": query,
         "request_fingerprint": request_fingerprint,
-        "first_observed_at": previous.get("first_observed_at") or evidence.captured_at.isoformat(),
+        "first_observed_at": prior.get("first_observed_at") or evidence.captured_at.isoformat(),
         "observed_at": evidence.captured_at.isoformat(),
         "owner_generation": owner_generation,
         "failure_count": count,
@@ -121,8 +121,8 @@ def record_failure(
     }
     if diagnostic_version is not None:
         result["diagnostic_version"] = diagnostic_version
-    elif type(previous.get("diagnostic_version")) is int and previous["diagnostic_version"] == 1:
-        result["diagnostic_version"] = previous["diagnostic_version"]
+    elif type(prior.get("diagnostic_version")) is int and prior["diagnostic_version"] == 1:
+        result["diagnostic_version"] = prior["diagnostic_version"]
     return result
 
 

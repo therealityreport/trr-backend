@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -37,7 +38,7 @@ def payload():
     )
 
 
-def sql(tx, statement, args=()):
+def sql(tx, statement, args=()) -> Any:
     with tx() as conn, conn.cursor() as cur:
         cur.execute(statement, args)
         return cur.fetchall() if cur.description else None
@@ -48,6 +49,7 @@ def test_global_enable_without_explicit_canary_is_disabled(monkeypatch, target):
     monkeypatch.setenv("TRR_INSTAGRAM_INGESTION_ENABLED", "true")
     monkeypatch.delenv("TRR_INSTAGRAM_INGESTION_CANARY_ACCOUNTS", raising=False)
     service = composition.build_api()
+    assert service is not None
     assert service.capabilities("bravotv").enabled is False
     assert service.capabilities("someone_else").supported_actions == []
 
@@ -80,7 +82,7 @@ def test_atomic_concurrent_api_launch_cannot_bypass_single_run_budget(base_datab
     admission = SimpleNamespace(validate_launch=lambda account, request: observed.append(account))
     service = composition.CanaryCommandService(
         store,
-        SimpleNamespace(),
+        SimpleNamespace(),  # pyright: ignore[reportArgumentType]
         engine="dbos",
         workflow_version=policy.workflow_version,
         enabled=True,
@@ -198,9 +200,10 @@ def test_source_bindings_reuse_explicit_ownership_transaction(monkeypatch, stage
         monkeypatch.setattr(composition, "_credentials", lambda _: credentials)
         monkeypatch.setattr(post_transport, "DetailSource", lambda **kw: SimpleNamespace(**kw))
         source = composition._details({"run": {"intent": {"account": "bravotv"}}}, dict(owned, target_key="ABC"))
-        callback = source.check_cancelled_in_transaction
+        callback = source.check_cancelled_in_transaction  # pyright: ignore[reportAttributeAccessIssue]
         owned = dict(owned, target_key="ABC")
     connection = object()
+    assert callback is not None
     callback(connection)
     assert checked == [{**owned, "connection": connection}]
 
@@ -275,14 +278,14 @@ def test_lost_owner_cleans_probe_without_marking_identity_failure():
 
 def test_explicit_modal_target_and_positive_call_reconciliation(monkeypatch, target):
     fake = ModuleType("modal")
-    fake.FunctionCall = SimpleNamespace(
+    fake.FunctionCall = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
         from_id=lambda identity: SimpleNamespace(
             get_call_graph=lambda: [SimpleNamespace(function_call_id=identity, children=[])]
         )
     )
     monkeypatch.setitem(sys.modules, "modal", fake)
     assert composition._reconcile({"remote_identity": "fc-synthetic"}) == "accepted"
-    fake.FunctionCall = SimpleNamespace(from_id=lambda identity: SimpleNamespace(get_call_graph=lambda: []))
+    fake.FunctionCall = SimpleNamespace(from_id=lambda identity: SimpleNamespace(get_call_graph=lambda: []))  # pyright: ignore[reportAttributeAccessIssue]
     assert composition._reconcile({"remote_identity": "fc-synthetic"}) == "unknown"
     assert composition._reconcile({"remote_identity": None}) == "unknown"
     monkeypatch.setenv("MODAL_ENVIRONMENT", "other")
@@ -348,6 +351,7 @@ def test_build_worker_binds_typed_detail_cache_without_provider_creation(monkeyp
     )
     monkeypatch.setattr(composition, "_credentials", lambda *_: pytest.fail("cache binding created credentials"))
     composed = composition.build_worker()
+    assert isinstance(composed, dict)
     assert composed["detail_cache"]({}, {"run_id": "run", "account": "bravotv", "target_key": "post"}) is decision
     assert captured["cache_call"] == (("run", "bravotv"), {"target_key": "post"})
 
@@ -357,9 +361,9 @@ def test_per_response_rejection_records_shared_cooldown_once_before_aborting():
 
     def record(code, *, retry_after_seconds=None):
         gate.events.append(("rejected", code, retry_after_seconds))
-        return Failure(code, retry_at=datetime.now(UTC) + timedelta(seconds=retry_after_seconds))
+        return Failure(code, retry_at=datetime.now(UTC) + timedelta(seconds=retry_after_seconds))  # pyright: ignore[reportArgumentType]
 
-    gate.finish_failure = record
+    gate.finish_failure = record  # pyright: ignore[reportAttributeAccessIssue]
 
     def source(**callbacks):
         callbacks["pre_source_request"]()
@@ -411,6 +415,7 @@ def test_immediate_rejection_persists_shared_identity_policy_before_next_invocat
     started = datetime.now(UTC)
     with pytest.raises(SourceFailure) as caught:
         wrapped(pre_source_request=lambda: None, source_observer=lambda *args: None)
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.retry_at >= started + timedelta(seconds=120)
     wrapped.finish_failure(caught.value)
     with pytest.raises(IdentityDeferred) as deferred:
@@ -474,7 +479,7 @@ def avatar_media_handoff(monkeypatch):
                 raise RuntimeError("reload_failed")
             return result
 
-    def credentials(account):
+    def credentials(account) -> dict[str, Any]:
         assert state.depth == 0
         state.credentials.append(account)
         events.append("credentials")

@@ -172,7 +172,7 @@ def decode_file(path, metadata):
     with Image.open(path) as image:
         image.verify()
     with Image.open(path) as image:
-        fmt = image.format
+        fmt = image.format or ""
         size = image.size
         frames = getattr(image, "n_frames", 1)
         durations = []

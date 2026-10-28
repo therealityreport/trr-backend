@@ -556,7 +556,7 @@ class MediaStorage:
         if callable(guard):
             guard(self._storage_read_seconds if body else self._storage_call_seconds)
 
-    def _storage_call(self, operation: str, *, check: Callable, **parameters):
+    def _storage_call(self, operation: str, *, check: Callable | None, **parameters):
         from trr_backend.ingestion.media_storage_io import (
             BoundedS3Client,
             StorageDeadlineExceededError,
@@ -994,13 +994,15 @@ def mirror_snapshot(
                 if cached_bytes + len(downloaded[0]) <= cache_limit:
                     attachment_bytes[url] = downloaded
                     cached_bytes += len(downloaded[0])
+            # Omit the argument entirely unless bytes were prefetched.
+            extra: dict[str, Any] = {"downloaded": downloaded} if downloaded is not None else {}
             entry, _ = storage.host(
                 url,
                 root=root + "/" + comment.storage_source_key,
                 name=f"media-{position:02d}",
                 check=check,
                 request=request,
-                **({"downloaded": downloaded} if downloaded is not None else {}),
+                **extra,
             )
             hosted.append(entry["url"])
             remaining_sources[url] -= 1

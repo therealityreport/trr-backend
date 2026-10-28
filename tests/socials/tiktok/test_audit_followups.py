@@ -107,7 +107,7 @@ def test_cookie_file_rejects_injected_rows():
         {"sessionid": "safe", "bad\tname": "secret", "other": "secret\ninjected", "empty": ""}, cookie_file=None
     )
     try:
-        text = Path(path).read_text()
+        text = Path(path).read_text()  # pyright: ignore[reportArgumentType]
         assert len(text.splitlines()) == 2
         assert "secret" not in text
         assert args == ["--cookies", path]
@@ -149,7 +149,7 @@ def test_sound_fetch_uses_canonical_user_agent(monkeypatch):
         return SimpleNamespace(ok=False)
 
     monkeypatch.setattr(sounds.requests, "get", get)
-    repo._fetch_tiktok_sound_snapshot("123456789")
+    repo._fetch_tiktok_sound_snapshot("123456789")  # pyright: ignore[reportAttributeAccessIssue]
     assert captured["headers"]["user-agent"] == TIKTOK_USER_AGENT
 
 
@@ -168,7 +168,7 @@ def test_backend_media_composition_uses_available_cookies_without_refresh(monkey
         return SimpleNamespace(source=None, media_urls=[], thumbnail_url=None, attempts=[])
 
     monkeypatch.setattr(tiktok, "resolve_tiktok_media", resolve)
-    repo._resolve_tiktok_media_for_video_id(video_id="12345")
+    repo._resolve_tiktok_media_for_video_id(video_id="12345")  # pyright: ignore[reportAttributeAccessIssue]
     assert captured["cookies"] == (runtime_override or {"sessionid": "source-cookie"})
-    repo._resolve_tiktok_media_for_video_id(video_id="12345", allow_ytdlp=False)
+    repo._resolve_tiktok_media_for_video_id(video_id="12345", allow_ytdlp=False)  # pyright: ignore[reportAttributeAccessIssue]
     assert captured["cookies"] == {}

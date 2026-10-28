@@ -47,7 +47,7 @@ def test_public_storage_uses_descriptive_identity_and_retains_safe_denial(status
             pass
 
         def get(self, url, **kwargs):
-            assert self.trust_env is False
+            assert self.trust_env is False  # pyright: ignore[reportAttributeAccessIssue]
             assert url == item["url"]
             assert kwargs["headers"] == {
                 "Accept-Encoding": "identity",

@@ -124,7 +124,7 @@ def test_more_than_eight_mib_native_inventory_and_last_sentinel_are_complete(mon
         assert response.body_size > 8 * 1024 * 1024 and response.observed_at == OBSERVED
         assert written_sizes and max(written_sizes) <= CHUNK_SIZE
         reader = BoundedReader(response.spool._file)
-        response.spool._file = reader
+        response.spool._file = reader  # pyright: ignore[reportAttributeAccessIssue]
         payload = response.json()
         nodes = payload["data"][CHILD]["edges"]
         assert len(nodes) == total and len({entry["node"]["pk"] for entry in nodes}) == total
@@ -155,7 +155,7 @@ def test_streaming_json_accepts_relay_xssi_and_preserves_final_value(prefix):
     response = asyncio.run(fetch(descriptor(), factory))
     try:
         assert response.json() == {"data": [1, 2], "sentinel": "last"}
-        assert fetcher._decode_graphql_json_payload(response) == {"data": [1, 2], "sentinel": "last"}
+        assert fetcher._decode_graphql_json_payload(response) == {"data": [1, 2], "sentinel": "last"}  # pyright: ignore[reportArgumentType]
     finally:
         response.close()
 
@@ -168,7 +168,7 @@ def test_streaming_json_rejects_trailing_garbage_or_second_values(trailing):
     try:
         with pytest.raises(ValueError):
             response.json()
-        assert fetcher._decode_graphql_json_payload(response) is None
+        assert fetcher._decode_graphql_json_payload(response) is None  # pyright: ignore[reportArgumentType]
     finally:
         response.close()
 
@@ -310,7 +310,7 @@ def test_giant_string_and_key_preserved_with_bounded_raw_reader():
     response = asyncio.run(fetch(descriptor(), factory))
     try:
         reader = BoundedReader(response.spool._file)
-        response.spool._file = reader
+        response.spool._file = reader  # pyright: ignore[reportAttributeAccessIssue]
         parsed = response.json()
         assert parsed["long"] == "x" * (145 * CHUNK_SIZE) + "😀"
         assert parsed["k" * 1024] == "last"
@@ -341,7 +341,7 @@ def test_bounded_parser_matches_standard_json_across_utf8_and_escape_boundaries(
     # those escaped while separately exercising literal multi-byte UTF-8.
     payload = json.dumps(value).replace("\\u00e9", "é").replace("\\u4e2d", "中").encode()
     with reply_http.DiskResponseSpool.from_chunks([payload]) as spool:
-        spool._file = ShortReader(spool._file)
+        spool._file = ShortReader(spool._file)  # pyright: ignore[reportAttributeAccessIssue]
         assert spool.json() == json.loads(payload) == value
 
 
@@ -404,7 +404,7 @@ def test_pool_reuses_two_clients_resets_cookies_and_holds_lease_until_response_c
     factory, clients = transport(handler)
 
     async def scenario():
-        async with reply_http.ReplyClientPool(timeout=httpx.Timeout(5), client_factory=factory) as pool:
+        async with reply_http.ReplyClientPool(timeout=httpx.Timeout(5), client_factory=factory) as pool:  # pyright: ignore[reportArgumentType]
             assert not clients
 
             async def pooled(value):
@@ -448,7 +448,7 @@ def test_pool_read_failure_or_cancellation_releases_slot_and_preserves_cleanup(c
     factory, clients = transport(handler)
 
     async def scenario():
-        async with reply_http.ReplyClientPool(timeout=httpx.Timeout(5), client_factory=factory, slots=1) as pool:
+        async with reply_http.ReplyClientPool(timeout=httpx.Timeout(5), client_factory=factory, slots=1) as pool:  # pyright: ignore[reportArgumentType]
 
             async def pooled():
                 return await reply_http.fetch_reply(
@@ -513,7 +513,7 @@ def test_rejection_headers_allow_scheduler_to_cancel_other_slow_inflight_body():
             assert name == "reject" and response.status_code == 429
             stopped = True
 
-        async with reply_http.ReplyClientPool(timeout=httpx.Timeout(5), client_factory=factory) as pool:
+        async with reply_http.ReplyClientPool(timeout=httpx.Timeout(5), client_factory=factory) as pool:  # pyright: ignore[reportArgumentType]
 
             async def request(command):
                 return await reply_http.fetch_reply(

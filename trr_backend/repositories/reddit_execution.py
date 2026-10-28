@@ -221,7 +221,9 @@ def media_capture(post: dict, execution: capture.Execution) -> None:
             failed = True
             continue
         try:
-            asset = pg.fetch_one("select * from social.reddit_assets where source_url=%s and state='mirrored'", [url])
+            asset: dict[str, Any] | None = pg.fetch_one(
+                "select * from social.reddit_assets where source_url=%s and state='mirrored'", [url]
+            )
             if asset is None:
                 mirrored = mirror_url_to_s3(
                     media_download_url(url), max_bytes=100 * 1024 * 1024, key_namespace="reddit"
@@ -292,6 +294,8 @@ def media_capture(post: dict, execution: capture.Execution) -> None:
                     ],
                     conn=conn,
                 )
+                if saved is None:
+                    raise RuntimeError("Reddit asset upsert returned no row")
                 association = pid + ":" + (ref["reddit_comment_id"] or "post")
                 capture._one(
                     """insert into social.reddit_asset_links

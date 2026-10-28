@@ -191,22 +191,26 @@ def _error_failure(error: Any) -> GraphQLResponseDecision | None:
 
 def _safe_error(error: Any) -> dict[str, Any]:
     path = error.get("path") if isinstance(error, dict) else None
-    safe_path = (
-        isinstance(path, list)
-        and len(path) == 6
-        and path[:2] == [ROOT_FIELD, "edges"]
-        and type(path[2]) is int
-        and 0 <= path[2] <= _MAX_INDEX
-        and path[3:] == ["node", "location", "profile_pic_url"]
+    safe_path: list[Any] | None = (
+        path
+        if (
+            isinstance(path, list)
+            and len(path) == 6
+            and path[:2] == [ROOT_FIELD, "edges"]
+            and type(path[2]) is int
+            and 0 <= path[2] <= _MAX_INDEX
+            and path[3:] == ["node", "location", "profile_pic_url"]
+        )
+        else None
     )
     severity = error.get("severity") if isinstance(error, dict) else None
     severity = severity if severity in ("ERROR", "WARNING", "INFO", "CRITICAL") else "OTHER"
     return {
-        "path": list(path) if safe_path else [],
-        "index": path[2] if safe_path else None,
+        "path": list(safe_path) if safe_path is not None else [],
+        "index": safe_path[2] if safe_path is not None else None,
         "severity": severity,
         "classification": _ANCILLARY
-        if safe_path and severity == "ERROR" and _error_failure(error) is None
+        if safe_path is not None and severity == "ERROR" and _error_failure(error) is None
         else _REJECTED,
     }
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,8 +29,8 @@ def january_payload():
         execution_placement="local",
         source_scope="network",
         backfill_scope="bounded_window",
-        date_start="2026-01-01T00:00:00Z",
-        date_end="2026-02-01T00:00:00Z",
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 2, 1, tzinfo=UTC),
         selected_tasks=["post_details", "comments", "media"],
         detail_worker_count=1,
         comments_worker_count=1,
@@ -52,6 +53,8 @@ def main(argv=None):
             "source_revision": options.source_revision,
         }
     )
+    assert payload.date_start is not None
+    assert payload.date_end is not None
     report = {
         "account": "bravotv",
         "execution_placement": "local",

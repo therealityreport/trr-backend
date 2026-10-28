@@ -160,6 +160,8 @@ def _listing_post_source(
     No new detail capture or detail-stage evidence is invented here.
     """
     source = dict(node)
+    if normalized.shortcode is None:
+        return source
     parsed = ParsedSource(Stage.LISTING, normalized.shortcode, evidence.captured_at, source, post=normalized)
     try:
         proof = validate_detail(parsed)
@@ -371,6 +373,8 @@ class ListingActivity:
                     )
                 next_target = None
                 if not discovery_complete:
+                    if page.end_cursor is None:
+                        raise InvalidSourceError("More listing pages require a cursor")
                     next_target = page_target(page.end_cursor)
                     cur.execute(
                         """insert into social.instagram_ingestion_targets

@@ -9,7 +9,7 @@ from typing import Any
 from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.domain import Conflict, LostOwnership, Stage, stable_json
-from trr_backend.ingestion.persistence import Store, _row
+from trr_backend.ingestion.persistence import Store, _required_row, _row
 
 PARTITION_SIZE = 50
 PHASE_ORDER = "case stage when 'listing' then 0 when 'post_details' then 1 when 'comments' then 2 else 3 end"
@@ -244,7 +244,7 @@ class WorkflowStore(Store):
             self._current(cur, item)
             identity = self._insert(cur, item, 0)
             return dict(
-                _row(
+                _required_row(
                     cur,
                     """select p.*,r.account from social.instagram_ingestion_partitions p
                 join social.instagram_ingestion_runs r using(run_id) where execution_id=%s""",
@@ -319,7 +319,7 @@ class WorkflowStore(Store):
                         "kind": "blocked"
                     }
                     if result["kind"] == "blocked":
-                        wake = _row(
+                        wake = _required_row(
                             cur,
                             """select min(case when owner_expires_at>%s then owner_expires_at
                                 when blocked_reason is null and attempts<max_attempts and next_attempt_at>%s
@@ -371,7 +371,7 @@ class WorkflowStore(Store):
                         raise ValueError("Invalid selected target keys")
                 except (KeyError, TypeError, ValueError) as exc:
                     raise Conflict("Invalid execution selection") from exc
-                selected = _row(
+                selected = _required_row(
                     cur,
                     """select count(*) as total,
                     count(*) filter(where outcome='unresolved') as unresolved
@@ -450,7 +450,7 @@ class WorkflowStore(Store):
                     else:
                         # Aggregates return one row, only when no candidate is
                         # available. Checkpoint JSON never crosses this boundary.
-                        summary = _row(
+                        summary = _required_row(
                             cur,
                             """select count(*) as total,
                             count(*) filter(where (owner_expires_at is null or owner_expires_at<=%s)
@@ -566,7 +566,7 @@ class WorkflowStore(Store):
             target = Store(same_transaction, execution_placement=self.execution_placement).reserve(**args)
             if not target:
                 return None
-            dispatch = _row(
+            dispatch = _required_row(
                 cur,
                 """insert into social.instagram_ingestion_dispatches
                 (owner_token,run_id,generation,stage,target_key) values(%s,%s,%s,%s,%s) returning *""",
@@ -759,7 +759,7 @@ class WorkflowStore(Store):
             if stop_state not in {None, "completed", "blocked"}:
                 raise ValueError("Invalid workflow stop state")
             if continue_run:
-                count = _row(
+                count = _required_row(
                     cur,
                     "select count(*) as count from social.instagram_ingestion_decisions where execution_id=%s",
                     (item["execution_id"],),

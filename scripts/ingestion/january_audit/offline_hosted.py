@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from PIL import Image
@@ -264,7 +265,7 @@ class Offline(unittest.TestCase):
         cdn = data if cdn is None else cdn
         item = audit.physical_plan(report(), BASE)[0]
         item["historical_sha256"] = historical
-        Session.response = Response(cdn, cdn_type, status)
+        Session.response = Response(cdn, cdn_type, status)  # pyright: ignore[reportAttributeAccessIssue]
         with patch("requests.Session", Session):
             return audit.inspect_object(item, Client(data, storage_type), SimpleNamespace(bucket="trr-media-prod"))
 
@@ -275,13 +276,14 @@ class Offline(unittest.TestCase):
         self.assertEqual(r["original_hash_comparison"], "historical_hash_unavailable_current_bytes_only")
 
     def test_delivery_and_hash_negatives(self):
-        for kw in (
+        cases: tuple[dict[str, Any], ...] = (
             {"cdn": png()[:-1]},
             {"storage_type": "text/html", "cdn_type": "text/html"},
             {"cdn_type": "image/jpeg"},
             {"status": 206},
             {"historical": "0" * 64},
-        ):
+        )
+        for kw in cases:
             with self.subTest(kw=kw):
                 self.assertEqual(self.inspect(**kw)["status"], "failed")
 

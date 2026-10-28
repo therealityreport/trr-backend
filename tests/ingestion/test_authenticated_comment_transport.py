@@ -1,6 +1,7 @@
 """Authenticated WWW pages through real parsing and isolated durable storage."""
 
 import json
+from typing import Any
 from urllib.parse import parse_qs
 
 import httpx
@@ -32,11 +33,11 @@ TOP = "xdt_api__v1__media__media_id__comments__connection"
 CHILD = "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection"
 
 
-def node(identity, replies=0):
+def node(identity, replies=0) -> dict[str, Any]:
     return {"pk": identity, "text": identity, "user": {"username": "fixture"}, "child_comment_count": replies}
 
 
-def page(nodes, *, after=None, parent=None, initial=True):
+def page(nodes, *, after=None, parent=None, initial=True) -> dict[str, Any]:
     doc, name = (
         (CHILD_ROOT_DOCUMENT if initial else CHILD_DOCUMENT)
         if parent
@@ -83,7 +84,7 @@ def source(monkeypatch, handler, expected=5):
     return transport.AuthenticatedRelayCommentSource(
         raw_cookies={"ds_user_id": "111", "sessionid": "fixture", "csrftoken": "fixture"},
         expected_count=expected,
-        client_factory=factory,
+        client_factory=factory,  # pyright: ignore[reportArgumentType]
     ), clients
 
 
@@ -117,7 +118,9 @@ def test_initial_parent_and_child_contract_transitions_are_persistable():
     assert state["observed"]["22"]["parent"] == "11"
     from trr_backend.ingestion.comments import CommentFetchSummary
 
-    assert _settlement(state, CommentFetchSummary(expected_count=4, full_observation=True))["basis"] == "count_parity"
+    settlement = _settlement(state, CommentFetchSummary(expected_count=4, full_observation=True))
+    assert settlement is not None
+    assert settlement["basis"] == "count_parity"
     assert _settlement(state, CommentFetchSummary(expected_count=5, full_observation=True)) is None
 
 
@@ -311,7 +314,7 @@ def test_source_rejects_foreign_checkpoint_before_any_request(monkeypatch, famil
     monkeypatch.setattr(transport, "media_id_from_shortcode", lambda _: "333")
     fetch = transport.AuthenticatedRelayCommentSource(
         raw_cookies={},
-        client_factory=lambda **kw: pytest.fail("foreign cursor reached source"),
+        client_factory=lambda **kw: pytest.fail("foreign cursor reached source"),  # pyright: ignore[reportArgumentType]
     )
     state = {
         "version": 1,

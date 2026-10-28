@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -41,11 +42,11 @@ NOW = datetime(2026, 10, 22, 12, tzinfo=UTC)
 PROFILE = {"id": "opaque-native-profile", "pk": "123", "username": ACCOUNT, "is_private": False}
 
 
-def card(number, **extra):
+def card(number, **extra) -> dict[str, Any]:
     return {"pk": str(number), "code": f"Ord_{number}", **extra}
 
 
-def envelope(cards, *, cursor=None, more=True, outgoing="native-next", profile=None):
+def envelope(cards, *, cursor=None, more=True, outgoing="native-next", profile=None) -> dict[str, Any]:
     user = dict(profile or PROFILE)
     user[CONNECTION] = {
         "edges": [{"node": item} for item in cards],
@@ -67,7 +68,7 @@ def envelope(cards, *, cursor=None, more=True, outgoing="native-next", profile=N
     }
 
 
-def detail(number, posted, *, owner=ACCOUNT):
+def detail(number, posted, *, owner=ACCOUNT) -> dict[str, Any]:
     return {
         "pk": str(number),
         "code": f"Ord_{number}",
@@ -239,7 +240,7 @@ def test_known_pin_or_cross_page_inversion_cannot_establish_boundary(pin, invers
 def test_preview_terminal_and_page_budget_remain_unresolved():
     node = card(101)
     proof = proof_for(node, detail(101, "2026-10-01T00:00:00+00:00"))
-    page = parse_page(envelope([node], more=False, outgoing=None), account=ACCOUNT, cursor=None)
+    page = parse_page(envelope([node], more=False, outgoing=None), account=ACCOUNT, cursor=None)  # pyright: ignore[reportArgumentType]
     result = window_coverage(intent(), page, (proof,), {})
     assert result["coverage_unresolved"] and result["stop_reason"] == "access_scope_boundary"
     assert not result["discovery_complete"]
@@ -248,7 +249,7 @@ def test_preview_terminal_and_page_budget_remain_unresolved():
     assert result["stop_reason"] == "page_budget_exhausted" and not result["discovery_complete"]
 
 
-def launch_ordered(database, *, force=False):
+def launch_ordered(database, *, force=False) -> dict[str, Any]:
     store, _ = database
 
     def initialize(conn, run_id):
@@ -300,7 +301,9 @@ def execute_ordered(
         return raw
 
     return ListingActivity(store, writer=writer, clock=lambda: clock).execute(
-        **args, fetch=fetch, fetch_detail=fetch_detail
+        **args,  # pyright: ignore[reportArgumentType]
+        fetch=fetch,
+        fetch_detail=fetch_detail,
     ), args
 
 
@@ -342,7 +345,7 @@ def test_pg_only_january_writes_targets_and_duplicate_page_never_refetches(datab
     def forbidden(**kw):
         pytest.fail("duplicate page must not refetch")
 
-    replay = ListingActivity(database[0], clock=lambda: NOW).execute(**args, fetch=forbidden, fetch_detail=forbidden)
+    replay = ListingActivity(database[0], clock=lambda: NOW).execute(**args, fetch=forbidden, fetch_detail=forbidden)  # pyright: ignore[reportArgumentType]
     assert replay["receipt_id"] == receipt["receipt_id"]
 
 
@@ -405,7 +408,7 @@ def test_pg_preview_end_holds_unresolved_without_empty_january_completion(databa
     result, _ = execute_ordered(
         database,
         run,
-        envelope([card(1301)], more=False, outgoing=None),
+        envelope([card(1301)], more=False, outgoing=None),  # pyright: ignore[reportArgumentType]
         {"Ord_1301": detail(1301, "2026-10-01T00:00:00+00:00")},
     )
     assert result["ordered_held"] and result["outcome"] == "unresolved"
@@ -532,7 +535,7 @@ def test_pg_observed_january_and_three_older_pages_seal_declared_heuristic(datab
             cursor=cursor,
         )
         cursor = outgoing
-    state = receipt["canonical_identity"]["ordered_v2"]
+    state = receipt["canonical_identity"]["ordered_v2"]  # pyright: ignore[reportPossiblyUnboundVariable]
     assert state["coverage_basis"] == WINDOW_POLICY and state["provider_exhausted"] is False
     assert state["committed_pages"] == 4 and state["discovery_complete"]
     assert sql(
@@ -570,7 +573,7 @@ def test_pg_worker_uses_one_public_source_for_dates_then_original_cache_receipt(
         sessions.append(session)
         return session
 
-    def parts(context, owned):
+    def parts(context, owned) -> dict[str, Any]:
         gate = Gate(events)
         gates.append(gate)
         return {

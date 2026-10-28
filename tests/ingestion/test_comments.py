@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -622,7 +623,7 @@ def test_transport_activity_and_postgres_resume_after_crash_between_native_pages
     args["owner_token"] = str(reservation["owner_token"])
 
     class ResumedFetcher(Fetcher):
-        async def fetch_comments_for_shortcode(self, shortcode, **kwargs):
+        async def fetch_comments_for_shortcode(self, shortcode, **kwargs):  # pyright: ignore[reportIncompatibleMethodOverride]
             calls.append(kwargs)
             self.options["before_source_request"]("comments_api")
             self.options["source_payload_observer"](
@@ -741,7 +742,7 @@ def test_missing_scan_start_after_legacy_tail_resume_never_marks_rows_missing(da
     assert not query(tx, "select * from social.instagram_ingestion_receipts where run_id=%s", (args["run_id"],))
 
 
-def settlement_state():
+def settlement_state() -> dict[str, Any]:
     return {
         "expected": 3,
         "adapter_family": "instagram_public_relay",
@@ -853,7 +854,9 @@ def test_gap_settlement_accepts_unknown_child_only_with_existing_native_root_pro
         "sort_order": "popular",
         "page_size": 15,
     }
-    assert _settlement(state, CommentFetchSummary(expected_count=3, full_observation=True))["count_gap"] == 2
+    settlement = _settlement(state, CommentFetchSummary(expected_count=3, full_observation=True))
+    assert settlement is not None
+    assert settlement["count_gap"] == 2
 
 
 def test_rest_count_shortfall_stays_unresolved_and_does_not_mark_missing(database):
@@ -988,6 +991,7 @@ def test_resume_fetches_only_current_root_evidence_and_one_final_checkpoint(data
     }
     assert all(set(row) == expected_fields for row in fetched)
     assert len(checkpoints) == 1 and checkpoints[0]["checkpoint"] == pages[-1]["checkpoint"]
+    assert proof is not None
     assert proof[0] == str(pages[-1]["evidence_id"])
 
 
@@ -1039,6 +1043,7 @@ def test_resume_without_root_keeps_legacy_full_history_and_scan_cutoff_behavior(
             (json.dumps(checkpoint), pages[-1]["evidence_id"]),
         )
     nodes, proof = activity._resume_inventory(owned, state)
+    assert proof is not None
     assert len(nodes) == 2 and proof[0] == str(pages[-1]["evidence_id"])
 
 
@@ -1057,7 +1062,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
     sent_checkpoints = []
 
     class TrackingCursor(RealDictCursor):
-        def execute(self, sql, params=None):
+        def execute(self, sql, params=None):  # pyright: ignore[reportIncompatibleMethodOverride]
             if params:
                 sent_checkpoints.extend(value for value in params if value == '{"writer_marker":"after-writer"}')
             return super().execute(sql, params)
@@ -1067,8 +1072,8 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
             calls.append(copy.deepcopy(value))
         return original(value)
 
-    def writer(conn, **kwargs):
-        checkpoint["writer_marker"] = "after-writer"
+    def writer(conn, **kwargs) -> dict[str, Any]:
+        checkpoint["writer_marker"] = "after-writer"  # pyright: ignore[reportArgumentType]
         return {"post_id": args["post_id"], "comment_ids": {}}
 
     monkeypatch.setattr(comments_module, "stable_json", serialize)
@@ -1100,7 +1105,7 @@ def test_page_checkpoint_serialized_once_after_custom_writer_mutation(database, 
     # A receipt insert can fail after its CTE updated the target. The whole
     # transaction must roll back to the previously committed checkpoint.
     activity.writer = lambda conn, **kwargs: {"post_id": args["post_id"], "comment_ids": {}}
-    checkpoint["writer_marker"] = "must-roll-back"
+    checkpoint["writer_marker"] = "must-roll-back"  # pyright: ignore[reportArgumentType]
     with pytest.raises(psycopg2.errors.UniqueViolation):
         activity._persist_page(
             owned,
@@ -1327,7 +1332,7 @@ def test_custom_comment_writer_keeps_exclusive_run_fence(database):
     store, tx, pages = parallel_page_inputs(database)
     called = []
 
-    def writer(conn, **kwargs):
+    def writer(conn, **kwargs) -> dict[str, Any]:
         called.append(True)
         with conn.cursor() as cur:
             cur.execute(

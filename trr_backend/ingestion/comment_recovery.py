@@ -14,7 +14,7 @@ from typing import Any
 from psycopg2.extras import RealDictCursor
 
 from trr_backend.ingestion.domain import Conflict, RunIntent, fingerprint, stable_json
-from trr_backend.ingestion.persistence import Store, _row
+from trr_backend.ingestion.persistence import Store, _required_row, _row
 from trr_backend.ingestion.validation_gate import require_allowed_intent
 
 
@@ -46,10 +46,10 @@ def _replayed_recovery(cur, account, idempotency_key, command_hash):
 def _claim_root_admission(cur, run_id, account):
     # Wrappers can already hold target/post locks. Never wait for this gate:
     # a gate holder might itself be waiting for one of those rows.
-    isolation = _row(cur, "select current_setting('transaction_isolation') as isolation")["isolation"]
+    isolation = _required_row(cur, "select current_setting('transaction_isolation') as isolation")["isolation"]
     if isolation != "read committed":
         raise Conflict("Root admission requires a current read-committed snapshot")
-    claimed = _row(
+    claimed = _required_row(
         cur,
         "select pg_try_advisory_xact_lock(hashtextextended(%s,0)) as claimed",
         (f"instagram-root-admission:{account}:{run_id}",),
@@ -61,7 +61,7 @@ def _claim_root_admission(cur, run_id, account):
 def _check_root_capacity(cur, run_id, target_key):
     # Restarts disappear after the first committed page. The recovery command
     # remains throughout that unresolved pass, including cooldown/blocked work.
-    outstanding = _row(
+    outstanding = _required_row(
         cur,
         """select count(*) as count,coalesce(bool_or(target_key=%s),false) as includes_target
         from social.instagram_ingestion_targets where run_id=%s and stage='comments'
@@ -246,7 +246,7 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
 
             window = require_window(cur, dict(run, run_id=run_id, account=account))
         if window:
-            outstanding = _row(
+            outstanding = _required_row(
                 cur,
                 """select count(*) as count from social.instagram_ingestion_targets
                 where run_id=%s and stage='comments' and outcome='unresolved' and (
@@ -269,6 +269,7 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
         )
         rows = cur.fetchall()
         rows.sort(key=lambda row: not _can_recover_gap(row["checkpoint"], row["outcome"]))
+        deferred: set[Any] = set()
         if window:
             rows = [row for row in rows if _can_recover_gap(row["checkpoint"], row["outcome"])]
             cur.execute(
@@ -464,7 +465,7 @@ def recover_public_target(
             return previous
         # A wrapper may hold the target needed by the current command owner.
         # The command gate must not wait either, even for the identical request.
-        claimed = _row(
+        claimed = _required_row(
             cur,
             "select pg_try_advisory_xact_lock(hashtextextended(%s,0)) as claimed",
             (f"instagram-command:{account}:{idempotency_key}",),

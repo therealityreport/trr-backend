@@ -416,7 +416,9 @@ class MediaSnapshotLoader:
                 if value
             },
         }
-        slots = [(owner, "owner", None, observed_at, people[owner])]
+        slots: list[tuple[str, str, str | None, datetime, Mapping[str, Any]]] = [
+            (owner, "owner", None, observed_at, people[owner])
+        ]
         for column, role in (("profile_tags", "tagged"), ("collaborators", "collaborator"), ("mentions", "mention")):
             for handle in _handles(post.get(column) or raw.get(column)):
                 if handle != owner:

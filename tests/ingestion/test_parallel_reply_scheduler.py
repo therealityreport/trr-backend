@@ -246,6 +246,7 @@ def test_discard_only_before_transport_coroutine_starts(monkeypatch, cancel_befo
 
         async def request(_item):
             started.append("a")
+            assert runner is not None
             runner.cancel()
             await asyncio.sleep(60)
 
@@ -253,6 +254,7 @@ def test_discard_only_before_transport_coroutine_starts(monkeypatch, cancel_befo
             task = original_create_task(coroutine, *args, **kwargs)
             if cancel_before_entry and coroutine.cr_code.co_name == "transported":
                 task.cancel()
+                assert runner is not None
                 runner.cancel()
             return task
 
@@ -301,6 +303,7 @@ def test_cancel_pacing_signals_queued_turn_before_join_and_outer_turn_close():
             if item.parent_id == "a":
                 # The first turn remains acquired until the fetcher's outer
                 # cleanup. Its descriptor has not yet reached admission.
+                assert runner is not None
                 runner.cancel()
 
         def cancel_pacing():

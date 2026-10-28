@@ -38,7 +38,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from threading import Lock, Thread, current_thread, main_thread
 from types import SimpleNamespace
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -12342,9 +12342,12 @@ def _job_claim_write_scope(job_id: str, *, claim_token: str | None = None, worke
     )
 
 
-def _with_claimed_job_context(executor: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+_ClaimedJobResultT = TypeVar("_ClaimedJobResultT")
+
+
+def _with_claimed_job_context(executor: Callable[..., _ClaimedJobResultT]) -> Callable[..., _ClaimedJobResultT]:
     @wraps(executor)
-    def execute(job: Mapping[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
+    def execute(job: Mapping[str, Any], *, worker_id: str | None = None) -> _ClaimedJobResultT:
         config = _metadata_dict(job.get("config"))
         binding = _job_claim_context.set((str(job.get("id") or ""), config.get("claim_token"), job.get("worker_id")))
         try:

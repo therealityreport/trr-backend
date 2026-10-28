@@ -934,7 +934,11 @@ def execute_job(
                 active_slots = schedule_manifest({**DEFAULTS, **config})["due"]
                 if not any(slot["slot_key"] == job["payload"].get("slot_key") for slot in active_slots):
                     raise WorkflowConflict("Scheduled slot is stale; historical replay is disabled")
-                if not config.get("schedule_enabled") or locked["revision"] != job["payload"]["settings_revision"]:
+                if (
+                    not config.get("schedule_enabled")
+                    or locked is None
+                    or locked["revision"] != job["payload"]["settings_revision"]
+                ):
                     raise WorkflowConflict("Schedule settings changed or were disabled")
                 payload = _capture_payload(config["capture_payload"], str(job["community_id"]), str(job["season_id"]))
                 # create_run joins pg.transaction: run/outbox and workflow link commit together.

@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -60,7 +61,7 @@ def rows(database, query, params=()):
     return test_pipeline.rows(database, query, params)
 
 
-def native(username="reader", identity="101", **values):
+def native(username="reader", identity="101", **values) -> dict[str, Any]:
     return {"status": "ok", "data": {"user": {"id": identity, "username": username, **values}}}
 
 
@@ -83,7 +84,7 @@ def observation(payload=None, *, target="profile:id:101", at=NOW, expected_id="1
     )
 
 
-def owned_target(database, *, identity="101", username="reader"):
+def owned_target(database, *, identity="101", username="reader") -> dict[str, Any]:
     store, tx = database
     intent = RunIntent(
         account="bravotv", selected_tasks=(Stage.COMMENTS, Stage.MEDIA), source_profile=SourceProfile.for_mode("public")
@@ -191,7 +192,7 @@ def test_projection_contains_only_metadata_not_viewer_timeline_or_relationships(
     assert value.values["posts_count"] == 7 and value.values["follows_count"] == 5
     assert value.coverage["profile_pic_url"] == "unknown"
     with pytest.raises(TypeError):
-        value.values["injected"] = True
+        value.values["injected"] = True  # pyright: ignore[reportIndexIssue]
     with pytest.raises(ProfileError):
         replace(value, values={**value.values, "unknown": True})
 
@@ -216,7 +217,7 @@ def test_rename_bound_to_native_id_and_handle_reuse_is_rejected():
     with pytest.raises(ProfileError, match="mismatch"):
         observation(native(identity="202"))
     with pytest.raises(ProfileError, match="mismatch"):
-        observation(native(username="renamed"), target="profile:handle:reader", expected_id=None)
+        observation(native(username="renamed"), target="profile:handle:reader", expected_id=None)  # pyright: ignore[reportArgumentType]
 
 
 def test_private_partial_profile_completes_collection_with_unknown_coverage_and_zero_false(profiles_db):
@@ -494,6 +495,7 @@ def test_graphql_native_rate_failure_keeps_shared_gate_code(profiles_db, payload
         )
     public_code = "profile_source_capability_missing" if expected_code == "parse_error" else expected_code
     assert caught.value.failure.code == public_code
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.retry_at > datetime.now(UTC) + timedelta(seconds=7100)
     assert rows(profiles_db, "select count(*) as n from social.instagram_profiles") == [{"n": 0}]
     lane = rows(
@@ -539,7 +541,7 @@ def test_missing_profiles_do_not_close_the_shared_local_lane(profiles_db, case):
     from trr_backend.socials.instagram.request_client import InstagramRequestFailure
 
     class Lookup(Source):
-        def __call__(self, *, username, pre_source_request):
+        def __call__(self, *, username, pre_source_request) -> dict[str, Any]:
             pre_source_request()
             if case == "null_user":
                 return {"status": "ok", "data": {"user": None}}
@@ -560,8 +562,10 @@ def test_missing_profiles_do_not_close_the_shared_local_lane(profiles_db, case):
     lane = _local_lane(profiles_db)
     assert rows(profiles_db, "select count(*) as n from social.instagram_profiles") == [{"n": 0}]
     if case == "http_500":
+        assert lane is not None
         assert lane["consecutive_failures"] == 3 and lane["cooldown_until"] is None
         return
+    assert lane is not None
     assert lane["consecutive_failures"] == 0 and lane["last_error_code"] is None
     assert lane["cooldown_until"] is None
     assert len(set(codes)) == 1

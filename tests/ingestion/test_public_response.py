@@ -63,7 +63,7 @@ def response(body, *, status=200, headers=None):
     ],
 )
 def test_incidental_html_words_navigation_and_script_content_are_not_auth_documents(body):
-    PublicRequestClient(session=None)._classify_response(response(body))
+    PublicRequestClient(session=None)._classify_response(response(body))  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(
@@ -81,7 +81,7 @@ def test_incidental_html_words_navigation_and_script_content_are_not_auth_docume
 )
 def test_structured_auth_documents_remain_rejected_with_server_delay(body, code):
     with pytest.raises(InstagramRequestFailure, match=code) as caught:
-        PublicRequestClient(session=None)._classify_response(response(body, headers={"retry-after": "37"}))
+        PublicRequestClient(session=None)._classify_response(response(body, headers={"retry-after": "37"}))  # pyright: ignore[reportArgumentType]
     assert caught.value.retry_after_seconds == 37
 
 
@@ -96,7 +96,7 @@ def test_structured_auth_documents_remain_rejected_with_server_delay(body, code)
 )
 def test_redirects_use_destination_path_not_incidental_query_words(location, code):
     with pytest.raises(InstagramRequestFailure, match=code) as caught:
-        PublicRequestClient(session=None)._classify_response(
+        PublicRequestClient(session=None)._classify_response(  # pyright: ignore[reportArgumentType]
             response("", status=302, headers={"location": location, "retry-after": "37"})
         )
     assert caught.value.retry_after_seconds == 37

@@ -23,7 +23,29 @@ if TYPE_CHECKING:
     # Repository names resolved through the published provider namespace.
     CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY: Any
 
-    class SharedAccountCursorPartition: ...
+    class SharedAccountCursorPartition:
+        partition_key: str
+        shard_index: int
+        shard_total: int
+        runner_lane: str
+        cursor_start: str | None
+        cursor_end: str | None
+        boundary_start_at: datetime | None
+        boundary_end_at: datetime | None
+        metadata: dict[str, Any]
+
+        def __init__(
+            self,
+            partition_key: str,
+            shard_index: int,
+            shard_total: int,
+            runner_lane: str,
+            cursor_start: str | None,
+            cursor_end: str | None,
+            boundary_start_at: datetime | None,
+            boundary_end_at: datetime | None,
+            metadata: dict[str, Any],
+        ) -> None: ...
 
     def _bootstrap_shared_tiktok_account_context(*args: Any, **kwargs: Any) -> Any: ...
     def _catalog_backfill_run_scheduler_lanes(*args: Any, **kwargs: Any) -> Any: ...

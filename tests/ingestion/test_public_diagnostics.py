@@ -36,6 +36,7 @@ def test_diagnostic_is_one_copied_event_and_reset_clears_attempt():
         record_public_diagnostic(dict(PUBLIC_DIAGNOSTIC, error_code="unauthorized"))
         assert current_public_diagnostic() == PUBLIC_DIAGNOSTIC
         output = current_public_diagnostic()
+        assert output is not None
         output["method"] = "private-output-sentinel"
         assert current_public_diagnostic() == PUBLIC_DIAGNOSTIC
     finally:

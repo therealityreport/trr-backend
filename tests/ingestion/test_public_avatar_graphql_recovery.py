@@ -40,10 +40,12 @@ def setup(avatars):
     success, failure = gate.record_success, gate.record_failure
 
     def record_success(permit=None):
+        assert permit is not None
         successes.append(permit.request_number)
         return success(permit)
 
     def record_failure(code, *, permit=None, **kwargs):
+        assert permit is not None
         failures.append((code, permit.request_number))
         return failure(code, permit=permit, **kwargs)
 
@@ -105,7 +107,7 @@ def test_two_requests_per_handle_original_evidence_replay_and_no_media_settlemen
         assert "profile_source_provenance" in proof.read(pinned=True)
         parsed = parse_avatar_evidence(proof, username=username, expected_id="123", pinned=True)
         assert parsed.observed_at == observed.observed_at
-        assert "sessionid" in observed.source_url  # Fresh URL is ephemeral, never retained.
+        assert "sessionid" in observed.source_url  # pyright: ignore[reportOperatorIssue]  # Fresh URL is ephemeral, never retained.
         activity.apply_evidence(
             **owned, username=username, evidence=proof, evidence_id=str(row["evidence_id"]), expected_id="123"
         )
@@ -131,6 +133,7 @@ def test_bootstrap_and_post_failures_settle_their_exact_permit(avatars, phase, r
         activity.execute(
             **owned, handles=["c" + uuid4().hex[:10]], source_factory=factory(sessions, sources, fail=phase)
         )
+    assert caught.value.failure.retry_at is not None
     assert caught.value.failure.retry_at >= started + timedelta(seconds=37)
     assert activity.gate.request_count == requests_count and successes == successes_expected
     assert failures == [("rate_limited", requests_count)]
@@ -178,7 +181,7 @@ def test_unavailable_requires_explicit_native_avatar_field(avatars, present):
 def test_owner_persistence_and_expected_deadline_never_penalize_source_health(avatars, monkeypatch, failure):
     owned, activity, _, failures = setup(avatars)
     sessions, sources = [], []
-    hook = None
+    hook = None  # pyright: ignore[reportAssignmentType]
     if failure == "owner":
 
         def hook():

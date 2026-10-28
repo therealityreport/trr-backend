@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -108,7 +109,7 @@ def captured(database, stage=Stage.DETAILS, *, observed=NOW, caption="Original",
     return UUID(run["run_id"]), UUID(evidence_id), shortcode, parser
 
 
-def command(subject, run, evidence, parser, *, key=None, apply=False, account="bravotv", actor="admin"):
+def command(subject, run, evidence, parser, *, key=None, apply=False, account="bravotv", actor: str | None = "admin"):
     return subject(
         account,
         run,
@@ -315,6 +316,7 @@ def test_partial_detail_can_be_previewed_but_cannot_be_applied(database, monkeyp
     preview = command(subject, run, evidence, parser, key=key)
     assert preview.mode == "dry_run" and preview.writes == preview.source_requests == 0
     assert preview.receipt_id is None
+    assert isinstance(preview.normalized, dict)
     assert preview.normalized["shortcode"] == shortcode
     assert preview.comparison.previous == preview.comparison.current
     assert preview == command(subject, run, evidence, parser, key=key)
@@ -364,7 +366,7 @@ def capture_page(database, stage, payload, *, target_key, parser=PARSER_VERSION,
     return UUID(run["run_id"]), UUID(evidence_id)
 
 
-def listing_post(shortcode, *, posted=NOW):
+def listing_post(shortcode, *, posted=NOW) -> dict[str, Any]:
     return {
         "id": "native-" + shortcode,
         "shortcode": shortcode,
@@ -377,7 +379,7 @@ def listing_post(shortcode, *, posted=NOW):
     }
 
 
-def listing_page(posts):
+def listing_page(posts) -> dict[str, Any]:
     from trr_backend.ingestion.listing import ROOT_FIELD
 
     return {
@@ -408,7 +410,9 @@ def test_listing_page_preview_and_apply_replay_all_posts_without_discovery_or_se
         (str(run),),
     )
     preview = command(subject, run, evidence, PARSER_VERSION)
-    assert [post["shortcode"] for post in preview.normalized["posts"]] == codes
+    assert isinstance(preview.normalized, dict)
+    posts = cast(list[dict[str, Any]], preview.normalized["posts"])
+    assert [post["shortcode"] for post in posts] == codes
     assert preview.normalized["pagination"] == {"has_next_page": True, "end_cursor": "next-page"}
     assert preview.comparison.previous == preview.comparison.current
     assert preview.writes == preview.source_requests == 0
@@ -492,7 +496,7 @@ def test_legacy_single_post_listing_can_apply_without_detail_coverage_claim(data
     assert target_state(database, run)[0][2] == "unresolved"
 
 
-def media_inventory(shortcode):
+def media_inventory(shortcode) -> dict[str, Any]:
     from trr_backend.ingestion.replay import MEDIA_REPLAY_VERSION
 
     return {
@@ -533,8 +537,11 @@ def test_media_inventory_preview_compares_offline_and_apply_explains_missing_hos
     )
     preview = command(subject, run, evidence, MEDIA_REPLAY_VERSION)
     assert preview.mode == "dry_run" and preview.writes == preview.source_requests == 0
+    assert isinstance(preview.normalized, dict)
+    assert isinstance(preview.normalized["inventory"], dict)
     assert preview.normalized["inventory"]["media_urls"] == ["https://cdn.example/photo.jpg"]
     assert preview.normalized["apply_supported"] is False
+    assert isinstance(preview.normalized["apply_limitation"], str)
     assert "hosted-result URLs" in preview.normalized["apply_limitation"]
     assert preview.comparison.previous == preview.comparison.current
     assert "private" not in preview.model_dump_json()
@@ -563,6 +570,7 @@ def test_media_source_unavailable_proof_can_be_previewed_but_never_settles_targe
     )
     before = target_state(database, run)
     result = command(ReplayCommands(database[0]), run, evidence, MEDIA_REPLAY_VERSION)
+    assert isinstance(result.normalized, dict)
     assert result.normalized["source_unavailable"] == "media_unavailable"
     assert result.comparison.changed is False
     assert target_state(database, run) == before

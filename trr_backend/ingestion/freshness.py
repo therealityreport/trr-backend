@@ -38,6 +38,13 @@ def _time(value: Any) -> datetime | None:
     return datetime.fromisoformat(utc_timestamp(value))
 
 
+def _evaluation_clock(value: Any) -> datetime:
+    current = _time(value)
+    if current is None:
+        raise ValueError("A valid UTC-compatible cache evaluation clock is required")
+    return current
+
+
 def _source_node(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     items = raw.get("items")
     if isinstance(items, list) and items and isinstance(items[0], Mapping):
@@ -180,7 +187,7 @@ class DetailCache:
         from trr_backend.ingestion.ordered_listing import date_proof, is_ordered
         from trr_backend.ingestion.providers import InvalidSourceError
 
-        current = _time(now)
+        current = _evaluation_clock(now)
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """select r.intent,to_jsonb(p) as post,to_jsonb(s) as sidecar,
@@ -252,7 +259,7 @@ class DetailCache:
         target_key: str,
         now: datetime | None = None,
     ) -> DetailCacheDecision:
-        current = _time(now or datetime.now(UTC))
+        current = _evaluation_clock(now or datetime.now(UTC))
         with self.read_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """select r.intent,to_jsonb(p) as post,to_jsonb(s) as sidecar,
