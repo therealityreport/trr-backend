@@ -9,6 +9,7 @@ from tests.ingestion.test_january_window_report import Connection
 
 
 def test_committed_authorization_is_reconciled_without_another_grant(monkeypatch):
+    monkeypatch.setattr(operator, "ACCOUNT", "bravotv")
     window = {
         "run_id": operator.RUN,
         "account": "bravotv",
@@ -17,7 +18,7 @@ def test_committed_authorization_is_reconciled_without_another_grant(monkeypatch
         "expected_intent_hash": operator.INTENT,
         "expected_workflow_version": "workflow",
         "source_revision": "source",
-        "initiated_by": "january-one-hour-operator",
+        "initiated_by": "instagram-one-hour-operator",
         "priority": "comments_first",
         "duration_seconds": 3600,
         "deadline_at": "2026-10-26T22:00:00+00:00",

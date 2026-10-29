@@ -28,6 +28,8 @@ class Queries:
             cur.execute(
                 """
                 select r.*,
+                  exists(select 1 from social.instagram_ingestion_commands c where c.run_id=r.run_id
+                    and c.result->>'command'='resume_bounded_recovery_window') as bounded_recovery_history,
                   (select jsonb_agg(s order by s.stage) from (
                     select m.stage,m.discovery_complete,m.sealed_at,
                       count(t.target_key)::int as total,
@@ -82,7 +84,7 @@ class Queries:
         result["complete"] = run_complete(RunIntent.from_payload(result["intent"]), counts)
         result["execution_placement"] = result.get("execution_placement", "modal")
         result["allowed_actions"] = [] if execution_hold else self._actions(result["state"], result["complete"])
-        if result["execution_placement"] == "local":
+        if result.pop("bounded_recovery_history", False):
             result["allowed_actions"] = [action for action in result["allowed_actions"] if action == "cancel"]
         return result
 

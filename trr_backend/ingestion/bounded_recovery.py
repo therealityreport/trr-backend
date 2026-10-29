@@ -1,4 +1,4 @@
-"""Durable authorization for one explicit, local January recovery window."""
+"""Durable run and generation binding for bounded Instagram recovery."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import os
 from datetime import UTC, datetime
 
 from trr_backend.ingestion.domain import LostOwnership
+from trr_backend.ingestion.recovery_config import recovery_value
 
 WINDOW_ENV = "TRR_INSTAGRAM_RECOVERY_WINDOW_ID"
 GENERATION_ENV = "TRR_INSTAGRAM_LOCAL_WORKER_GENERATION"
@@ -56,7 +57,7 @@ def validate_window(run, window, now, *, environ=None):
         or env.get(WINDOW_ENV) != expected
         or bound_run != str(run["run_id"])
         or env.get(GENERATION_ENV) != str(run["generation"])
-        or env.get(SOURCE_ENV) != window.get("source_revision")
+        or recovery_value("RECOVERY_SOURCE_REVISION", environ=env) != window.get("source_revision")
     ):
         raise LostOwnership("Execution is not bound to this recovery window")
     deadline = datetime.fromisoformat(window["deadline_at"].replace("Z", "+00:00"))

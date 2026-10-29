@@ -192,7 +192,7 @@ def _prioritize_recovery_rows(cur, rows, sizes):
 
 
 def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, source_revision, blocked_stage=False):
-    """One bounded control step at a drained January worker completion boundary.
+    """One bounded control step at a drained run completion boundary.
 
     The worker remains the only execution owner. No timer, monitor, provider
     request or independent process is introduced by this function.
@@ -222,11 +222,13 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
             run["intent_hash"] != intent_hash
             or intent.digest != intent_hash
             or run["generation"] != generation
-            or intent.date_start != datetime(2026, 1, 1, tzinfo=UTC)
-            or intent.date_end != datetime(2026, 2, 1, tzinfo=UTC)
+            or intent.account != account
+            or intent.date_start is None
+            or intent.date_end is None
+            or intent.date_start >= intent.date_end
             or intent.effective_source_profile.access_mode != "public"
         ):
-            raise Conflict("Automatic recovery requires the exact frozen public January binding")
+            raise Conflict("Automatic recovery requires the exact frozen public date-range binding")
         cur.execute(
             """select target_key from social.instagram_ingestion_targets
             where run_id=%s and outcome='unresolved' and (%s=false or
@@ -404,7 +406,7 @@ def enqueue_next_recovery(store, *, run_id, account, generation, intent_hash, so
                 expected_checkpoint_hash=request_hash,
                 reason="Public native traversal ended below retained expected total",
                 source_revision=source_revision,
-                initiated_by="january-worker-completion",
+                initiated_by="instagram-worker-completion",
                 idempotency_key=f"january-recovery:{run_id}:{request_hash}",
             )
         except RecoveryAdmissionDeferred as exc:

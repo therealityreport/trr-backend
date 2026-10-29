@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One explicit January recovery window, with durable receipts and native restoration.
+"""Bounded Instagram recovery for an explicitly selected run, with durable receipts and native restoration.
 
 Default is read-only preparation. --execute is the operator's explicit start.
 Credentials stay in the existing environment file and native launch command.
@@ -25,9 +25,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-RUN = "2aef72ed-110c-4af9-b2b3-4a45da170a32"
-INTENT = "10746e1197ea8b5f7272a90c662a2d1ebfd6e36a8a01cda4be1c73be428b9fc4"
-ENV = Path.home() / "Library/Application Support/TRR/instagram-worker/config/fixed-post-98c6604b.env"
+RUN = ""
+ACCOUNT = ""
+INTENT = ""
+ENV = None
+from trr_backend.ingestion.recovery_config import recovery_overrides, recovery_value  # noqa: E402
+
 PLIST = Path.home() / "Library/LaunchAgents/com.trr.instagram-local-worker.plist"
 
 
@@ -45,7 +48,8 @@ def connect(*, readonly=True):
     import psycopg2
     from dotenv import load_dotenv
 
-    load_dotenv(ENV, override=True)
+    if ENV is not None:
+        load_dotenv(ENV, override=True)
     url = os.environ.get("TRR_DB_URL") or os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
     parts = urlsplit(url or "")
     if "vwxfvzutyufrkhfgoeaa" not in (parts.hostname or "") + (parts.username or ""):
@@ -161,8 +165,8 @@ def reconcile_window(source_revision, workflow_version, *, expected_generation=2
     with closing(connect()) as conn, conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """select result from social.instagram_ingestion_commands
-            where account='bravotv' and idempotency_key=%s""",
-            (window_key(RUN, expected_generation + 1),),
+            where account=%s and idempotency_key=%s""",
+            (ACCOUNT, window_key(RUN, expected_generation + 1)),
         )
         row = cur.fetchone()
     if row is None:
@@ -170,13 +174,13 @@ def reconcile_window(source_revision, workflow_version, *, expected_generation=2
     window = row["result"]
     expected = {
         "run_id": RUN,
-        "account": "bravotv",
+        "account": ACCOUNT,
         "expected_generation": expected_generation,
         "generation": expected_generation + 1,
         "expected_intent_hash": INTENT,
         "expected_workflow_version": workflow_version,
         "source_revision": source_revision,
-        "initiated_by": "january-useful-progress-operator" if stop_policy else "january-one-hour-operator",
+        "initiated_by": "instagram-useful-progress-operator" if stop_policy else "instagram-one-hour-operator",
         "priority": "comments_first",
         "duration_seconds": stop_policy["max_duration_seconds"] if stop_policy else 3600,
     }
@@ -230,8 +234,8 @@ def snapshot():
             if row is None:
                 raise RuntimeError("Recovery run is missing")
             run = dict(row)
-            if run["account"] != "bravotv" or run["intent_hash"] != INTENT or run["execution_placement"] != "local":
-                raise RuntimeError("January binding changed")
+            if run["account"] != ACCOUNT or run["intent_hash"] != INTENT or run["execution_placement"] != "local":
+                raise RuntimeError("Run binding changed")
             cur.execute(
                 """select stage,target_key,outcome,attempts,max_attempts,requests,blocked_reason,
                 next_attempt_at,owner_token,owner_expires_at,
@@ -679,7 +683,7 @@ def continue_comment_progress(
     ended = json.loads((directory / "worker-end.json").read_text())
     if (
         window.get("run_id") != RUN
-        or window.get("account") != "bravotv"
+        or window.get("account") != ACCOUNT
         or window.get("expected_intent_hash") != INTENT
         or window.get("generation") != expected_generation - 1
         or window.get("stop_policy") != USEFUL_PROGRESS_POLICY
@@ -848,7 +852,7 @@ def verify_new_media(before, after, public_bases):
             if time.monotonic() >= deadline:
                 raise TimeoutError
             hashed, count = hashlib.sha256(), 0
-            request = Request(url, headers={"User-Agent": "TRR-January-Recovery-Verification/1.0"})
+            request = Request(url, headers={"User-Agent": "TRR-Recovery-Verification/1.0"})
             with urlopen(request, timeout=min(10, max(0.1, deadline - time.monotonic()))) as response:
                 # Redirects must remain in the approved storage identity.
                 object_key(response.url, key, public_bases)
@@ -879,8 +883,39 @@ def verify_new_media(before, after, public_bases):
     }
 
 
+def validate_predecessor(latest, directory):
+    """Prior durable grants cannot silently become a fresh progress interval."""
+    if latest is None:
+        return
+    if directory is None:
+        raise RuntimeError("Existing recovery requires its exact predecessor progress evidence")
+    prior = json.loads((directory / "window.json").read_text())
+    for key in ("run_id", "account", "generation", "window_id", "expected_intent_hash", "source_revision"):
+        if prior.get(key) != latest.get(key):
+            raise RuntimeError("Predecessor evidence does not match the latest durable recovery")
+
+
+def latest_recovery():
+    with closing(connect()) as conn, conn, conn.cursor() as cur:
+        cur.execute(
+            """select result from social.instagram_ingestion_commands
+            where run_id=%s and account=%s and result->>'command'='resume_bounded_recovery_window'
+            order by (result->>'generation')::bigint desc limit 1""",
+            (RUN, ACCOUNT),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def main():
+    global RUN, ACCOUNT, INTENT, ENV
+    from uuid import UUID
+
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--intent-hash", required=True)
+    parser.add_argument("--env-file", type=Path)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--artifact-directory", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
@@ -888,11 +923,19 @@ def main():
     parser.add_argument("--continue-progress-from", type=Path)
     parser.add_argument("--after-media-admission-repair", action="store_true")
     args = parser.parse_args()
+    from trr_backend.ingestion.domain import RunIntent
+
+    RUN = str(UUID(args.run_id))
+    ACCOUNT = RunIntent(account=args.account).account
+    if re.fullmatch(r"[a-f0-9]{64}", args.intent_hash) is None:
+        parser.error("--intent-hash must be a SHA-256 digest")
+    INTENT = args.intent_hash
+    ENV = args.env_file
     from scripts.ingestion.january_progress import UsefulProgressTracker
     from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
 
     stop_policy = dict(USEFUL_PROGRESS_POLICY)
-    operator_identity = "january-useful-progress-operator"
+    operator_identity = "instagram-useful-progress-operator"
     manifest = json.loads(args.manifest.read_text())
     if args.after_media_admission_repair and not args.continue_progress_from:
         raise RuntimeError("Media admission repair requires its exact predecessor")
@@ -907,7 +950,8 @@ def main():
         args.expected_generation,
         "bounded_recovery_window_expired",
     ):
-        raise RuntimeError("January is no longer the expected held generation")
+        raise RuntimeError("Run is no longer the expected held generation")
+    validate_predecessor(latest_recovery(), args.continue_progress_from)
     if args.continue_progress_from:
         # Validate predecessor files before disturbing the ordinary service or
         # granting a generation. Real metrics are sampled again after the grant.
@@ -927,10 +971,9 @@ def main():
         for word in shlex.split(native["ProgramArguments"][2])
         if "=" in word
     }
-    storage_path = Path(launch_values["TRR_INSTAGRAM_JANUARY_STORAGE_BINDING"])
-    if (
-        hashlib.sha256(storage_path.read_bytes()).hexdigest()
-        != launch_values["TRR_INSTAGRAM_JANUARY_STORAGE_BINDING_SHA256"]
+    storage_path = Path(recovery_value("STORAGE_BINDING", environ=launch_values))
+    if hashlib.sha256(storage_path.read_bytes()).hexdigest() != recovery_value(
+        "STORAGE_BINDING_SHA256", environ=launch_values
     ):
         raise RuntimeError("Storage binding changed")
     storage = json.loads(storage_path.read_text())
@@ -982,7 +1025,7 @@ def main():
         window = control_call(
             store.resume_bounded_recovery_window,
             RUN,
-            "bravotv",
+            ACCOUNT,
             expected_generation=args.expected_generation,
             expected_intent_hash=INTENT,
             expected_workflow_version=before["run"]["workflow_version"],
@@ -998,7 +1041,7 @@ def main():
                 "TRR_INSTAGRAM_RECOVERY_WINDOW_ID": window["window_id"],
                 "TRR_INSTAGRAM_LOCAL_WORKER_RUN_ID": RUN,
                 "TRR_INSTAGRAM_LOCAL_WORKER_GENERATION": str(window["generation"]),
-                "TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION": manifest["source_identity"],
+                **recovery_overrides({"RECOVERY_SOURCE_REVISION": manifest["source_identity"]}),
             }
         )
         frontiers = {}
@@ -1036,7 +1079,7 @@ def main():
                 transition,
                 store,
                 run_id=RUN,
-                account="bravotv",
+                account=ACCOUNT,
                 generation=window["generation"],
                 intent_hash=INTENT,
                 window_id=window["window_id"],
@@ -1045,7 +1088,7 @@ def main():
                 reason="comments_stopped",
             )
             save(directory, "comments-stall.json", {"decision": initial_decision, "transition": changed})
-        binding = json.loads(Path(launch_values["TRR_INSTAGRAM_JANUARY_BINDING"]).read_text())
+        binding = json.loads(Path(recovery_value("BINDING", environ=launch_values)).read_text())
         binding.update(
             source_identity=manifest["source_identity"],
             cloud_source_identity=manifest["source_identity"],
@@ -1063,7 +1106,7 @@ def main():
             policy = cur.fetchone()
         limits = ExecutionPolicy(transaction).set_limits(
             RUN,
-            "bravotv",
+            ACCOUNT,
             expected_generation=window["generation"],
             expected_intent_hash=INTENT,
             expected_revision=policy["revision"] if policy else 0,
@@ -1083,13 +1126,21 @@ def main():
             "TRR_INSTAGRAM_LOCAL_WORKER_MAX_ACTIVITIES": "6",
             "TRR_INSTAGRAM_LOCAL_WORKER_DEADLINE_AT": str(datetime.fromisoformat(window["deadline_at"]).timestamp()),
             "TRR_INSTAGRAM_LOCAL_WORKER_PARENT_PID": str(os.getpid()),
-            "TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID": RUN,
-            "TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH": INTENT,
-            "TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION": manifest["source_identity"],
             "SOCIAL_INSTAGRAM_PUBLIC_REPLY_CONCURRENCY": "2",
-            "TRR_INSTAGRAM_JANUARY_CERTIFICATION_OUTPUT": "",
-            "TRR_INSTAGRAM_JANUARY_BINDING": str(binding_path),
         }
+        exports.update(
+            recovery_overrides(
+                {
+                    "RECOVERY_RUN_ID": RUN,
+                    "RECOVERY_INTENT_HASH": INTENT,
+                    "RECOVERY_SOURCE_REVISION": manifest["source_identity"],
+                    "CERTIFICATION_OUTPUT": "",
+                    "BINDING": str(binding_path),
+                    "STORAGE_BINDING": str(storage_path),
+                    "STORAGE_BINDING_SHA256": recovery_value("STORAGE_BINDING_SHA256", environ=launch_values),
+                }
+            )
+        )
         command = prefix + " && export " + " ".join(k + "=" + shlex.quote(v) for k, v in exports.items())
         command += " && exec " + shlex.quote(str(release / ".venv/bin/python")) + " scripts/ingestion/local_worker.py"
         with (directory / "worker.log").open("x") as log:
@@ -1175,7 +1226,7 @@ def main():
                                 transition,
                                 store,
                                 run_id=RUN,
-                                account="bravotv",
+                                account=ACCOUNT,
                                 generation=window["generation"],
                                 intent_hash=INTENT,
                                 window_id=window["window_id"],
@@ -1226,7 +1277,7 @@ def main():
                 cancelled = control_call(
                     store.control,
                     RUN,
-                    "bravotv",
+                    ACCOUNT,
                     action="cancel",
                     expected_generation=window["generation"],
                     expected_placement="local",
@@ -1236,7 +1287,7 @@ def main():
                 held = control_call(
                     store.hold_cancelled_run,
                     RUN,
-                    "bravotv",
+                    ACCOUNT,
                     cancelled["generation"],
                     "bounded_recovery_window_expired",
                     "window-hold:" + window["window_id"],
@@ -1252,7 +1303,7 @@ def main():
                 after["run"]["state"] != "cancelled"
                 or after["run"]["execution_hold_reason"] != "bounded_recovery_window_expired"
             ):
-                raise RuntimeError("Durable January hold absent; native restoration held")
+                raise RuntimeError("Durable recovery hold absent; native restoration held")
             save(directory, "after.json", after)
             # Restore the exact ordinary service; never enable automatic recovery.
             if PLIST.read_bytes() != original:

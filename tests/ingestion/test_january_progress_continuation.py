@@ -7,12 +7,18 @@ import pytest
 
 from scripts.ingestion import recover_january_window as operator
 from scripts.ingestion.january_progress import UsefulProgressTracker
-from scripts.ingestion.recover_january_window import INTENT, RUN, continue_comment_progress
+from scripts.ingestion.recover_january_window import continue_comment_progress
 from trr_backend.ingestion.bounded_recovery import USEFUL_PROGRESS_POLICY
+
+RUN = "11111111-1111-4111-8111-111111111111"
+INTENT = "a" * 64
 
 
 @pytest.fixture(autouse=True)
 def no_live_phase_queries(monkeypatch):
+    monkeypatch.setattr(operator, "RUN", RUN)
+    monkeypatch.setattr(operator, "INTENT", INTENT)
+    monkeypatch.setattr(operator, "ACCOUNT", "bravotv")
     monkeypatch.setattr(operator, "recorded_recovery_phase", lambda _: "comments")
 
 

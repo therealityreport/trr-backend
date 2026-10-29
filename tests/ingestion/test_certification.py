@@ -277,14 +277,16 @@ def test_cli_blocked_output_is_private_versioned_and_never_overwritten(tmp_path)
 
     output = tmp_path / "certificate.json"
     args = [
+        "--account",
+        "other_account",
         "--run-id",
         common.RUN,
         "--intent-hash",
         common.INTENT,
         "--date-start",
-        "2026-01-01T00:00:00Z",
+        "2026-10-02T00:00:00Z",
         "--date-end",
-        "2026-02-01T00:00:00Z",
+        "2026-10-03T00:00:00Z",
         "--binding",
         "unused",
         "--storage-binding",

@@ -1,8 +1,6 @@
-"""Audited January comment continuations backed by committed attempt pages."""
+"""Audited date-range comment continuations backed by committed attempt pages."""
 
 from __future__ import annotations
-
-from datetime import UTC, datetime
 
 from psycopg2.extras import RealDictCursor
 
@@ -31,20 +29,20 @@ def extend_productive_budgets(
         intent = RunIntent.from_payload(run["intent"])
         require_allowed_intent(intent)
         if (
-            account != "bravotv"
-            or intent.account != account
+            intent.account != account
             or run["generation"] != generation
             or run["state"] not in {"queued", "running"}
             or run.get("execution_hold_reason")
             or run["intent_hash"] != intent_hash
             or intent.digest != intent_hash
             or intent.scope != "bounded_window"
-            or intent.date_start != datetime(2026, 1, 1, tzinfo=UTC)
-            or intent.date_end != datetime(2026, 2, 1, tzinfo=UTC)
+            or intent.date_start is None
+            or intent.date_end is None
+            or intent.date_start >= intent.date_end
             or intent.effective_source_profile.access_mode != "public"
             or Stage.COMMENTS not in intent.selected_tasks
         ):
-            raise Conflict("Productive budget extension requires the exact current unheld public January binding")
+            raise Conflict("Productive budget extension requires the exact current unheld public date-range binding")
         cur.execute(
             """select t.*,p.page_id as productive_page_id,previous.page_id as previous_page_id,
             (select count(*) from jsonb_object_keys(coalesce(p.checkpoint#>'{comment_pages,observed}','{}'::jsonb)))

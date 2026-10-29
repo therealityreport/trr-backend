@@ -8,6 +8,7 @@ adapter that owns durable idempotency for previews as well as apply operations.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID
@@ -276,10 +277,10 @@ class CommandService:
             }
         )
 
-    def _compatible(self, handle: str, run_id: UUID) -> None:
+    def _compatible(self, handle: str, run_id: UUID) -> dict[str, Any]:
         run = self.queries.progress(str(run_id), handle)
-        if run.get("execution_placement", "modal") == "local":
-            raise Conflict("This run requires the explicit bounded local driver to resume or retry")
+        if run.get("execution_placement", "modal") == "local" and self._local_worker_online() is not True:
+            raise ServiceUnavailableError("The compatible Mac worker must be online to resume or retry")
         compatible = (
             self.worker_compatible(run)
             if self.worker_compatible
@@ -287,6 +288,14 @@ class CommandService:
         )
         if not compatible:
             raise Conflict("No compatible worker is configured for this pinned run")
+        return run
+
+    def _control_store(self, run: dict[str, Any]) -> Store:
+        # Preserve injected validation/capacity subclasses without mutating the
+        # shared service store used concurrently by other commands.
+        store = copy(self.store)
+        store.execution_placement = run.get("execution_placement", "modal")
+        return store
 
     def control(
         self,
@@ -298,9 +307,11 @@ class CommandService:
         initiated_by: str,
     ) -> InstagramIngestionCommandV2:
         account, key = _account(handle), _key(idempotency_key)
+        store = self.store
         if action == "resume":
-            self._compatible(account, run_id)
-        return _command(self.store.control(str(run_id), account, action=action, idempotency_key=key))
+            run = self._compatible(account, run_id)
+            store = self._control_store(run)
+        return _command(store.control(str(run_id), account, action=action, idempotency_key=key))
 
     def retry(
         self,
@@ -312,9 +323,10 @@ class CommandService:
         initiated_by: str,
     ) -> InstagramIngestionCommandV2:
         account, key = _account(handle), _key(idempotency_key)
-        self._compatible(account, run_id)
+        run = self._compatible(account, run_id)
+        store = self._control_store(run)
         return _command(
-            self.store.control(
+            store.control(
                 str(run_id),
                 account,
                 action="retry_targets",

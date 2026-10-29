@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict full-run January certification; read-only DB and complete hosted reads.
+"""Strict full-run date-range certification; read-only DB and complete hosted reads.
 
 Load the worker's environment before invocation, or supply --env-file. No source
 requests, controls, replay, uploads, database writes, or subset acceptance occur.
@@ -268,8 +268,7 @@ def run(args):
     from botocore.config import Config
 
     from scripts.ingestion.local_driver import validate_configuration
-    from trr_backend.ingestion.domain import Conflict, RunIntent
-    from trr_backend.ingestion.validation_gate import require_allowed_intent
+    from trr_backend.ingestion.domain import RunIntent
     from trr_backend.media.s3_mirror import _build_boto3_session, get_hosted_media_storage_config
 
     validate_configuration(os.environ["TRR_INSTAGRAM_DBOS_DATABASE_URL"])
@@ -287,20 +286,14 @@ def run(args):
     start, end = common.stamp(args.date_start), common.stamp(args.date_end)
     common.require(
         intent.digest == args.intent_hash
-        and intent.account == args.account == "bravotv"
+        and intent.account == args.account
         and intent.date_start == start
         and intent.date_end == end
         and start.utcoffset() is not None
-        and start == datetime(start.year, 1, 1, tzinfo=UTC)
-        and end == datetime(start.year, 2, 1, tzinfo=UTC),
-        "explicit_january_intent_required",
+        and end.utcoffset() is not None
+        and start < end,
+        "explicit_date_range_intent_required",
     )
-    try:
-        require_allowed_intent(RunIntent(account=args.account, scope="full_history"))
-    except Conflict:
-        pass
-    else:
-        raise common.GuardError("full_history_gate_open")
     context = common.AuditContext(args.run_id, args.intent_hash, args.account, start, end, args.generation)
     preflight = read_preflight(binding, context)
     if active_gap_preflight_stop(preflight):
@@ -375,7 +368,7 @@ def main(argv=None):
         "output",
     ):
         parser.add_argument("--" + name, required=True)
-    parser.add_argument("--account", choices=("bravotv",), default="bravotv")
+    parser.add_argument("--account", required=True)
     parser.add_argument("--generation", type=int, default=1)
     parser.add_argument(
         "--workers",

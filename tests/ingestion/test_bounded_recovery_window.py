@@ -319,3 +319,29 @@ def test_admission_target_lock_wait_cannot_cross_window_deadline(held):
         assert cur.fetchone()[0] == 0
         cur.execute("select n from social.test_window_lane")
         assert cur.fetchone()[0] == 0
+
+
+def test_recovery_accepts_non_january_frozen_range_and_blocks_generic_restart(held):
+    store, tx, args, _ = held
+    intent = RunIntent(
+        account=args["account"],
+        scope="bounded_window",
+        date_start=datetime(2024, 2, 28, tzinfo=UTC),
+        date_end=datetime(2024, 3, 2, tzinfo=UTC),
+        source_profile=SourceProfile.for_mode("public"),
+    )
+    from trr_backend.ingestion.domain import stable_json
+
+    with tx() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update social.instagram_ingestion_runs set intent=%s::jsonb,intent_hash=%s where run_id=%s",
+            (stable_json(intent.payload()), intent.digest, args["run_id"]),
+        )
+    args["expected_intent_hash"] = intent.digest
+    before = targets(held)
+    window = authorize(held)
+    assert window["generation"] == args["expected_generation"] + 1
+    assert targets(held) == before
+    store.control(args["run_id"], args["account"], action="cancel", idempotency_key=str(uuid4()))
+    with pytest.raises(Conflict, match="preserved progress clock"):
+        store.control(args["run_id"], args["account"], action="resume", idempotency_key=str(uuid4()))

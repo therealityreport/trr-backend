@@ -36,6 +36,7 @@ if __package__ in {None, ""}:
 
 from scripts.ingestion.local_driver import DiagnosticAbort, call_in_phase, foreground_phase, request_abort
 from trr_backend.ingestion.domain import LostOwnership
+from trr_backend.ingestion.recovery_config import certification_dates, recovery_value
 from trr_backend.ingestion.workflow_store import PARTITION_SIZE
 from trr_backend.ingestion.workflows import control_call
 
@@ -631,9 +632,9 @@ def main(argv=None):
         allowed_generation = int(generation_value) if generation_value else None
         if allowed_generation is not None and (allowed_generation < 1 or not allowed_run_id):
             raise ValueError("The local worker generation requires an exact run fence")
-        recovery_run = os.getenv("TRR_INSTAGRAM_JANUARY_RECOVERY_RUN_ID", "").strip()
+        recovery_run = recovery_value("RECOVERY_RUN_ID")
         if allowed_run_id is not None and recovery_run and str(UUID(recovery_run)) != allowed_run_id:
-            raise ValueError("The January recovery run must match the local worker run fence")
+            raise ValueError("The recovery run must match the local worker run fence")
         activity_cap = os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_MAX_ACTIVITIES", "").strip()
         max_activities = int(activity_cap) if activity_cap else None
         if max_activities is not None and max_activities not in {1, 2, 4, 6}:
@@ -697,8 +698,8 @@ def main(argv=None):
                 run_id=recovery_run,
                 account=item["account"],
                 generation=item["generation"],
-                intent_hash=os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"],
-                source_revision=os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_SOURCE_REVISION"],
+                intent_hash=recovery_value("RECOVERY_INTENT_HASH"),
+                source_revision=recovery_value("RECOVERY_SOURCE_REVISION"),
                 blocked_stage=stop == "blocked",
             )
             if result:
@@ -736,7 +737,7 @@ def main(argv=None):
                             json.dumps({"status": "bounded_media_idle", "window_id": window["window_id"]}), flush=True
                         )
                         idle_emitted.add(window["window_id"])
-                # Lifecycle settlement is not January acceptance. Leave this
+                # Lifecycle settlement is not completeness acceptance. Leave this
                 # generation active for the operator's exact stop/hold command.
                 dispatch.wait(5)
                 return True
@@ -745,7 +746,7 @@ def main(argv=None):
         def certify_completed(item):
             if item["run_id"] != recovery_run:
                 return
-            output = os.getenv("TRR_INSTAGRAM_JANUARY_CERTIFICATION_OUTPUT", "").strip()
+            output = recovery_value("CERTIFICATION_OUTPUT")
             if not output:
                 return
             artifact = Path(output)
@@ -753,27 +754,36 @@ def main(argv=None):
                 # A durable artifact is never overwritten by lifecycle replay.
                 print(json.dumps({"status": "certification_artifact_retained", "path": output}), flush=True)
                 return
+            with store.transaction() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "select intent from social.instagram_ingestion_runs where run_id=%s and account=%s",
+                    (item["run_id"], item["account"]),
+                )
+                row = cur.fetchone()
+            if row is None:
+                raise ValueError("Certification run missing")
+            start, end = certification_dates(row[0], recovery_value("RECOVERY_INTENT_HASH"), item["account"])
             command = [
                 sys.executable,
-                str(Path(__file__).with_name("certify_january.py")),
+                str(Path(__file__).with_name("certify_run.py")),
                 "--run-id",
                 recovery_run,
                 "--intent-hash",
-                os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"],
+                recovery_value("RECOVERY_INTENT_HASH"),
                 "--generation",
                 str(item["generation"]),
                 "--account",
                 item["account"],
                 "--date-start",
-                "2026-01-01T00:00:00Z",
+                start,
                 "--date-end",
-                "2026-02-01T00:00:00Z",
+                end,
                 "--binding",
-                os.environ["TRR_INSTAGRAM_JANUARY_BINDING"],
+                recovery_value("BINDING"),
                 "--storage-binding",
-                os.environ["TRR_INSTAGRAM_JANUARY_STORAGE_BINDING"],
+                recovery_value("STORAGE_BINDING"),
                 "--expected-storage-binding-sha256",
-                os.environ["TRR_INSTAGRAM_JANUARY_STORAGE_BINDING_SHA256"],
+                recovery_value("STORAGE_BINDING_SHA256"),
                 "--output",
                 output,
             ]
@@ -798,7 +808,7 @@ def main(argv=None):
                 cur.execute(
                     """select account,generation,state from social.instagram_ingestion_runs
                     where run_id=%s and intent_hash=%s and execution_placement='local'""",
-                    (recovery_run, os.environ["TRR_INSTAGRAM_JANUARY_RECOVERY_INTENT_HASH"]),
+                    (recovery_run, recovery_value("RECOVERY_INTENT_HASH")),
                 )
                 row = cur.fetchone()
             if row and row[2] in {"completed", "blocked"}:

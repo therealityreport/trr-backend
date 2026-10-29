@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -107,7 +107,7 @@ class Store:
     def _execution_run(self, cur, run_id: str, account: str, *, shared_fence: bool = False) -> dict[str, Any]:
         run = self._run(cur, run_id, account, shared_fence=shared_fence)
         self.check_placement(run)
-        if run["account"] == "bravotv" and run.get("execution_placement") == "local":
+        if run.get("execution_placement") == "local":
             from trr_backend.ingestion.bounded_recovery import require_window
 
             require_window(cur, run)
@@ -181,8 +181,7 @@ class Store:
             intent = RunIntent.from_payload(run["intent"])
             self.check_placement(run)
             if (
-                account != "bravotv"
-                or run["state"] != "cancelled"
+                run["state"] != "cancelled"
                 or run["generation"] != expected_generation
                 or run.get("execution_hold_reason") != expected_hold_reason
                 or run.get("execution_placement") != "local"
@@ -194,11 +193,12 @@ class Store:
                 or intent.action != "backfill"
                 or Stage.COMMENTS not in intent.selected_tasks
                 or intent.scope != "bounded_window"
-                or intent.date_start != datetime(2026, 1, 1, tzinfo=UTC)
-                or intent.date_end != datetime(2026, 2, 1, tzinfo=UTC)
+                or intent.date_start is None
+                or intent.date_end is None
+                or intent.date_start >= intent.date_end
                 or intent.effective_source_profile.access_mode != "public"
             ):
-                raise Conflict("Recovery requires the exact held local public January run")
+                raise Conflict("Recovery requires the exact held local public date-range run")
             busy = _row(
                 cur,
                 """select r.run_id from social.instagram_ingestion_runs r
@@ -423,6 +423,15 @@ class Store:
                 raise LostOwnership("Control placement is no longer current")
             if action in {"resume", "retry_targets"}:
                 self.check_placement(run)
+            if action in {"resume", "retry_targets"}:
+                recovery = _row(
+                    cur,
+                    """select 1 as bound from social.instagram_ingestion_commands
+                    where run_id=%s and result->>'command'='resume_bounded_recovery_window' limit 1""",
+                    (run_id,),
+                )
+                if recovery:
+                    raise Conflict("Bounded recovery must continue with its preserved progress clock")
             if action in {"resume", "retry_targets"} and run.get("execution_hold_reason"):
                 raise Conflict("Run execution is held; its original work remains preserved")
             if run["state"] == "completed":

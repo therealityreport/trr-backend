@@ -263,12 +263,12 @@ def test_later_attempt_requires_new_ids_or_stronger_lane_proof(database, stronge
 def test_stale_frozen_binding_rejected_without_mutation(database, change):
     store, tx, args, binding = productive(database)
     before = target(tx, args)
-    with pytest.raises(Conflict, match="exact current unheld public January"):
+    with pytest.raises(Conflict, match="exact current unheld public date-range"):
         extend_productive_budgets(store, **(binding | change))
     assert target(tx, args) == before
 
 
-def test_non_january_intent_is_not_authorized_even_with_matching_hash(database):
+def test_non_january_productive_intent_uses_the_same_budget_rules(database):
     store, tx, args, binding = productive(database)
     intent = RunIntent.from_payload(
         fixtures.query(tx, "select intent from social.instagram_ingestion_runs where run_id=%s", (args["run_id"],))[0][
@@ -281,5 +281,5 @@ def test_non_january_intent_is_not_authorized_even_with_matching_hash(database):
             "update social.instagram_ingestion_runs set intent=%s::jsonb,intent_hash=%s where run_id=%s",
             (stable_json(changed.payload()), changed.digest, args["run_id"]),
         )
-    with pytest.raises(Conflict, match="exact current unheld public January"):
-        extend_productive_budgets(store, **(binding | {"intent_hash": changed.digest}))
+    result = extend_productive_budgets(store, **(binding | {"intent_hash": changed.digest}))
+    assert len(result) == 1

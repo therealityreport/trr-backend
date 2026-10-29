@@ -296,7 +296,7 @@ def test_unknown_total_never_becomes_native_zero_in_recovery():
     assert _settlement(state, CommentFetchSummary(full_observation=True)) is None
 
 
-def test_january_completion_replay_sees_reopened_work(database, monkeypatch):
+def test_non_january_completion_replay_sees_reopened_work(database, monkeypatch):
     from dataclasses import replace
     from datetime import UTC, datetime
 
@@ -310,8 +310,8 @@ def test_january_completion_replay_sees_reopened_work(database, monkeypatch):
     intent = replace(
         RunIntent.from_payload(prior["intent"]),
         scope="bounded_window",
-        date_start=datetime(2026, 1, 1, tzinfo=UTC),
-        date_end=datetime(2026, 2, 1, tzinfo=UTC),
+        date_start=datetime(2025, 12, 25, tzinfo=UTC),
+        date_end=datetime(2026, 1, 4, tzinfo=UTC),
     )
     with tx() as conn, conn.cursor() as cur:
         cur.execute(

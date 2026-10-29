@@ -16,7 +16,6 @@ from uuid import UUID, uuid4
 import psycopg2
 import pytest
 
-from api.schemas.v2.instagram_ingestion import InstagramRetryTargetsV2
 from scripts.ingestion.local_driver import CoordinatorLease, LocalRequest, main, run_local
 from tests.ingestion.test_persistence import database as database_fixture
 from trr_backend.ingestion.admission import Admission
@@ -347,33 +346,54 @@ def test_existing_admission_counts_local_reservation_and_legacy_function_budget(
     assert not admission.admit(candidate)
 
 
-def test_local_progress_strict_response_and_api_resume_retry_rejected_cancel_allowed(database):
+def test_local_progress_and_api_resume_preserve_placement(database):
     _, _, request = fixture_run(database)
     place(database, request)
-    api = CommandService(database[0], Queries(database[2]), engine="dbos", workflow_version=WORKFLOW_VERSION)
+    api = CommandService(
+        database[0],
+        Queries(database[2]),
+        engine="dbos",
+        workflow_version=WORKFLOW_VERSION,
+        local_worker_status=lambda: True,
+    )
     progress = api.progress("bravotv", UUID(request.run_id))
-    assert progress.execution_placement == "local" and progress.allowed_actions == []
-    assert api.recent("bravotv", source_scope="network", limit=10).runs[0].execution_placement == "local"
-    with pytest.raises(Conflict, match="local driver"):
+    assert progress.execution_placement == "local" and progress.allowed_actions == ["resume"]
+    with pytest.raises(LostOwnership):
+        database[0].control(request.run_id, "bravotv", action="resume", idempotency_key=str(uuid4()))
+    result = api.control(
+        "bravotv", UUID(request.run_id), action="resume", idempotency_key=str(uuid4()), initiated_by="admin"
+    )
+    assert result.state == "queued"
+    assert api.progress("bravotv", UUID(request.run_id)).execution_placement == "local"
+
+
+def test_local_api_resume_requires_online_worker_and_preserves_hold(database):
+    from trr_backend.ingestion.command_service import ServiceUnavailableError
+
+    _, _, request = fixture_run(database)
+    place(database, request)
+    api = CommandService(
+        database[0],
+        Queries(database[2]),
+        engine="dbos",
+        workflow_version=WORKFLOW_VERSION,
+        local_worker_status=lambda: False,
+    )
+    with pytest.raises(ServiceUnavailableError):
         api.control(
             "bravotv", UUID(request.run_id), action="resume", idempotency_key=str(uuid4()), initiated_by="admin"
         )
-    with pytest.raises(Conflict, match="local driver"):
-        api.retry(
-            "bravotv",
-            UUID(request.run_id),
-            InstagramRetryTargetsV2(stage="post_details", target_keys=["post1"]),
-            idempotency_key=str(uuid4()),
-            initiated_by="admin",
-        )
-    with pytest.raises(LostOwnership):
-        database[0].control(request.run_id, "bravotv", action="resume", idempotency_key=str(uuid4()))
-    assert (
-        api.control(
-            "bravotv", UUID(request.run_id), action="cancel", idempotency_key=str(uuid4()), initiated_by="admin"
-        ).state
-        == "cancelled"
+    api.local_worker_status = lambda: True
+    sql(
+        database,
+        "update social.instagram_ingestion_runs "
+        "set execution_hold_reason='bounded_recovery_window_expired' where run_id=%s",
+        (request.run_id,),
     )
+    with pytest.raises(Conflict, match="held"):
+        api.control(
+            "bravotv", UUID(request.run_id), action="resume", idempotency_key=str(uuid4()), initiated_by="admin"
+        )
 
 
 def test_driver_refuses_wrong_generation_before_resume_and_plan_has_no_connections(database, capsys, monkeypatch):
@@ -929,3 +949,83 @@ def test_heartbeat_failure_aborts_reaps_activity_and_cancels_before_lease_cleanu
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait(timeout=3)
+
+
+@pytest.mark.parametrize("action", ["resume", "retry_targets"])
+def test_api_control_preserves_injected_validation_gate(database, action):
+    from api.schemas.v2.instagram_ingestion import InstagramRetryTargetsV2
+    from trr_backend.ingestion.domain import stable_json
+    from trr_backend.ingestion.validation_gate import ValidationStore
+
+    _, _, request = fixture_run(database)
+    place(database, request)
+    held_intent = RunIntent(account="bravotv", scope="full_history")
+    sql(
+        database,
+        "update social.instagram_ingestion_runs set intent=%s::jsonb,intent_hash=%s where run_id=%s",
+        (stable_json(held_intent.payload()), held_intent.digest, request.run_id),
+    )
+    original = ValidationStore(database[2])
+    api = CommandService(
+        original,
+        Queries(database[2]),
+        engine="dbos",
+        workflow_version=WORKFLOW_VERSION,
+        local_worker_status=lambda: True,
+    )
+    with pytest.raises(Conflict, match="full history is held"):
+        if action == "resume":
+            api.control(
+                "bravotv", UUID(request.run_id), action="resume", idempotency_key=str(uuid4()), initiated_by="admin"
+            )
+        else:
+            api.retry(
+                "bravotv",
+                UUID(request.run_id),
+                InstagramRetryTargetsV2(stage="post_details", target_keys=["post1"]),
+                idempotency_key=str(uuid4()),
+                initiated_by="admin",
+            )
+    assert original.execution_placement == "modal"
+
+
+def test_local_api_retry_preserves_target_budget_and_backoff(database):
+    from api.schemas.v2.instagram_ingestion import InstagramRetryTargetsV2
+
+    _, _, request = fixture_run(database)
+    place(database, request)
+    sql(
+        database,
+        """update social.instagram_ingestion_targets
+        set attempts=1,next_attempt_at=clock_timestamp()+interval '1 hour'
+        where run_id=%s and stage='post_details'""",
+        (request.run_id,),
+    )
+    before = sql(
+        database,
+        "select attempts,max_attempts,next_attempt_at,checkpoint from social.instagram_ingestion_targets "
+        "where run_id=%s and stage='post_details'",
+        (request.run_id,),
+    )
+    api = CommandService(
+        database[0],
+        Queries(database[2]),
+        engine="dbos",
+        workflow_version=WORKFLOW_VERSION,
+        local_worker_status=lambda: True,
+    )
+    key = str(uuid4())
+    payload = InstagramRetryTargetsV2(stage="post_details", target_keys=["post1"])
+    first = api.retry("bravotv", UUID(request.run_id), payload, idempotency_key=key, initiated_by="admin")
+    assert first.state == "queued"
+    assert api.retry("bravotv", UUID(request.run_id), payload, idempotency_key=key, initiated_by="admin") == first
+    assert (
+        sql(
+            database,
+            "select attempts,max_attempts,next_attempt_at,checkpoint from social.instagram_ingestion_targets "
+            "where run_id=%s and stage='post_details'",
+            (request.run_id,),
+        )
+        == before
+    )
+    assert api.progress("bravotv", UUID(request.run_id)).execution_placement == "local"

@@ -241,6 +241,7 @@ def test_diagnostics_bounds_branch_detail_and_omits_requests_cursors_and_secrets
 
 
 def test_snapshot_projects_checkpoint_before_returning_saved_material(monkeypatch):
+    monkeypatch.setattr(operator, "ACCOUNT", "bravotv")
     class SnapshotConnection(Connection):
         def fetchone(self) -> dict[str, Any]:
             return {"account": "bravotv", "intent_hash": operator.INTENT, "execution_placement": "local"}
