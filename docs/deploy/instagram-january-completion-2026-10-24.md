@@ -2624,3 +2624,13 @@ would need an explicit bounded authorization and a verified continuation path;
 the last held-generation certificate remains blocked as recorded above.
 Release, review and preservation receipts are under
 `~/.codex/tmp/ig-plan-01a17c45/`.
+
+## 2026-10-29: general run controls and arbitrary date ranges
+
+Backend source 1224eee7bbe1 is deployed as Modal v176 (tag ig-range-1224eee7bbe1) to verified admin-56995 / main / trr-backend-jobs. Maintained deployment readiness and the API health canary passed. Seven loaded module hashes and an offline non-January/leap-day intent check matched; no Instagram requests were made by qualification.
+
+Ordinary local resume/retry now uses the normal API with compatible-worker, placement, injected validation and hold safeguards. Bounded historical recovery still preserves its predecessor clock. Date-range recovery, productive continuation and certification no longer impose January 2026 or bravotv. Generic CLI entry points and configuration aliases are available; historical artifacts remain readable.
+
+The matching local worker package was activated at verified idleness. Unique lease and process working directory were verified. All local run and target fingerprints, holds and request counts were unchanged. The previous local package ig-cdn-f131d25b0045 and Modal v175 remain rollback paths. The superseded local ig-useful-6a5720a2a1ee package was moved to actual Trash.
+
+Qualification included 92 backend tests plus three targeted follow-ups, independent review and corrections, 28 app ingestion tests and 79 quick-validation tests. Source and runtime delivery do not establish comment or whole-January completeness. No collection window was opened; the earlier one-time exception remains unused. The generalized six-issue implementation plan is workspace plans/056-instagram-date-range-recovery.md. Evidence is retained in ~/.codex/tmp/trr-consolidation-01a18605/.
