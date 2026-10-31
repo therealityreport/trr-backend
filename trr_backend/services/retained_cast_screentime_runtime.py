@@ -14,9 +14,9 @@ from threading import Thread
 from typing import Any
 
 from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client
-from trr_backend.video_storage import source_reference
 from trr_backend.repositories import cast_screentime
 from trr_backend.services import cast_screentime_artifacts, face_reference_embeddings
+from trr_backend.video_storage import source_reference
 from trr_backend.vision import screen_time_face_matching
 
 LOGGER = logging.getLogger(__name__)

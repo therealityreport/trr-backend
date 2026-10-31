@@ -90,6 +90,7 @@ class Connection:
 
 def prepared_x():
     candidate = reconcile.candidate_from_snapshot(survey_x())
+    assert candidate is not None
     return reconcile.prepare_rows(candidate, {"uid": "owner", "email": "owner@example.test"})
 
 
@@ -108,8 +109,10 @@ def test_prepare_reuses_validation_and_preserves_source_answers_and_timestamps()
 def test_invalid_source_answers_cannot_reach_writes():
     doc = survey_x()
     doc.to_dict()["surveyX"]["responses"]["view_devices_reality"] = "invalid"
+    candidate = reconcile.candidate_from_snapshot(doc)
+    assert candidate is not None
     with pytest.raises(reconcile.ReconciliationError, match="source_validation_failed"):
-        reconcile.prepare_rows(reconcile.candidate_from_snapshot(doc), {"uid": "owner"})
+        reconcile.prepare_rows(candidate, {"uid": "owner"})
 
 
 @pytest.mark.parametrize(
@@ -166,6 +169,7 @@ def test_existing_explicit_rating_conflict_preserved():
             "surveyResults/tt12623782/seasons/S06/episodes/E01/responses/owner",
         )
     )
+    assert candidate is not None
     row = reconcile.prepare_rows(candidate, {"uid": "owner"})[0][1]
     cursor = SimpleNamespace(
         execute=lambda *args: None,
@@ -224,6 +228,7 @@ def test_collection_group_protobuf_revision_preserves_answer_timestamps_and_nano
     revision = ProtobufTimestamp(seconds=int(NOW.timestamp()), nanos=987654321)
     doc.update_time = revision
     candidate = reconcile.candidate_from_snapshot(doc)
+    assert candidate is not None
     assert candidate.created_at == NOW and candidate.updated_at == NOW
     assert isinstance(candidate.source_version, DatetimeWithNanoseconds)
     assert candidate.source_version.nanosecond == 987654321
