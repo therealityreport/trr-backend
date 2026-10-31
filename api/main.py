@@ -702,6 +702,7 @@ from api.routers.v2 import networks_streaming as networks_streaming_v2  # noqa: 
 from api.routers.v2 import person_media as person_media_v2  # noqa: E402
 from api.routers.v2 import recent_people as recent_people_v2  # noqa: E402
 from api.routers.v2 import season_cast_survey_roles as season_cast_survey_roles_v2  # noqa: E402
+from api.routers.v2 import survey_submissions as survey_submissions_v2  # noqa: E402
 from api.routers.v2 import show_slugs as show_slugs_v2  # noqa: E402
 
 app.include_router(shows.router, prefix="/api/v1")
@@ -765,6 +766,7 @@ app.include_router(external_ids_v2.router, prefix="/api/v2")
 app.include_router(show_slugs_v2.router, prefix="/api/v2")
 app.include_router(person_media_v2.router, prefix="/api/v2")
 app.include_router(season_cast_survey_roles_v2.router, prefix="/api/v2")
+app.include_router(survey_submissions_v2.router, prefix="/api/v2")
 
 
 @app.get("/")

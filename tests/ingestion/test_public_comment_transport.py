@@ -501,7 +501,12 @@ def test_public_cancel_before_next_request_keeps_only_atomic_page_receipt(databa
         join social.instagram_ingestion_targets t using(run_id,stage,target_key) where p.run_id=%s""",
         (args["run_id"],),
     )
-    assert len(rows) == 1 and rows[0]["checkpoint"] == rows[0]["target_checkpoint"]
+    from trr_backend.ingestion.comment_checkpoints import page_progress_matches
+
+    assert len(rows) == 1
+    assert rows[0]["checkpoint"]["comment_pages"]["version"] == 2
+    assert rows[0]["target_checkpoint"]["comment_pages"]["version"] == 1
+    assert page_progress_matches(rows[0]["checkpoint"], rows[0]["target_checkpoint"]["comment_pages"])
 
 
 @pytest.mark.parametrize("status", [401, 403, 429])

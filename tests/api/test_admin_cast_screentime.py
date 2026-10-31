@@ -674,6 +674,9 @@ def fake_repo(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def fake_storage(monkeypatch):
+    monkeypatch.setenv("OBJECT_STORAGE_VIDEO_BUCKET", "private-test-bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "test-bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PROVIDER", "r2")
     monkeypatch.setattr(router_module, "get_s3_bucket", lambda: "test-bucket")
     monkeypatch.setattr(router_module, "get_cdn_base_url", lambda: "https://cdn.example.com")
     monkeypatch.setattr(router_module, "_presigned_put_url", lambda *args, **kwargs: "https://example.com/put")
@@ -1321,6 +1324,45 @@ def test_upload_complete_fails_when_ffprobe_rejects_upload(monkeypatch):
     )
     assert complete_response.status_code == 503
     assert complete_response.json()["detail"] == "Video probe failed: ffprobe_failed"
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_failed_probe_retry_preserves_staging_bucket(monkeypatch, legacy):
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={
+            "owner_scope": "episode",
+            "owner_id": str(uuid4()),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
+    )
+    session_id = created.json()["upload_session_id"]
+    session = router_module.cast_screentime.get_media_upload_session(session_id)
+    staging_bucket = "test-bucket" if legacy else "private-test-bucket"
+    if legacy:
+        session["verification_json"].pop("bucket", None)
+    seen = []
+    deleted = []
+
+    def head(bucket, key):
+        seen.append(bucket)
+        return {"ContentLength": 1024, "ContentType": "video/mp4", "ETag": '"etag-1"'}
+
+    monkeypatch.setattr(router_module, "_head_object", head)
+    monkeypatch.setattr(router_module, "_delete_object", lambda bucket, key: deleted.append(bucket))
+    monkeypatch.setattr(router_module, "_ffprobe_video", lambda *_a, **_kw: {"ok": False, "error": "temporary"})
+    endpoint = f"/api/v1/admin/cast-screentime/upload-sessions/{session_id}/complete"
+    assert client.post(endpoint, json={"upload_session_id": session_id}).status_code == 503
+    assert session["verification_json"]["bucket"] == staging_bucket
+    monkeypatch.setattr(router_module, "_ffprobe_video", lambda *_a, **_kw: {"ok": True, "duration_seconds": 42})
+    result = client.post(endpoint, json={"upload_session_id": session_id})
+    assert result.status_code == 200
+    assert seen == [staging_bucket, staging_bucket]
+    assert result.json()["video_asset"]["source_json"]["bucket"] == "private-test-bucket"
+    assert deleted == ([] if legacy else ["private-test-bucket"])
 
 
 def test_internal_finalize_and_reads():

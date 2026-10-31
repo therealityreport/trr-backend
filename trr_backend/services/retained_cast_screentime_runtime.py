@@ -14,6 +14,7 @@ from threading import Thread
 from typing import Any
 
 from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client
+from trr_backend.video_storage import source_reference
 from trr_backend.repositories import cast_screentime
 from trr_backend.services import cast_screentime_artifacts, face_reference_embeddings
 from trr_backend.vision import screen_time_face_matching
@@ -505,11 +506,7 @@ def _capture_video_duration_ms(capture: Any, cv2: Any, usable_fps: float, run_co
 
 
 def _localize_source_video(run_contract: dict[str, Any], work_dir: Path) -> Path:
-    source_json = run_contract.get("source_json")
-    object_key = str((source_json or {}).get("object_key") or "").strip()
-    if not object_key:
-        raise RuntimeError("run contract is missing source_json.object_key")
-    bucket = get_s3_bucket()
+    bucket, object_key = source_reference(run_contract)
     client = get_s3_client()
     response = client.get_object(Bucket=bucket, Key=object_key)
     body = response["Body"].read()
