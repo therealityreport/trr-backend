@@ -1323,7 +1323,7 @@ the database project binding was verified as `vwxfvzutyufrkhfgoeaa` before reads
 The live multi-page child criterion remains unverified and the full-history gate
 remains closed. Historical gaps of 38, 0 and 5 are not fresh-scan requirements.
 Private evidence is retained under
-`~/.codex/tmp/trr-instagram-settlement-01a16023/`, including the diagnostic result,
+`~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/`, including the diagnostic result,
 source manifest/archive, readiness report, schedule comparison and fingerprints.
 The isolated diagnostic source is retained for reproducible recovery of v90.
 
@@ -1402,7 +1402,7 @@ run and targets still match full SHA-256
 
 No SQL schema, proxy, schedule or app/API contract changed. TRR-APP build is not
 applicable. No full-history ingestion was enabled. Private evidence is under
-`~/.codex/tmp/trr-instagram-settlement-01a16023/anonymous-rollout/`: source manifest
+`~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/anonymous-rollout/`: source manifest
 and archive, deployment history/readiness, remote and local settlement smoke,
 local installation/retirement, fresh state and command receipt, and
 `final-audit.json`. The isolated source is retained to reproduce the deployed
@@ -1445,7 +1445,7 @@ The older historical open tranche remains untouched.
 Modal v91 and the installed local settlement release were not changed by this
 pass. No schema or app source change was made. No repeated test suite or recovery
 run was needed. Private evidence is in
-`~/.codex/tmp/trr-instagram-settlement-01a16023/bounded-acceptance/`, including
+`~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/bounded-acceptance/`, including
 `listing.result.json`, `reply-candidate.json`, `media.plan.json`, `final-audit.json`,
 and the startup log. The next acceptance attempt must honor the persisted
 public lane, obtain actual native cursor continuation, and verify hosted media
@@ -1496,7 +1496,7 @@ hash remains `998a8bb7d8ddbd608105a5f9b492f256ea975c40f03613efbd35616394b4013f`.
 No authentication, proxy substitution, cooldown reset, SQL migration or full
 history run was used. Prior passing interruption/resume evidence was reused.
 
-Private evidence: `~/.codex/tmp/trr-instagram-settlement-01a16023/repair-rerun/`,
+Private evidence: `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/repair-rerun/`,
 including source archives/manifests, focused test and live-query logs, media and
 listing results, `reply-small-expanded/reply.result.json`, `admin-search.png`,
 and `final-audit.json`. Source restrictions and placeholder media remain open
@@ -1742,3 +1742,6 @@ preserved, and owns that run. Full-history ingestion remains disabled even thoug
 both original GIF checks now pass. Private release, apply, byte and display
 receipts remain under this task's `attachment-only-release` and
 `dedicated-auth/gif-release` directories; they contain no shared credentials.
+
+
+Permanent recovery entry point: `~/Library/Application Support/TRR/recovery/permanent-paths/README.md`. Original receipts and run-specific recovery programs remain historical evidence; use the indexed resolver and canonical templates rather than replaying old installers or recreating temporary aliases.

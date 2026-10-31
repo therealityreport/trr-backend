@@ -84,7 +84,7 @@ retrieval. Continuous worker state is owned by the execution chat. Full-history
 remains disabled.
 
 Private control and observation evidence:
-`/Users/thomashulihan/.codex/tmp/trr-instagram-settlement-01a16023/headless-public/`,
+`/Users/thomashulihan/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/headless-public/`,
 specifically `january-ordered-successor.json`,
 `first-january-ordered-activity-result.json` and
 `after-first-january-ordered-activity.json`.
@@ -419,15 +419,15 @@ Private current evidence references:
 - `trr-instagram-no-local-cooldown-01a16023/release-api/api-closure.json`.
 - `trr-instagram-no-local-cooldown-01a16023/release-current/manifest.json` and
   `preservation.json`.
-- `trr-instagram-settlement-01a16023/headless-public/first-january-activity-result.json`,
+- `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/headless-public/first-january-activity-result.json`,
   `after-first-january-activity.json` and `integrated-retirement.json`.
 - This task's `acceptance-hints.json`, `logged-out-contract-reconstruction.json`
   and `same-family-transport-assessment.json`.
-- `trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-qualification.json`
+- `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-qualification.json`
   and its preserved `early-observation-1` predecessor.
 - This task's `experiment-dependency-assessment.json` records retained caller
   locations, source hashes and the limits of the offline dependency finding.
-- `trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-normal-control.json`
+- `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-settlement-01a16023/headless-public/anonymous-profile-browser-normal-control.json`
   and `anonymous-profile-normal-ready.json` retain the separate control result
   and its focused fixture proof.
 - `anonymous-profile-normal-final-ready.json` and
@@ -457,4 +457,7 @@ Private current evidence references:
   `qualify_ordered_public_http.py` contains the reviewed page, account, cursor
   and final anonymous wire-boundary predicates.
 
-All paths above are under `/Users/thomashulihan/.codex/tmp/`.
+Settlement evidence uses the permanent paths shown above. The unrelated `trr-instagram-no-local-cooldown-01a16023` entries retain their historical `.codex/tmp` identifiers; consult the cleanup inventory for their disposition. They are not current recovery entry points.
+
+
+Permanent recovery entry point: `~/Library/Application Support/TRR/recovery/permanent-paths/README.md`. Original receipts and run-specific recovery programs remain historical evidence; use the indexed resolver and canonical templates rather than replaying old installers or recreating temporary aliases.
