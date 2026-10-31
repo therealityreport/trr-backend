@@ -977,6 +977,8 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
     reloaded = importlib.reload(modal_jobs)
     try:
         assert "schedule" not in reloaded.sweep_social_dispatch_queue._modal_function_options
+        assert reloaded.sweep_social_dispatch_queue._modal_function_options["scaledown_window"] == 5
+        assert "scaledown_window" not in reloaded.heartbeat_remote_executors._modal_function_options
         assert "schedule" not in reloaded.heartbeat_remote_executors._modal_function_options
         assert "schedule" not in reloaded.poll_due_show_season_media_watches._modal_function_options
         assert "schedule" not in reloaded.sync_nbcumv_official_images._modal_function_options
@@ -1329,9 +1331,11 @@ def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
 
 
 @pytest.mark.parametrize("reddit_enabled", [False, True])
+@pytest.mark.parametrize("maintenance_owner", ["modal_singleton_cron", "api_runtime_scheduler"])
 def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     monkeypatch: pytest.MonkeyPatch,
     reddit_enabled: bool,
+    maintenance_owner: str,
 ) -> None:
     from trr_backend.db import pg
 
@@ -1364,11 +1368,12 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
         "_poll_due_show_season_media_watches_impl",
         lambda: media_poll_calls.append(True) or {"status": "completed", "claimed": 0},
     )
-    monkeypatch.setattr(modal_jobs, "_validate_modal_maintenance_owner_config", lambda: "modal_singleton_cron")
+    monkeypatch.setattr(modal_jobs, "_validate_modal_maintenance_owner_config", lambda: maintenance_owner)
 
     payload = modal_jobs.heartbeat_remote_executors.local()
-    assert media_poll_calls == [True]
-    assert reddit_wakes == ([True] if reddit_enabled else [])
+    owns_coordination = maintenance_owner == "modal_singleton_cron"
+    assert media_poll_calls == ([True] if owns_coordination else [])
+    assert reddit_wakes == ([True] if owns_coordination and reddit_enabled else [])
 
     assert payload == {
         "ok": True,

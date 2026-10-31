@@ -2053,6 +2053,7 @@ def _execute_ingestion_reservation(reservation: dict[str, object], *, stages: se
     retries=0,
     timeout=15 * 60,
     max_containers=_SOCIAL_RECOVERY_CONCURRENCY_LIMIT,
+    scaledown_window=5,
     region="us-east",
     **_modal_cron_schedule_kwargs("*/2 * * * *"),
 )
@@ -2199,9 +2200,11 @@ def sync_nbcumv_official_images() -> dict[str, object]:
     **_modal_cron_schedule_kwargs("* * * * *"),
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
-    _validate_modal_maintenance_owner_config()
-    # Reuse the existing minute clock; Reddit executes in its own bounded worker.
-    if os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}:
+    maintenance_owner = _validate_modal_maintenance_owner_config()
+    # The API scheduler already has dedicated Reddit and media-watch clocks.
+    # Keep the heartbeat's minute clock as their owner in cron mode only.
+    owns_coordination = maintenance_owner != "api_runtime_scheduler"
+    if owns_coordination and os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}:
         try:
             dispatch_reddit_capture_work.spawn()
         except Exception:
@@ -2210,12 +2213,12 @@ def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_schedule
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
     register_social_control_plane_providers(social_provider.__dict__)
-    try:
-        _poll_due_show_season_media_watches_impl()
-    except Exception:
-        # Keep the pre-existing executor heartbeat independent while making the
-        # media poll visible in its own structured worker-failure logs.
-        logger.exception("[executor-heartbeat] show-season media poll failed")
+    if owns_coordination:
+        try:
+            _poll_due_show_season_media_watches_impl()
+        except Exception:
+            # A media poll failure must not suppress the executor heartbeat.
+            logger.exception("[executor-heartbeat] show-season media poll failed")
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
     from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 
