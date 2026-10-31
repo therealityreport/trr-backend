@@ -1341,6 +1341,7 @@ def test_failed_probe_retry_preserves_staging_bucket(monkeypatch, legacy):
     )
     session_id = created.json()["upload_session_id"]
     session = router_module.cast_screentime.get_media_upload_session(session_id)
+    assert session is not None
     staging_bucket = "test-bucket" if legacy else "private-test-bucket"
     if legacy:
         session["verification_json"].pop("bucket", None)
