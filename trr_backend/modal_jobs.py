@@ -17,7 +17,11 @@ from trr_backend.modal_runtime_config import (
     api_runtime_env as _modal_api_runtime_env,
 )
 from trr_backend.modal_runtime_config import (
+    maintenance_runtime_env as _maintenance_runtime_env,
+)
+from trr_backend.modal_runtime_config import (
     preview_read_only_env,
+    validate_api_maintenance_scaling,
 )
 from trr_backend.modal_runtime_config import (
     preview_read_only_function_kwargs as _modal_preview_read_only_function_kwargs,
@@ -134,6 +138,8 @@ _API_FUNCTION_NAME = str(os.getenv("TRR_MODAL_API_FUNCTION") or "serve_backend_a
 _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() or "trr-backend-api"
 _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1")))
 _API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8")))
+if getattr(modal, "is_local", lambda: True)():
+    validate_api_maintenance_scaling(os.environ)
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")))
 _SOCIAL_COMMENTS_CONCURRENCY_LIMIT = max(
     1,
@@ -676,9 +682,10 @@ def _validate_modal_maintenance_owner_config() -> str | None:
 
 
 def _modal_cron_schedule_kwargs(expression: str) -> dict[str, object]:
+    runtime_env = _maintenance_runtime_env()
     if not _modal_always_on_schedules_enabled():
-        return {}
-    return {"schedule": modal.Cron(expression, timezone=_TIMEZONE)}
+        return {"env": runtime_env}
+    return {"env": runtime_env, "schedule": modal.Cron(expression, timezone=_TIMEZONE)}
 
 
 def _runtime_secret_name() -> str:
@@ -940,7 +947,7 @@ def probe_browser_image_runtime() -> dict[str, object]:
     # Keep database round trips within the US; unconstrained placement can land
     # in Asia and serialize seconds of network delay in the single profile pool.
     region="us",
-    env=_modal_api_runtime_env(),
+    env={**_modal_api_runtime_env(), **_maintenance_runtime_env()},
 )
 # Live-status streams remain open; reserve shared input capacity for API requests
 # without increasing the existing container or database connection limits.
@@ -950,6 +957,23 @@ def serve_backend_api():
     from api.main import app as fastapi_app
 
     return fastapi_app
+
+
+@app.function(
+    secrets=_secrets,
+    env=_maintenance_runtime_env(),
+    retries=0,
+    timeout=30,
+    max_containers=1,
+    scaledown_window=5,
+)
+def probe_modal_maintenance_config() -> dict[str, object]:
+    """Read effective deployment ownership without touching jobs or databases."""
+    return {
+        "owner": _validate_modal_maintenance_owner_config(),
+        "env": {key: os.getenv(key) for key in _maintenance_runtime_env()},
+        "state_free": True,
+    }
 
 
 def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
@@ -1301,6 +1325,7 @@ def _poll_due_show_season_media_watches_impl() -> dict[str, object]:
     retries=0,
     timeout=5 * 60,
     max_containers=1,
+    env=_maintenance_runtime_env(),
 )
 def poll_due_show_season_media_watches() -> dict[str, object]:
     """On-demand entrypoint; the minute heartbeat owns the durable clock."""

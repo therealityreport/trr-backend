@@ -105,6 +105,7 @@ def test_readiness_import_hydrates_ownership_before_modal_jobs_import(tmp_path) 
     )
     env = {key: value for key, value in os.environ.items() if key not in cli.MODAL_OWNERSHIP_ENV_KEYS}
     env["TRR_MODAL_SOURCE_ENV"] = str(source_env)
+    env["TRR_MODAL_API_MAX_CONTAINERS"] = "1"
 
     completed = subprocess.run(
         [sys.executable, "-c", "import scripts.modal.verify_modal_readiness"],
