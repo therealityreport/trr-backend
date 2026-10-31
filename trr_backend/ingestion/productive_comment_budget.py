@@ -45,15 +45,25 @@ def extend_productive_budgets(
             raise Conflict("Productive budget extension requires the exact current unheld public date-range binding")
         cur.execute(
             """select t.*,p.page_id as productive_page_id,previous.page_id as previous_page_id,
-            (select count(*) from jsonb_object_keys(coalesce(p.checkpoint#>'{comment_pages,observed}','{}'::jsonb)))
-                as observed_count,
-            (select count(*) from jsonb_object_keys(
-                coalesce(previous.checkpoint#>'{comment_pages,observed}','{}'::jsonb)))
-                as previous_observed_count,
-            (select count(*) from jsonb_each(coalesce(p.checkpoint#>'{comment_pages,lanes}','{}'::jsonb)) lane
-                where lane.value->'exhausted'='true'::jsonb) as exhausted_count,
-            (select count(*) from jsonb_each(coalesce(previous.checkpoint#>'{comment_pages,lanes}','{}'::jsonb)) lane
-                where lane.value->'exhausted'='true'::jsonb) as previous_exhausted_count,
+            case when p.checkpoint#>>'{comment_pages,version}'='2'
+                then (p.checkpoint#>>'{comment_pages,observed_count}')::bigint
+                else (select count(*) from jsonb_object_keys(
+                    coalesce(p.checkpoint#>'{comment_pages,observed}','{}'::jsonb))) end as observed_count,
+            case when previous.checkpoint#>>'{comment_pages,version}'='2'
+                then (previous.checkpoint#>>'{comment_pages,observed_count}')::bigint
+                else (select count(*) from jsonb_object_keys(
+                    coalesce(previous.checkpoint#>'{comment_pages,observed}','{}'::jsonb)))
+                end as previous_observed_count,
+            case when p.checkpoint#>>'{comment_pages,version}'='2'
+                then (p.checkpoint#>>'{comment_pages,exhausted_count}')::bigint
+                else (select count(*) from jsonb_each(
+                    coalesce(p.checkpoint#>'{comment_pages,lanes}','{}'::jsonb)) lane
+                    where lane.value->'exhausted'='true'::jsonb) end as exhausted_count,
+            case when previous.checkpoint#>>'{comment_pages,version}'='2'
+                then (previous.checkpoint#>>'{comment_pages,exhausted_count}')::bigint
+                else (select count(*) from jsonb_each(
+                    coalesce(previous.checkpoint#>'{comment_pages,lanes}','{}'::jsonb)) lane
+                    where lane.value->'exhausted'='true'::jsonb) end as previous_exhausted_count,
             clock_timestamp() as database_now
             from social.instagram_ingestion_targets t
             join lateral (

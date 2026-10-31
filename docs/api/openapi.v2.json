@@ -938,6 +938,14 @@
             ],
             "title": "Canonical Flair Key"
           },
+          "capture_state": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Capture State",
+            "type": "object"
+          },
           "comment_summary": {
             "additionalProperties": true,
             "title": "Comment Summary",
@@ -5040,6 +5048,19 @@
         "title": "FlashbackQuizV2",
         "type": "object"
       },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
       "IdentityMatchKind": {
         "enum": [
           "canonical",
@@ -5690,6 +5711,17 @@
             ],
             "title": "Engine",
             "type": "string"
+          },
+          "execution_hold_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Hold Reason"
           },
           "execution_placement": {
             "default": "modal",
@@ -10814,12 +10846,58 @@
         ],
         "title": "UpsertSeasonCastSurveyRoleResponseV2",
         "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
       }
     },
     "securitySchemes": {
       "InternalAdminBearer": {
         "bearerFormat": "JWT",
         "description": "An allowlisted Supabase admin JWT or a TRR-signed internal-admin JWT. The backend applies the same InternalAdminUser authorization policy to both.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "SurveyOwnerAssertion": {
+        "bearerFormat": "JWT",
+        "description": "Short-lived survey:own assertion minted after Firebase user verification in TRR-APP.",
         "scheme": "bearer",
         "type": "http"
       }
@@ -18205,6 +18283,249 @@
         "summary": "List public core episodes for a show season",
         "tags": [
           "public-core-show-reads-v2"
+        ]
+      }
+    },
+    "/api/v2/surveys/global-profile": {
+      "get": {
+        "operationId": "get_profile_api_v2_surveys_global_profile_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "SurveyOwnerAssertion": []
+          }
+        ],
+        "summary": "Get Profile",
+        "tags": [
+          "survey-submissions-v2"
+        ]
+      },
+      "post": {
+        "operationId": "post_profile_api_v2_surveys_global_profile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SurveyOwnerAssertion": []
+          }
+        ],
+        "summary": "Post Profile",
+        "tags": [
+          "survey-submissions-v2"
+        ]
+      }
+    },
+    "/api/v2/surveys/show-responses": {
+      "get": {
+        "operationId": "get_show_api_v2_surveys_show_responses_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "surveyKey",
+            "required": true,
+            "schema": {
+              "title": "Surveykey",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "seasonId",
+            "required": true,
+            "schema": {
+              "title": "Seasonid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "episodeId",
+            "required": true,
+            "schema": {
+              "title": "Episodeid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SurveyOwnerAssertion": []
+          }
+        ],
+        "summary": "Get Show",
+        "tags": [
+          "survey-submissions-v2"
+        ]
+      },
+      "post": {
+        "operationId": "post_show_api_v2_surveys_show_responses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SurveyOwnerAssertion": []
+          }
+        ],
+        "summary": "Post Show",
+        "tags": [
+          "survey-submissions-v2"
+        ]
+      }
+    },
+    "/api/v2/surveys/x": {
+      "get": {
+        "operationId": "get_x_api_v2_surveys_x_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "SurveyOwnerAssertion": []
+          }
+        ],
+        "summary": "Get X",
+        "tags": [
+          "survey-submissions-v2"
+        ]
+      },
+      "post": {
+        "operationId": "post_x_api_v2_surveys_x_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "SurveyOwnerAssertion": []
+          }
+        ],
+        "summary": "Post X",
+        "tags": [
+          "survey-submissions-v2"
         ]
       }
     }

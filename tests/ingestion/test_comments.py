@@ -1035,8 +1035,8 @@ def test_resume_without_root_keeps_legacy_full_history_and_scan_cutoff_behavior(
     activity, tx, owned, state, pages = seed_resume_pages(database)
     state.pop("scan_root_evidence_id")
     state.pop("scan_started_at")
-    checkpoint = copy.deepcopy(pages[-1]["checkpoint"])
-    checkpoint["comment_pages"].pop("scan_root_evidence_id")
+    # Seed a historical full receipt explicitly; new receipts are compact proofs.
+    checkpoint = {"comment_pages": copy.deepcopy(state)}
     with tx() as conn, conn.cursor() as cur:
         cur.execute(
             "update social.instagram_ingestion_comment_pages set checkpoint=%s::jsonb where evidence_id=%s",

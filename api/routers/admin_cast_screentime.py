@@ -35,6 +35,7 @@ from trr_backend.services import (
     retained_cast_screentime_subtitle_dispatch,
 )
 from trr_backend.socials.youtube import YouTubeScraper, resolve_youtube_media
+from trr_backend.video_storage import private_source_json, private_video_bucket, source_reference, video_url_ttl
 
 router = APIRouter(tags=["admin-cast-screentime"])
 LOGGER = logging.getLogger(__name__)
@@ -736,7 +737,7 @@ def _presigned_put_url(bucket: str, key: str, *, content_type: str, expires_in_s
     return client.generate_presigned_url(
         "put_object",
         Params={"Bucket": bucket, "Key": key, "ContentType": content_type},
-        ExpiresIn=expires_in_seconds,
+        ExpiresIn=min(expires_in_seconds, video_url_ttl()),
     )
 
 
@@ -745,7 +746,7 @@ def _presigned_get_url(bucket: str, key: str, *, expires_in_seconds: int) -> str
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=expires_in_seconds,
+        ExpiresIn=min(expires_in_seconds, video_url_ttl()),
     )
 
 
@@ -760,11 +761,13 @@ def _head_object(bucket: str, key: str) -> dict[str, Any] | None:
         raise
 
 
-def _copy_object(bucket: str, source_key: str, dest_key: str, *, content_type: str) -> None:
+def _copy_object(
+    bucket: str, source_key: str, dest_key: str, *, content_type: str, source_bucket: str | None = None
+) -> None:
     client = get_s3_client()
     client.copy_object(
         Bucket=bucket,
-        CopySource={"Bucket": bucket, "Key": source_key},
+        CopySource={"Bucket": source_bucket or bucket, "Key": source_key},
         Key=dest_key,
         ContentType=content_type,
         MetadataDirective="REPLACE",
@@ -783,6 +786,28 @@ def _read_object_bytes(bucket: str, key: str) -> bytes:
     if body is None:
         raise RuntimeError(f"object body missing for {key}")
     return body.read()
+
+
+def _object_sha256(bucket: str, key: str) -> str:
+    body = get_s3_client().get_object(Bucket=bucket, Key=key)["Body"]
+    digest = hashlib.sha256()
+    try:
+        for chunk in iter(lambda: body.read(1024 * 1024), b""):
+            digest.update(chunk)
+    finally:
+        body.close()
+    return digest.hexdigest()
+
+
+@router.get("/admin/cast-screentime/video-assets/{video_asset_id}/playback-url")
+def get_video_playback_url(video_asset_id: UUID, _: CastScreentimeAdminUser) -> JSONResponse:
+    asset = _resolve_video_asset_or_404(str(video_asset_id))
+    bucket, key = source_reference(asset)
+    ttl = video_url_ttl()
+    return JSONResponse(
+        {"url": _presigned_get_url(bucket, key, expires_in_seconds=ttl), "expires_in_seconds": ttl},
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 def _screenalytics_artifact_bucket() -> str:
@@ -973,7 +998,7 @@ def _mirror_remote_video_to_temp_object(
     temp_object_key: str,
     content_type_hint: str | None = None,
 ) -> dict[str, Any]:
-    bucket = get_s3_bucket()
+    bucket = private_video_bucket()
     with requests.get(source_url, stream=True, timeout=(10, 180)) as response:
         response.raise_for_status()
         content_type = (
@@ -1005,13 +1030,14 @@ def _copy_existing_object_to_temp_object(
     if source_head is None:
         raise HTTPException(status_code=404, detail="Hosted source object was not found")
     _copy_object(
-        bucket,
+        private_video_bucket(),
         source_object_key,
         temp_object_key,
+        source_bucket=bucket,
         content_type=str(source_head.get("ContentType") or content_type_hint or "video/mp4"),
     )
     return {
-        "bucket": bucket,
+        "bucket": private_video_bucket(),
         "content_type": str(source_head.get("ContentType") or content_type_hint or "video/mp4"),
         "etag": str(source_head.get("ETag") or "").strip().strip('"') or None,
     }
@@ -1024,9 +1050,11 @@ def _promote_session_to_video_asset(
     ingest_type: str,
     source_provenance: dict[str, Any],
 ) -> dict[str, Any]:
-    bucket = get_s3_bucket()
+    bucket = private_video_bucket()
+    verification = session.get("verification_json") or {}
+    upload_bucket = str(verification.get("bucket") or get_s3_bucket())
     temp_object_key = str(session.get("temp_object_key") or "").strip()
-    head = _head_object(bucket, temp_object_key)
+    head = _head_object(upload_bucket, temp_object_key)
     if head is None:
         cast_screentime.update_media_upload_session(
             str(upload_session_id),
@@ -1050,7 +1078,7 @@ def _promote_session_to_video_asset(
 
     checksum = str(session.get("expected_checksum_sha256") or "").strip() or None
     etag = str(head.get("ETag") or "").strip().strip('"') or None
-    if checksum and etag and checksum != etag:
+    if checksum and checksum != _object_sha256(upload_bucket, temp_object_key):
         cast_screentime.update_media_upload_session(
             str(upload_session_id),
             {
@@ -1063,7 +1091,7 @@ def _promote_session_to_video_asset(
 
     verification_json_raw = session.get("verification_json")
     verification_json_existing = verification_json_raw if isinstance(verification_json_raw, dict) else {}
-    probe = _ffprobe_video(_presigned_get_url(bucket, temp_object_key, expires_in_seconds=300))
+    probe = _ffprobe_video(_presigned_get_url(upload_bucket, temp_object_key, expires_in_seconds=300))
     if not probe.get("ok"):
         cast_screentime.update_media_upload_session(
             str(upload_session_id),
@@ -1073,7 +1101,7 @@ def _promote_session_to_video_asset(
                 "error_text": f"video probe failed: {probe.get('error')}",
                 "verification_json": {
                     **verification_json_existing,
-                    "bucket": bucket,
+                    "bucket": upload_bucket,
                     "etag": etag,
                     "content_type": actual_content_type,
                     "probe": probe,
@@ -1088,8 +1116,10 @@ def _promote_session_to_video_asset(
         str(verification_json_existing.get("filename") or ""),
     )
     canonical_key = f"source/videos/{video_asset_id}/original{extension}"
-    _copy_object(bucket, temp_object_key, canonical_key, content_type=actual_content_type)
-    _delete_object(bucket, temp_object_key)
+    _copy_object(bucket, temp_object_key, canonical_key, content_type=actual_content_type, source_bucket=upload_bucket)
+    # Keep legacy-bucket uploads untouched; clean only new private staging objects.
+    if upload_bucket == bucket:
+        _delete_object(bucket, temp_object_key)
 
     verification_json = dict(verification_json_existing)
     verification_json.update(
@@ -1121,6 +1151,7 @@ def _promote_session_to_video_asset(
     source_import_type = str(session.get("source_import_type") or "upload")
 
     source_json = {
+        **private_source_json(bucket, canonical_key),
         "bucket": bucket,
         "object_key": canonical_key,
         "original_filename": str(verification_json_existing.get("filename") or "").strip() or None,
@@ -1129,7 +1160,6 @@ def _promote_session_to_video_asset(
         "checksum_sha256": checksum,
         "etag": etag,
         "upload_session_id": str(upload_session_id),
-        "storage_provider": "r2",
         "probe": probe,
         "provenance": source_provenance,
     }
@@ -1349,6 +1379,7 @@ def create_upload_session(
         media_kind=media["media_kind"],
         owner_scope=str(owner_context.get("owner_scope") or request.owner_scope or "season"),
     )
+    bucket = private_video_bucket()
     upload_session_id = str(uuid4())
     temp_object_key = _temp_upload_key(upload_session_id, request.filename)
     expires_at = datetime.now(UTC) + timedelta(minutes=_DEFAULT_UPLOAD_EXPIRY_MINUTES)
@@ -1364,6 +1395,7 @@ def create_upload_session(
             "expected_size_bytes": request.expected_size_bytes,
             "expected_checksum_sha256": request.expected_checksum_sha256,
             "verification_json": {
+                "bucket": bucket,
                 "filename": request.filename,
                 "owner_scope": owner_context.get("owner_scope"),
                 "owner_id": owner_context.get("owner_id"),
@@ -1377,7 +1409,6 @@ def create_upload_session(
             "owner_scope": owner_context.get("owner_scope"),
         }
     )
-    bucket = get_s3_bucket()
     return {
         "upload_session_id": session_row["id"],
         "put_url": _presigned_put_url(
@@ -1531,6 +1562,7 @@ def import_video_asset(
         media_kind=media["media_kind"],
         owner_scope=str(owner_context.get("owner_scope") or request.owner_scope or "season"),
     )
+    bucket = private_video_bucket()
     upload_session_id = UUID(str(uuid4()))
     temp_object_key = _temp_upload_key(str(upload_session_id), "import.mp4")
     expires_at = datetime.now(UTC) + timedelta(minutes=_DEFAULT_UPLOAD_EXPIRY_MINUTES)
@@ -1545,6 +1577,7 @@ def import_video_asset(
             "temp_object_key": temp_object_key,
             "content_type": "video/mp4",
             "verification_json": {
+                "bucket": bucket,
                 "owner_scope": owner_context.get("owner_scope"),
                 "owner_id": owner_context.get("owner_id"),
                 "source_mode": request.source_mode,
@@ -1612,6 +1645,7 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
+                        "bucket": bucket,
                         **cast(
                             "dict[str, Any]",
                             session.get("verification_json")
@@ -1681,6 +1715,7 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
+                        "bucket": bucket,
                         **cast(
                             "dict[str, Any]",
                             session.get("verification_json")
@@ -1711,6 +1746,7 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
+                        "bucket": bucket,
                         **cast(
                             "dict[str, Any]",
                             session.get("verification_json")

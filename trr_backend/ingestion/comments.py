@@ -30,6 +30,7 @@ from trr_backend.ingestion.authenticated_relay_contract import (
 )
 from trr_backend.ingestion.callable_attributes import with_attributes
 from trr_backend.ingestion.canonical import normalize_comment_source, write_comments
+from trr_backend.ingestion.comment_checkpoints import compact_page_checkpoint, page_progress_matches
 from trr_backend.ingestion.domain import Conflict, Failure, LostOwnership, Outcome, Stage, stable_json, utc_timestamp
 from trr_backend.ingestion.evidence import Evidence
 from trr_backend.ingestion.persistence import Store
@@ -1220,17 +1221,10 @@ class CommentActivity:
 
             for comment, raw in zip(page.comments, page.source_payloads, strict=True):
                 visit(comment, raw)
-        receipt_state = _progress(final_checkpoint) if pages else {}
-        if "scan_started_at" not in state:
-            # Legacy progress may lack the safe missing-row cutoff. Retain that
-            # absence: it cannot settle or mark missing without a fresh root.
-            receipt_state.pop("scan_started_at", None)
         # Reply retry administration is written when releasing a target, outside
         # the atomic native-page receipt. Every page-derived field must still
-        # match its committed proof exactly.
-        receipt_proof = {key: value for key, value in receipt_state.items() if key != "reply_access"}
-        target_proof = {key: value for key, value in state.items() if key != "reply_access"}
-        if set(nodes) != set(state["observed"]) or not pages or receipt_proof != target_proof:
+        # match its committed proof, whether a legacy snapshot or compact hash.
+        if set(nodes) != set(state["observed"]) or not pages or not page_progress_matches(final_checkpoint, state):
             raise CommentSourceError("Durable comment inventory lacks matching committed page proof")
         return tuple(nodes[key] for key in sorted(nodes)), proof
 
@@ -1366,6 +1360,10 @@ class CommentActivity:
                 metadata_writes_enabled=metadata_writes_enabled,
                 assignment=assignment,
             )
+            # Keep resumable target progress full. Immutable receipts reference
+            # retained page evidence/canonical identities instead of duplicating
+            # the accumulated maps. Canonical write, target update and receipt
+            # insertion all commit or roll back together under the same fence.
             if (
                 self.writer is write_comments
                 and isinstance(checkpoint.get("comment_pages"), dict)
@@ -1380,11 +1378,15 @@ class CommentActivity:
                       'lanes',(coalesce(checkpoint#>'{comment_pages,lanes}','{}'::jsonb)
                         - %s::text[]) || %s::jsonb))"""
                 checkpoint_params = _checkpoint_delta(expected_checkpoint, checkpoint)
+                page_checkpoint_sql = "%s::jsonb"
+                page_checkpoint_params = (stable_json(compact_page_checkpoint(checkpoint)),)
             else:
                 # Custom writers may supply arbitrary checkpoints or mutate
                 # their object during the write. Serialize once, after writing.
                 checkpoint_update = "%s::jsonb"
                 checkpoint_params = (stable_json(checkpoint),)
+                page_checkpoint_sql = "progress.checkpoint"
+                page_checkpoint_params = ()
             cur.execute(
                 """with progress as (
                   update social.instagram_ingestion_targets set checkpoint=__CHECKPOINT_UPDATE__
@@ -1393,10 +1395,10 @@ class CommentActivity:
                 ) insert into social.instagram_ingestion_comment_pages
                 (page_id,run_id,stage,target_key,owner_generation,evidence_id,observed_at,content_hash,
                  parent_comment_id,next_cursor,exhausted,canonical_identity,checkpoint)
-                select %s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,progress.checkpoint from progress
+                select %s,%s,'comments',%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,__PAGE_CHECKPOINT__ from progress
                 returning (select checkpoint_hash from progress) as checkpoint_hash""".replace(
                     "__CHECKPOINT_UPDATE__", checkpoint_update
-                ),
+                ).replace("__PAGE_CHECKPOINT__", page_checkpoint_sql),
                 (
                     *checkpoint_params,
                     owned["run_id"],
@@ -1412,6 +1414,7 @@ class CommentActivity:
                     page.next_cursor,
                     page.exhausted,
                     stable_json(identity),
+                    *page_checkpoint_params,
                 ),
             )
             if cur.rowcount != 1:
