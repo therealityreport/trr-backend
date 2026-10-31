@@ -273,6 +273,7 @@ def page_payloads(cur, metadata, *, target_key, start=0):
 def _inspect(cur, binding, release, listing, listing_hash):
     from trr_backend.ingestion.application import validate_detail
     from trr_backend.ingestion.canonical import _comment_media_urls, _comment_payload, _post_payload, _time
+    from trr_backend.ingestion.comment_checkpoints import page_progress_matches, page_progress_metadata
     from trr_backend.ingestion.comments import (
         CommentFetchSummary,
         _advance,
@@ -486,7 +487,7 @@ def _inspect(cur, binding, release, listing, listing_hash):
                         for i in removed:
                             native.pop(i, None)
                             page_uuid.pop(i, None)
-                    page_state = _progress(row["checkpoint"])
+                    page_state = page_progress_metadata(row["checkpoint"])
                     started = common.stamp(page_state["scan_started_at"])
                     check(started <= page.observed_at, "scan_cutoff_after_capture")
                     _advance(reconstructed, page, scan_started_at=started)
@@ -503,7 +504,10 @@ def _inspect(cur, binding, release, listing, listing_hash):
                         "scan_started_at",
                         "scan_root_evidence_id",
                     ):
-                        check(reconstructed.get(field) == page_state.get(field), "page_replay_" + field + "_mismatch")
+                        check(
+                            page_progress_matches(row["checkpoint"], reconstructed, fields=(field,)),
+                            "page_replay_" + field + "_mismatch",
+                        )
                     current_ids = {}
 
                     def visit(comment, raw, depth=0):

@@ -15,6 +15,7 @@ from typing import Any
 
 from trr_backend.object_storage import build_s3_client, load_object_storage_config
 from trr_backend.repositories import cast_screentime
+from trr_backend.video_storage import source_reference
 
 SRT_CONTENT_TYPE = "application/x-subrip; charset=utf-8"
 CUE_JSON_CONTENT_TYPE = "application/json; charset=utf-8"
@@ -399,7 +400,8 @@ def extract_video_asset_subtitles(
                     raise SubtitleExtractionError("video_asset_source_object_missing")
                 suffix = Path(source_key).suffix or ".mp4"
                 video_path = temp_root / f"source{suffix}"
-                _download_source(client, storage_bucket, source_key, video_path)
+                source_bucket, source_key = source_reference(asset)
+                _download_source(client, source_bucket, source_key, video_path)
             else:
                 video_path = Path(local_video_path)
                 if not video_path.is_file():
