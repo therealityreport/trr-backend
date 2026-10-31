@@ -2544,7 +2544,7 @@ worker was restored on `ig-useful-6a5720a2a1ee` with one coordinator grant.
 Before/after transition fingerprints matched across all 1,103 targets, 163,437
 accounted requests and 1,118 receipts. The interrupted controller was not
 restarted. The recovery procedure and receipts are retained under
-`~/.codex/tmp/ig-plan-01a17c45/restore-9/`.
+`~/Library/Application Support/TRR/recovery/instagram/ig-plan-01a17c45/restore-9/`.
 
 The reconstructed generation-9 comparison found all 133,328 earlier comment
 and reply IDs, missing flags and parent links unchanged. No hosted slot was
@@ -2563,7 +2563,7 @@ At the generation-9 baseline, comparison with known recorded expectations gave
 4,398 fewer nonmissing saved records across 234 posts, while five expected totals
 were unknown. These measures are not interchangeable and do not establish how
 many records remain publicly available. The certificate is
-`~/.codex/tmp/ig-plan-01a17c45/restore-9/final-certificate.json`.
+`~/Library/Application Support/TRR/recovery/instagram/ig-plan-01a17c45/restore-9/final-certificate.json`.
 
 At reconciliation, the unresolved comment targets were `DTgXh94kXyo` and
 `DTojfyxDeaq` at their existing attempt ceilings, plus `DTv5xOQklqU`,
@@ -2623,7 +2623,7 @@ to treat it as a completed media-stall predecessor. A fresh media opportunity
 would need an explicit bounded authorization and a verified continuation path;
 the last held-generation certificate remains blocked as recorded above.
 Release, review and preservation receipts are under
-`~/.codex/tmp/ig-plan-01a17c45/`.
+`~/Library/Application Support/TRR/recovery/instagram/ig-plan-01a17c45/`.
 
 ## 2026-10-29: general run controls and arbitrary date ranges
 
@@ -2633,4 +2633,4 @@ Ordinary local resume/retry now uses the normal API with compatible-worker, plac
 
 The matching local worker package was activated at verified idleness. Unique lease and process working directory were verified. All local run and target fingerprints, holds and request counts were unchanged. The previous local package ig-cdn-f131d25b0045 and Modal v175 remain rollback paths. The superseded local ig-useful-6a5720a2a1ee package was moved to actual Trash.
 
-Qualification included 92 backend tests plus three targeted follow-ups, independent review and corrections, 28 app ingestion tests and 79 quick-validation tests. Source and runtime delivery do not establish comment or whole-January completeness. No collection window was opened; the earlier one-time exception remains unused. The generalized six-issue implementation plan is workspace plans/056-instagram-date-range-recovery.md. Evidence is retained in ~/.codex/tmp/trr-consolidation-01a18605/.
+Qualification included 92 backend tests plus three targeted follow-ups, independent review and corrections, 28 app ingestion tests and 79 quick-validation tests. Source and runtime delivery do not establish comment or whole-January completeness. No collection window was opened; the earlier one-time exception remains unused. The generalized six-issue implementation plan is workspace plans/056-instagram-date-range-recovery.md. Evidence is retained in ~/Library/Application Support/TRR/recovery/repository-consolidation/trr-consolidation-01a18605/.
