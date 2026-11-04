@@ -1892,9 +1892,9 @@ def probe_twitter_public_conversation(tweet_id: str, max_pages: int = 2, max_ite
 )
 def probe_twitter_public_search(query: str) -> dict:
     """One explicit search page, at most ten records; never scheduled."""
-    from trr_backend.socials.twitter.public_probe import probe_public_search
+    from trr_backend.socials.twitter.public_probe import probe_public_research_search
 
-    return {**probe_public_search(query), "execution_backend": "modal"}
+    return {**probe_public_research_search(query), "execution_backend": "modal"}
 
 
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:

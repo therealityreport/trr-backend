@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -53,26 +54,10 @@ class PublicMirrorConversation:
         }
 
 
-def _fetch_page(url: str) -> bytes:
-    # Ignore ambient .netrc credentials and proxy configuration. Never redirect
-    # a conversation request to a login or another provider.
-    with requests.Session() as session:
-        session.trust_env = False
-        with session.get(
-            url,
-            headers={"Accept": "application/json", "User-Agent": "TRR-public-conversation/1.0"},
-            timeout=(10, 20),
-            allow_redirects=False,
-            stream=True,
-        ) as response:
-            if response.status_code != 200:
-                raise ValueError(f"Mirror HTTP {response.status_code}")
-            body = bytearray()
-            for chunk in response.iter_content(chunk_size=65536):
-                body.extend(chunk)
-                if len(body) > _MAX_RESPONSE_BYTES:
-                    raise ValueError("Mirror response exceeds size limit")
-            return bytes(body)
+def _fetch_page(url: str, *, deadline: float) -> bytes:
+    from trr_backend.socials.twitter.public_transport import fetch
+
+    return fetch(url, deadline=deadline)
 
 
 def _to_tweet(post: Any, *, root_id: str, role: str) -> Tweet:
@@ -137,7 +122,9 @@ def _to_tweet(post: Any, *, root_id: str, role: str) -> Tweet:
     )
 
 
-def fetch_public_conversation(tweet_id: str, *, max_pages: int = 3, max_items: int = 100) -> PublicMirrorConversation:
+def fetch_public_conversation(
+    tweet_id: str, *, max_pages: int = 3, max_items: int = 100, deadline: float | None = None
+) -> PublicMirrorConversation:
     """Read bounded status/thread/replies pages; retain partial results on error.
 
     Limits count all unique posts, including the requested status. There are no
@@ -149,6 +136,7 @@ def fetch_public_conversation(tweet_id: str, *, max_pages: int = 3, max_items: i
         raise ValueError("max_pages must be 1-10")
     if type(max_items) is not int or not 1 <= max_items <= 1000:
         raise ValueError("max_items must be 1-1000")
+    deadline = min(deadline, time.monotonic() + 120) if deadline is not None else time.monotonic() + 120
     result = PublicMirrorConversation()
     seen_ids: set[str] = set()
     seen_cursors: set[str] = set()
@@ -157,7 +145,9 @@ def fetch_public_conversation(tweet_id: str, *, max_pages: int = 3, max_items: i
         if result.next_cursor:
             url += "?" + urlencode({"cursor": result.next_cursor})
         try:
-            body = _fetch_page(url)
+            body = _fetch_page(url, deadline=deadline)
+            if time.monotonic() > deadline:
+                raise ValueError("Public provider deadline")
             data = json.loads(body)
             if (
                 not isinstance(data, dict)
@@ -220,7 +210,7 @@ def fetch_public_conversation(tweet_id: str, *, max_pages: int = 3, max_items: i
                 result.stop_reason = "max_items"
                 break
         except (requests.RequestException, ValueError) as exc:
-            result.stop_reason = "error"
+            result.stop_reason = "deadline" if "deadline" in str(exc) else "error"
             # Avoid copying provider bodies, network URLs, or ambient secrets.
             result.error = str(exc) if isinstance(exc, ValueError) else "Mirror request failed"
             break

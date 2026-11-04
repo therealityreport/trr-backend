@@ -86,8 +86,12 @@ class TwitterSearchRequest(BaseModel):
     """Request to search Twitter/X for tweets."""
 
     query: str = Field(..., description="Search query (hashtag or phrase, e.g., RHOSLC or #RHOSLC)")
-    date_start: datetime = Field(..., description="Start date for search")
-    date_end: datetime = Field(..., description="End date for search")
+    date_start: datetime | None = Field(default=None, description="Start date; required for standard search")
+    date_end: datetime | None = Field(default=None, description="End date; required for standard search")
+    mode: Literal["anonymous_research"] | None = None
+    provider: Literal["lurkbird"] | None = None
+    sort: Literal["latest", "top"] = "latest"
+    max_items: int = Field(default=20, ge=1, le=40, description="Anonymous research post limit")
     include_replies: bool = Field(default=False, description="Include reply tweets in results")
     include_links: bool = Field(default=True, description="Include tweets with links")
     mirror_to_s3: bool = Field(default=False, description="Mirror discovered media URLs to S3")
@@ -106,6 +110,39 @@ class TwitterSearchRequest(BaseModel):
         description="Label stored on persisted rows; defaults to query value when omitted",
     )
 
+    @model_validator(mode="after")
+    def validate_search_mode(self) -> TwitterSearchRequest:
+        if self.mode != "anonymous_research":
+            if self.date_start is None or self.date_end is None:
+                raise ValueError("date_start and date_end are required for standard search")
+            if self.provider is not None:
+                raise ValueError("provider requires anonymous_research mode")
+            return self
+        if self.provider != "lurkbird":
+            raise ValueError("Anonymous research requires provider='lurkbird'")
+        if not self.query.strip() or len(self.query) > 300:
+            raise ValueError("Anonymous research query must contain 1-300 characters")
+        if self.max_pages is not None and self.max_pages > 2:
+            raise ValueError("Anonymous research is limited to two pages")
+        if self.persist or self.mirror_to_s3:
+            raise ValueError("Anonymous research does not persist results or upload media")
+        unsupported = self.model_fields_set.intersection(
+            {
+                "date_start",
+                "date_end",
+                "include_replies",
+                "include_links",
+                "delay_seconds",
+                "show_id",
+                "season_number",
+                "person_id",
+                "scrape_query",
+            }
+        )
+        if unsupported:
+            raise ValueError("Unsupported anonymous research options: " + ", ".join(sorted(unsupported)))
+        return self
+
 
 class TweetResponse(BaseModel):
     """Single tweet in response."""
@@ -115,20 +152,20 @@ class TweetResponse(BaseModel):
     text: str
     hashtags: list[str]
     mentions: list[str]
-    likes: int
-    retweets: int
-    replies: int
-    quotes: int
-    views: int
-    bookmarks: int = 0
-    shares: int = 0
+    likes: int | None
+    retweets: int | None
+    replies: int | None
+    quotes: int | None
+    views: int | None
+    bookmarks: int | None = 0
+    shares: int | None = 0
     url: str
     username: str
     display_name: str
-    user_verified: bool
-    is_reply: bool
-    is_retweet: bool
-    is_quote: bool
+    user_verified: bool | None
+    is_reply: bool | None
+    is_retweet: bool | None
+    is_quote: bool | None
     thread_root_tweet_id: str | None = None
     thread_position: int | None = None
     is_thread_part: bool = False
@@ -571,14 +608,14 @@ async def search_twitter(
         twikit_creds = _load_twikit_credentials(twitter_cookies)
         return twitter_cookies, twitter_bearer, twikit_creds
 
-    return TwitterSearchResponse(
-        **run_twitter_search(
-            request,
-            load_auth=_load_auth,
-            persist_search=persist_standalone_twitter_search,
-            logger=logger,
-        )
+    result = await _run_admin_repo_call(
+        run_twitter_search,
+        request,
+        load_auth=_load_auth,
+        persist_search=persist_standalone_twitter_search,
+        logger=logger,
     )
+    return TwitterSearchResponse(**result)
 
 
 @router.post("/twitter/replies", response_model=TweetRepliesResponse)

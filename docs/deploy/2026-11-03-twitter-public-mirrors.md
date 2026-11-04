@@ -112,3 +112,21 @@ The disposable release export is retired after verification; reconstruct it with
 remain retained. The previous deployment v180 is still listed by the provider;
 rollback was not exercised against production. Its supported command, if needed,
 is `python -m modal app rollback ap-DkLTRoSvqhbkGO7fHyHxrD v180 --env main --profile admin-56995 --strategy rolling`.
+
+## November 4 integration: branch expansion
+
+`trr_backend.socials.twitter.public_thread.expand_public_thread` adds an explicit
+`provider="fxtwitter"` option for bounded branch exploration. One invocation has
+at most five provider requests and 100 unique output posts. It reads up to two
+root pages, then one page from selected discovered replies, retaining IDs,
+parent relationships, branch receipts and unvisited continuations. It stops on
+provider errors and keeps `complete=False`; reply counts prioritize exploration
+but do not prove missing branches empty.
+
+The clean-environment live run returned 67 unique posts in five requests: 62
+from two root pages, followed by 1, 1 and 3 additional posts from three branches.
+First-party responses independently confirmed text, author and parent IDs for
+`2117661883193057454` and `2117809213321650308`; earlier verified branch evidence
+remains available. Seven focused fixture tests passed; after adding explicit
+partial/unavailable status, the two affected tests were rerun separately.
+Evidence: `~/.local/share/trr-twitter-validation/20261104/`.

@@ -20,25 +20,10 @@ _ORIGIN = "https://lurkbird.com"
 _MAX_BYTES = 2_000_000
 
 
-def _fetch(url: str) -> bytes:
-    with requests.Session() as session:
-        session.trust_env = False
-        with session.get(
-            url,
-            timeout=(10, 20),
-            allow_redirects=False,
-            stream=True,
-            headers={"Accept": "text/html", "User-Agent": "TRR-public-search-research/1.0"},
-        ) as response:
-            if response.status_code != 200:
-                raise ValueError(f"Public search HTTP {response.status_code}")
-            body = bytearray()
-            deadline = time.monotonic() + 20
-            for chunk in response.iter_content(65536):
-                body.extend(chunk)
-                if len(body) > _MAX_BYTES or time.monotonic() > deadline:
-                    raise ValueError("Public search response exceeded limits")
-            return bytes(body)
+def _fetch(url: str, *, deadline: float) -> bytes:
+    from trr_backend.socials.twitter.public_transport import fetch
+
+    return fetch(url, deadline=deadline)
 
 
 def _parse(body: bytes, *, url: str) -> tuple[list[dict], str | None]:
@@ -127,7 +112,9 @@ def search_public_posts(
             break
         visited.add(url)
         try:
-            body = _fetch(url)
+            body = _fetch(url, deadline=deadline)
+            if time.monotonic() > deadline:
+                raise ValueError("Public provider deadline")
             posts, next_url = _parse(body, url=url)
             added, truncated = 0, False
             for post in posts:
@@ -161,7 +148,7 @@ def search_public_posts(
                 break
             url = next_url
         except (ValueError, requests.RequestException) as exc:
-            result["stop_reason"] = "error"
+            result["stop_reason"] = "deadline" if "deadline" in str(exc) else "error"
             result["error"] = str(exc) if isinstance(exc, ValueError) else "Public search request failed"
             break
     if not result["posts"]:

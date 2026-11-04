@@ -60,6 +60,11 @@ def search_twitter(
     """Run direct Twitter/X search and return the current route response shape."""
     operation_logger = logger or globals()["logger"]
 
+    if _read(request, "mode") == "anonymous_research":
+        from trr_backend.socials.twitter.anonymous_search import search_anonymous_twitter
+
+        return search_anonymous_twitter(request)
+
     import trr_backend.socials.twitter.scraper as twitter_module
 
     config = twitter_module.TwitterScrapeConfig(

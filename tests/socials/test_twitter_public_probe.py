@@ -12,7 +12,7 @@ def test_deployed_probe_uses_anonymous_collector(monkeypatch):
     monkeypatch.setattr(
         public_mirror,
         "_fetch_page",
-        lambda _: json.dumps({"code": 200, "status": post, "thread": [], "replies": [reply], "cursor": {}}).encode(),
+        lambda _, **kwargs: json.dumps({"code": 200, "status": post, "thread": [], "replies": [reply], "cursor": {}}).encode(),
     )
     result = probe_public_conversation("100")
     assert result["success"] is True
@@ -29,7 +29,7 @@ def test_probe_rejects_unbounded_work(kwargs):
 
 
 def test_probe_reports_blocked_access(monkeypatch):
-    def blocked(_):
+    def blocked(_, **kwargs):
         raise ValueError("Mirror HTTP 403")
 
     monkeypatch.setattr(public_mirror, "_fetch_page", blocked)
@@ -54,3 +54,19 @@ def test_search_probe_is_bounded(monkeypatch):
     assert calls == [("Artemis", {"provider": "lurkbird", "max_pages": 1, "max_items": 10})]
     assert result["state_free"] is True
     assert len(result["source_sha256"]) == 64
+
+
+def test_ui_dispatch_probe_never_loads_auth_or_persists(monkeypatch):
+    from pathlib import Path
+
+    from trr_backend.socials.twitter import public_search
+    from trr_backend.socials.twitter.public_probe import probe_public_research_search
+
+    fixture = Path(__file__).parents[1] / "fixtures/twitter/lurkbird-search.html"
+    monkeypatch.setattr(public_search, "_fetch", lambda _, **kwargs: fixture.read_bytes())
+    result = probe_public_research_search("Artemis")
+    assert result["tweets_found"] == 2
+    assert result["forbidden_calls"] == {"auth": 0, "persist": 0}
+    assert result["tweets"][0]["likes"] is None
+    assert result["complete"] is False
+    assert len(result["source_sha256"]) == 3

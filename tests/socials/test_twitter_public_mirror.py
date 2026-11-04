@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from trr_backend.socials.twitter import direct_scrape, public_mirror
+from trr_backend.socials.twitter import direct_scrape, public_mirror, public_transport
 
 
 def _post(post_id="100", parent=None):
@@ -34,7 +34,7 @@ def _serve(monkeypatch, *pages):
     pending = iter(pages)
     urls = []
 
-    def fetch(url):
+    def fetch(url, **kwargs):
         urls.append(url)
         page = next(pending)
         if isinstance(page, Exception):
@@ -133,7 +133,7 @@ def test_invalid_page_does_not_accept_partial_rows(monkeypatch, bad_page):
 
 
 def test_non_json_response_is_an_explicit_failure(monkeypatch):
-    monkeypatch.setattr(public_mirror, "_fetch_page", lambda _: b"<html>unavailable</html>")
+    monkeypatch.setattr(public_mirror, "_fetch_page", lambda _, **kwargs: b"<html>unavailable</html>")
     result = public_mirror.fetch_public_conversation("100")
     assert result.stop_reason == "error"
     assert result.error is not None
@@ -149,7 +149,7 @@ def test_non_json_response_is_an_explicit_failure(monkeypatch):
     ],
 )
 def test_invalid_input_never_fetches(monkeypatch, kwargs):
-    monkeypatch.setattr(public_mirror, "_fetch_page", lambda _: pytest.fail("must not fetch"))
+    monkeypatch.setattr(public_mirror, "_fetch_page", lambda _, **kwargs: pytest.fail("must not fetch"))
     with pytest.raises(ValueError):
         public_mirror.fetch_public_conversation(**kwargs)
 
@@ -184,7 +184,7 @@ def test_opt_in_direct_collector_does_not_hide_initial_failure(monkeypatch):
 
 @pytest.mark.parametrize("provider,upload", [("other", False), ("fxtwitter", True)])
 def test_direct_collector_rejects_unsupported_or_paid_media_path(monkeypatch, provider, upload):
-    monkeypatch.setattr(public_mirror, "_fetch_page", lambda _: pytest.fail("must not fetch"))
+    monkeypatch.setattr(public_mirror, "_fetch_page", lambda _, **kwargs: pytest.fail("must not fetch"))
     response = direct_scrape.fetch_tweet_replies(
         SimpleNamespace(tweet_id="100", mirror_to_s3=upload),
         load_auth=lambda: pytest.fail("must not load credentials"),
@@ -230,12 +230,12 @@ def test_transport_disables_ambient_auth_redirects_and_bounds_body(monkeypatch, 
             captured.update(kwargs, trust_env=self.trust_env)
             return Response()
 
-    monkeypatch.setattr(public_mirror.requests, "Session", Session)
+    monkeypatch.setattr(public_transport.requests, "Session", Session)
     if expected:
         with pytest.raises(ValueError, match=expected):
-            public_mirror._fetch_page("https://api.fxtwitter.com/2/conversation/100")
+            public_transport._read("https://api.fxtwitter.com/2/conversation/100", 20)
     else:
-        assert public_mirror._fetch_page("https://api.fxtwitter.com/2/conversation/100") == b"{}"
+        assert public_transport._read("https://api.fxtwitter.com/2/conversation/100", 20) == b"{}"
     assert captured["trust_env"] is False
     assert captured["allow_redirects"] is False
     assert captured["timeout"] == (10, 20)

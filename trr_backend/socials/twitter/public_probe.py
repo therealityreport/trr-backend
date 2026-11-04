@@ -47,3 +47,44 @@ def probe_public_search(query: str) -> dict:
         "state_free": True,
         "source_sha256": hashlib.sha256(Path(public_search.__file__).read_bytes()).hexdigest(),
     }
+
+
+def probe_public_research_search(query: str) -> dict:
+    """Exercise the UI-facing dispatcher with forbidden auth and persistence."""
+    from types import SimpleNamespace
+
+    from trr_backend.socials.twitter import anonymous_search, direct_scrape, public_search
+
+    calls = {"auth": 0, "persist": 0}
+
+    def auth():
+        calls["auth"] += 1
+        raise RuntimeError("Anonymous probe attempted credential access")
+
+    def persist(*args, **kwargs):
+        calls["persist"] += 1
+        raise RuntimeError("Anonymous probe attempted persistence")
+
+    result = direct_scrape.search_twitter(
+        SimpleNamespace(
+            mode="anonymous_research",
+            provider="lurkbird",
+            query=query,
+            sort="latest",
+            max_pages=1,
+            max_items=10,
+            persist=False,
+            mirror_to_s3=False,
+        ),
+        load_auth=auth,
+        persist_search=persist,
+    )
+    return {
+        **result,
+        "state_free": True,
+        "forbidden_calls": calls,
+        "source_sha256": {
+            module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+            for module in (anonymous_search, direct_scrape, public_search)
+        },
+    }
