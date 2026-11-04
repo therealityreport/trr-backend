@@ -36,3 +36,14 @@ def probe_public_conversation(tweet_id: str, *, max_pages: int = 2, max_items: i
             for module in (direct_scrape, public_mirror)
         },
     }
+
+
+def probe_public_search(query: str) -> dict:
+    from trr_backend.socials.twitter import public_search
+
+    result = public_search.search_public_posts(query, provider="lurkbird", max_pages=1, max_items=10)
+    return {
+        **result,
+        "state_free": True,
+        "source_sha256": hashlib.sha256(Path(public_search.__file__).read_bytes()).hexdigest(),
+    }

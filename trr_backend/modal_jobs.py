@@ -1882,6 +1882,21 @@ def probe_twitter_public_conversation(tweet_id: str, max_pages: int = 2, max_ite
     return {**result, "execution_backend": "modal"}
 
 
+@app.function(
+    name="probe_twitter_public_search",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=[],
+    retries=0,
+    timeout=60,
+    max_containers=1,
+)
+def probe_twitter_public_search(query: str) -> dict:
+    """One explicit search page, at most ten records; never scheduled."""
+    from trr_backend.socials.twitter.public_probe import probe_public_search
+
+    return {**probe_public_search(query), "execution_backend": "modal"}
+
+
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:
     from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers

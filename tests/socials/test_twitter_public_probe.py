@@ -37,3 +37,20 @@ def test_probe_reports_blocked_access(monkeypatch):
     assert result["success"] is False
     assert result["error"] == "Mirror HTTP 403"
     assert result["authentication_loader_calls"] == 0
+
+
+def test_search_probe_is_bounded(monkeypatch):
+    from trr_backend.socials.twitter import public_search
+    from trr_backend.socials.twitter.public_probe import probe_public_search
+
+    calls = []
+
+    def search(query, **kwargs):
+        calls.append((query, kwargs))
+        return {"status": "partial", "posts": [], "complete": False}
+
+    monkeypatch.setattr(public_search, "search_public_posts", search)
+    result = probe_public_search("Artemis")
+    assert calls == [("Artemis", {"provider": "lurkbird", "max_pages": 1, "max_items": 10})]
+    assert result["state_free"] is True
+    assert len(result["source_sha256"]) == 64
