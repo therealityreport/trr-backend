@@ -78,3 +78,44 @@ def test_external_continuation_rejected():
     body = FIXTURE.read_bytes().replace(b'href="/search/', b'href="https://evil.invalid/search/')
     with pytest.raises(ValueError, match="left the query"):
         public_search._parse(body, url=URL)
+
+
+def test_equivalent_percent_encoding_preserves_query():
+    body = FIXTURE.read_bytes().replace(b"/search/Artemis/", b"/search/%22Cat's%20Head%20Nebula%22/")
+    posts, next_url = public_search._parse(
+        body, url="https://lurkbird.com/search/%22Cat%27s%20Head%20Nebula%22/?product=latest"
+    )
+    assert len(posts) == 2 and next_url is not None
+
+
+def test_transport_has_no_ambient_auth_cookies_or_redirects(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def iter_content(self, size):
+            yield b"public"
+
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, **kwargs):
+            assert self.trust_env is False
+            assert kwargs["allow_redirects"] is False
+            assert "Authorization" not in kwargs["headers"] and "Cookie" not in kwargs["headers"]
+            assert kwargs["timeout"] == (10, 20)
+            return Response()
+
+    monkeypatch.setattr(public_search.requests, "Session", Session)
+    assert public_search._fetch(URL) == b"public"

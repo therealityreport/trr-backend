@@ -11,7 +11,7 @@ import hashlib
 import re
 import time
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -75,7 +75,7 @@ def _parse(body: bytes, *, url: str) -> tuple[list[dict], str | None]:
     next_url = urljoin(url, str(link["href"])) if link else None
     if next_url:
         parsed, current = urlsplit(next_url), urlsplit(url)
-        if (parsed.scheme, parsed.netloc, parsed.path) != ("https", "lurkbird.com", current.path):
+        if (parsed.scheme, parsed.netloc, unquote(parsed.path)) != ("https", "lurkbird.com", unquote(current.path)):
             raise ValueError("Public search continuation left the query or provider")
         params = parse_qs(parsed.query)
         if not params.get("cursor") or len(next_url) > 10000:
