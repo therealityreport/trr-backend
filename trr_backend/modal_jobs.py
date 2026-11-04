@@ -1866,6 +1866,22 @@ def probe_getty_remote_access() -> dict[str, object]:
     return _probe_getty_remote_access()
 
 
+@app.function(
+    name="probe_twitter_public_conversation",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=[],
+    retries=0,
+    timeout=120,
+    max_containers=1,
+)
+def probe_twitter_public_conversation(tweet_id: str, max_pages: int = 2, max_items: int = 40) -> dict:
+    """Explicit anonymous mirror probe: no schedule, secrets, or storage writes."""
+    from trr_backend.socials.twitter.public_probe import probe_public_conversation
+
+    result = probe_public_conversation(tweet_id, max_pages=max_pages, max_items=max_items)
+    return {**result, "execution_backend": "modal"}
+
+
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:
     from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
