@@ -165,11 +165,45 @@ def fetch_tweet_replies(
     *,
     load_auth: Callable[[], tuple[Any, Any, Any]],
     logger: logging.Logger | None = None,
+    conversation_provider: str | None = None,
+    mirror_max_pages: int = 3,
+    mirror_max_items: int = 100,
 ) -> dict[str, Any]:
-    """Fetch direct Twitter/X replies and return the current route response shape."""
+    """Fetch replies; explicitly select ``fxtwitter`` for an anonymous mirror.
+
+    The mirror branch never loads authentication or downloads media. It reports
+    unknown full-thread coverage even when provider pagination is exhausted.
+    """
     operation_logger = logger or globals()["logger"]
 
     try:
+        if conversation_provider is not None:
+            if conversation_provider != "fxtwitter":
+                raise ValueError("Unsupported public conversation provider")
+            if bool(_read(request, "mirror_to_s3", False)):
+                raise ValueError("Public conversation mirror does not upload media")
+            from trr_backend.socials.twitter.public_mirror import fetch_public_conversation
+
+            conversation = fetch_public_conversation(
+                _read(request, "tweet_id"), max_pages=mirror_max_pages, max_items=mirror_max_items
+            )
+            replies = [
+                tweet
+                for tweet in conversation.tweets
+                if tweet.tweet_id in conversation.reply_ids and tweet.tweet_id != _read(request, "tweet_id")
+            ]
+            return {
+                "success": bool(conversation.pages),
+                "tweet_id": _read(request, "tweet_id"),
+                "replies_found": len(replies),
+                "replies": [
+                    {**tweet_to_payload(reply), "reply_to_tweet_id": reply.reply_to_tweet_id} for reply in replies
+                ],
+                "retrieval_meta": conversation.coverage(),
+                "complete": False,
+                "error": conversation.error,
+            }
+
         import trr_backend.socials.twitter.scraper as twitter_module
 
         twitter_cookies, twitter_bearer, twikit_creds = _load_auth_values(load_auth)
