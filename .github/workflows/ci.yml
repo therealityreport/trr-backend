@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Check for unresolved merge markers
         run: |
@@ -22,9 +22,9 @@ jobs:
           fi
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11.9"
+          python-version: "3.11.18"
 
       - name: Validate env contract
         run: |
@@ -37,9 +37,9 @@ jobs:
         run: python scripts/check_repo_hygiene.py
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          version: "0.9.27"
+          version: "0.13.3"
           enable-cache: true
           cache-dependency-glob: |
             requirements.lock.txt
@@ -69,10 +69,10 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -87,9 +87,9 @@ jobs:
         run: python scripts/check_repo_hygiene.py
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          version: "0.9.27"
+          version: "0.13.3"
           enable-cache: true
           cache-dependency-glob: requirements.lock.txt
 
@@ -108,15 +108,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          version: "0.9.27"
+          version: "0.13.3"
           enable-cache: true
           cache-dependency-glob: requirements.lock.txt
           ignore-nothing-to-cache: true
@@ -150,13 +150,13 @@ jobs:
         if: steps.changed.outputs.files != ''
         env:
           CHANGED_PY_FILES: ${{ steps.changed.outputs.files }}
-        run: printf '%s' "$CHANGED_PY_FILES" | xargs -r uvx ruff@0.14.4 check
+        run: printf '%s' "$CHANGED_PY_FILES" | xargs -r uvx ruff@0.17.4 check
 
       - name: Ruff format check (changed files only)
         if: steps.changed.outputs.files != ''
         env:
           CHANGED_PY_FILES: ${{ steps.changed.outputs.files }}
-        run: printf '%s' "$CHANGED_PY_FILES" | xargs -r uvx ruff@0.14.4 format --check
+        run: printf '%s' "$CHANGED_PY_FILES" | xargs -r uvx ruff@0.17.4 format --check
 
 
   typecheck:
@@ -164,19 +164,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11.9"
+          python-version: "3.11.18"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          version: "0.9.27"
+          version: "0.13.3"
           enable-cache: true
           cache-dependency-glob: requirements.lock.txt
 
@@ -195,14 +195,14 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          version: "0.9.27"
+          version: "0.13.3"
           enable-cache: true
           cache-dependency-glob: |
             requirements.modal.lean.lock.txt
@@ -234,19 +234,19 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11.9"
+          python-version: "3.11.18"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.3.3
         with:
-          version: "0.9.27"
+          version: "0.13.3"
           enable-cache: true
           cache-dependency-glob: requirements.lock.txt
 

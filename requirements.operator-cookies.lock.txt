@@ -2,7 +2,7 @@
 #    uv pip compile requirements.operator-cookies.in --python-version 3.11 --python-platform x86_64-manylinux_2_28 -o requirements.operator-cookies.lock.txt
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.5
     # via
     #   -r requirements.operator-cookies.in
     #   modal
@@ -12,7 +12,7 @@ annotated-doc==0.0.5
     # via fastapi
 annotated-types==0.8.0
     # via pydantic
-anyio==4.15.1
+anyio==4.16.0
     # via
     #   -r requirements.operator-cookies.in
     #   httpx
@@ -31,9 +31,9 @@ beautifulsoup4==4.15.0
     # via -r requirements.operator-cookies.in
 browserforge==1.2.4
     # via scrapling
-cbor2==6.1.5
+cbor2==6.2.1
     # via modal
-certifi==2026.7.22
+certifi==2026.10.23
     # via
     #   curl-cffi
     #   httpcore
@@ -46,7 +46,7 @@ cffi==2.1.1
     #   curl-cffi
 charset-normalizer==3.5.2
     # via requests
-click==8.5.0
+click==8.5.1
     # via
     #   browserforge
     #   modal
@@ -56,14 +56,16 @@ cryptography==43.0.3
     #   -r requirements.operator-cookies.in
     #   pycookiecheat
     #   secretstorage
-cssselect==1.5.0
+cssselect==1.6.0
     # via scrapling
-curl-cffi==0.16.1
+curl-cffi==0.17.0
     # via
     #   -r requirements.operator-cookies.in
     #   scrapling
-fastapi==0.141.1
+fastapi==0.162.2
     # via -r requirements.operator-cookies.in
+frostwork==0.2.2
+    # via w3lib
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -94,7 +96,7 @@ idna==3.20
     #   httpx
     #   requests
     #   yarl
-importlib-metadata==9.0.1
+importlib-metadata==10.1.0
     # via keyring
 jaraco-classes==3.4.0
     # via keyring
@@ -114,24 +116,26 @@ markdown-it-py==4.2.0
     # via rich
 mdurl==0.1.2
     # via markdown-it-py
-modal==1.5.5
+modal==1.6.3
     # via -r requirements.operator-cookies.in
-more-itertools==11.1.0
+more-itertools==11.2.1
     # via
     #   jaraco-classes
     #   jaraco-functools
 msgspec==0.22.0
     # via scrapling
-multidict==6.9.1
+multidict==7.2.1
     # via
     #   aiohttp
     #   grpclib
     #   yarl
-orjson==3.12.0
+opentelemetry-api==1.45.2
+    # via fastapi
+orjson==3.13.0
     # via scrapling
-patchright==1.62.1
+patchright==1.64.4
     # via scrapling
-playwright==1.62.0
+playwright==1.64.1
     # via
     #   -r requirements.operator-cookies.in
     #   scrapling
@@ -141,15 +145,15 @@ propcache==0.5.4
     #   yarl
 protego==0.7.0
     # via scrapling
-protobuf==6.33.6
+protobuf==7.36.2
     # via modal
 pycookiecheat==0.8.0
     # via -r requirements.operator-cookies.in
-pycparser==3.0
+pycparser==3.12
     # via cffi
-pydantic==2.13.5
+pydantic==2.14.3
     # via fastapi
-pydantic-core==2.46.5
+pydantic-core==2.50.4
     # via pydantic
 pyee==13.0.1
     # via
@@ -157,13 +161,13 @@ pyee==13.0.1
     #   playwright
 pygments==2.21.0
     # via rich
-python-dotenv==1.2.2
+python-dotenv==1.2.4
     # via -r requirements.operator-cookies.in
 requests==2.34.2
     # via -r requirements.operator-cookies.in
 rich==15.0.0
     # via modal
-scrapling==0.5
+scrapling==0.5.1
     # via -r requirements.operator-cookies.in
 secretstorage==3.5.0
     # via keyring
@@ -171,9 +175,9 @@ soupsieve==2.10
     # via
     #   -r requirements.operator-cookies.in
     #   beautifulsoup4
-starlette==1.7.0
+starlette==1.10.0
     # via fastapi
-synchronicity==0.12.6
+synchronicity==0.12.7
     # via modal
 tld==0.13.2
     # via scrapling
@@ -190,7 +194,9 @@ typing-extensions==4.16.0
     #   anyio
     #   beautifulsoup4
     #   fastapi
+    #   frostwork
     #   modal
+    #   opentelemetry-api
     #   pydantic
     #   pydantic-core
     #   pyee
@@ -198,7 +204,7 @@ typing-extensions==4.16.0
     #   starlette
     #   synchronicity
     #   typing-inspection
-typing-inspection==0.4.4
+typing-inspection==0.4.5
     # via
     #   fastapi
     #   pydantic
@@ -206,11 +212,11 @@ urllib3==2.8.0
     # via
     #   -r requirements.operator-cookies.in
     #   requests
-w3lib==2.5.0
+w3lib==2.6.0
     # via scrapling
 watchfiles==1.3.0
     # via modal
 yarl==1.25.1
     # via aiohttp
-zipp==4.1.1
+zipp==4.1.2
     # via importlib-metadata

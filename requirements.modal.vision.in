@@ -3,7 +3,7 @@
 -r requirements.modal.lean.in
 
 numpy==1.26.4
-deepface>=0.0.93
+deepface>=0.0.93,<0.0.101  # 0.0.101+ drops TensorFlow and adds opencv-contrib; needs a vision smoke first
 opencv-python==4.11.0.86
 opencv-python-headless==4.11.0.86
 onnxruntime==1.18.1

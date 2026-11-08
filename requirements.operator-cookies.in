@@ -2,16 +2,16 @@
 # Independent input: do not include runtime lanes with their cryptography floor.
 pycookiecheat==0.8.0
 cryptography==43.0.3
-python-dotenv==1.2.2
-modal==1.5.5
+python-dotenv==1.2.4
+modal==1.6.3
 # The shared socials package eagerly imports an API scraper facade.
-fastapi==0.141.1
+fastapi==0.162.2
 requests==2.34.2
 httpx==0.28.1
-curl_cffi==0.16.1
+curl_cffi==0.17.0
 beautifulsoup4==4.15.0
-playwright==1.62.0
-scrapling[fetchers]==0.5
+playwright==1.64.1
+scrapling[fetchers]==0.5.1
 
 # Patch transport/parser dependencies without changing extractor compatibility.
 aiohttp>=3.14.3

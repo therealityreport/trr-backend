@@ -28,13 +28,13 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || '' }}
 
       - name: Detect changes
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         id: changes
         with:
           filters: |
@@ -66,9 +66,9 @@ jobs:
           [ -f MERMAID_DIAGRAM.md ] && mv MERMAID_DIAGRAM.md docs/Repository/generated/REPO_STRUCTURE.mermaid.md
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11.9"
+          python-version: "3.11.18"
 
       - name: Install dependencies
         run: |
@@ -77,9 +77,9 @@ jobs:
 
       - name: Set up Supabase CLI
         if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@v3
         with:
-          version: 2.70.5
+          version: 2.122.1
 
       - name: Install psycopg2 for schema docs
         if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
@@ -106,7 +106,7 @@ jobs:
         run: python scripts/generate_repo_mermaid.py
 
       - name: Upload repository maps artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: repository-maps
           path: |
@@ -116,14 +116,14 @@ jobs:
 
       - name: Upload schema docs artifact
         if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: schema-docs
           path: supabase/schema_docs/
           if-no-files-found: error
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -171,7 +171,7 @@ jobs:
           fi
 
       - name: Upload rendered diagrams to artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: repository-maps-rendered
           path: docs/Repository/generated/rendered/
@@ -179,7 +179,7 @@ jobs:
 
       - name: Upload schema diagrams rendered to artifact
         if: steps.changes.outputs.schema == 'true' || github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: schema-diagrams-rendered
           path: .artifacts/schema-diagrams-rendered/
@@ -209,7 +209,7 @@ jobs:
 
       - name: Create Pull Request
         if: github.event_name != 'pull_request'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: chore/repo-map
