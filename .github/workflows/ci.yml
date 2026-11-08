@@ -37,7 +37,7 @@ jobs:
         run: python scripts/check_repo_hygiene.py
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.13.3"
           enable-cache: true
@@ -87,7 +87,7 @@ jobs:
         run: python scripts/check_repo_hygiene.py
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.13.3"
           enable-cache: true
@@ -114,7 +114,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.13.3"
           enable-cache: true
@@ -174,7 +174,7 @@ jobs:
           python-version: "3.11.18"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.13.3"
           enable-cache: true
@@ -200,7 +200,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.13.3"
           enable-cache: true
@@ -244,7 +244,7 @@ jobs:
           python-version: "3.11.18"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.13.3"
           enable-cache: true
