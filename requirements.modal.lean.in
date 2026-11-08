@@ -12,11 +12,11 @@ google-auth>=2.30.0
 google-auth-oauthlib>=1.2.0
 beautifulsoup4>=4.12.0
 tenacity>=8.2.0
-google-genai>=1.0.0
+google-genai>=1.0.0,<3  # 3.x is a breaking SDK major; migrate separately
 firebase-admin>=6.5.0
 psycopg2-binary>=2.9.13
 dbos==3.3.0
-psycopg[binary]==3.3.6
+psycopg[binary]==3.3.8
 PyJWT>=2.15.0,<3
 boto3>=1.35.0
 Pillow>=12.3.0
@@ -28,11 +28,11 @@ gunicorn>=21.0.0
 modal>=1.5.5,<2
 redis>=5.2.0
 python-multipart>=0.0.20
-pydantic>=2.13.5
-supabase==2.31.0
-postgrest==2.31.0
+pydantic>=2.13.5,<2.14  # 2.14 TypeForm typing needs a pyright upgrade
+supabase==2.34.1
+postgrest==2.34.1
 sse-starlette>=2.0.0
-anthropic>=0.43.0
+anthropic>=0.43.0,<1  # 1.x/2.x SDK majors need a separate migration
 httpx>=0.28.0
 
 # Observability (Sentry — env-gated; no-op without SENTRY_DSN)
@@ -48,3 +48,4 @@ pyasn1>=0.6.4
 soupsieve>=2.9
 urllib3>=2.8.0
 cryptography>=50.0.0
+protobuf<7  # 7.x major: hold until google/grpc stacks are verified on it
