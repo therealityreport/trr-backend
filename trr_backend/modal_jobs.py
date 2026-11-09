@@ -1582,6 +1582,10 @@ def probe_instagram_posts_auth(account_handle: str) -> dict[str, object]:
                 "proxy_fallback": "requires_approval",
             },
         }
+    from trr_backend.socials import social_season_analytics_impl as social_provider
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.pipelines.account_catalog.launch import _probe_instagram_posts_endpoint_for_launch
 
     payload = dict(_probe_instagram_posts_endpoint_for_launch(account_handle=account_handle))
@@ -1633,6 +1637,10 @@ def probe_instagram_comments_auth(
                 "proxy_fallback": "requires_approval",
             },
         }
+    from trr_backend.socials import social_season_analytics_impl as social_provider
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.pipelines.comments.instagram import _probe_instagram_comments_endpoint_for_launch
 
     payload = dict(
