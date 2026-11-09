@@ -530,7 +530,17 @@ def write_post(
     for key in ("raw_data", "child_posts_data", "asset_manifest"):
         if key in post_sidecar:
             old[key] = post_sidecar[key]
+    from trr_backend.socials.instagram.comment_counts import merge_observations, reconcile_prior_observations
+
+    post_raw = old.get("raw_data") or {}
+    catalog_raw = catalog_sidecar.get("raw_data", catalog.get("raw_data")) or {}
+    previous_raw = _merge(catalog_raw, post_raw)
+    # Reconcile the two existing preservation models without inventing a fresh
+    # capture time for either. The incoming response is applied exactly once.
+    previous_raw.update(reconcile_prior_observations(post_raw, catalog_raw))
+    count_observations = merge_observations(incoming.get("raw_data") or {}, previous_raw, observed_at=observed_at)
     merged = _merge(old, incoming)
+    merged.setdefault("raw_data", {}).update(count_observations)
     payload = {
         key: merged[key] for key in set(incoming) | {"raw_data", "child_posts_data", "asset_manifest"} if key in merged
     }
@@ -592,6 +602,7 @@ def write_post(
             catalog_payload[key] = _merge(preserved, catalog_payload.get(key) or {})
         elif not catalog_payload.get(key) and preserved:
             catalog_payload[key] = preserved
+    catalog_payload.setdefault("raw_data", {}).update(count_observations)
     catalog = _upsert(conn, "instagram_account_catalog_posts", catalog_payload, ["source_id"])
     _sidecar(
         conn,

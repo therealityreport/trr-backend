@@ -119,6 +119,11 @@ class PostActivity:
         source = dict(parsed.source_payload)
         if stage == Stage.DETAILS:
             source["detail_snapshot"] = validate_detail(parsed)
+            from trr_backend.socials.instagram.comment_counts import detail_observation_metadata
+
+            # raw_data is the unwrapped retained native node. Scalar DTO counts
+            # and serializer defaults are not evidence of a source observation.
+            source.update(detail_observation_metadata(parsed.post.raw_data, observed_at=parsed.observed_at))
 
         def write(conn):
             return self.writer(

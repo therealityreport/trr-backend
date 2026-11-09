@@ -86,6 +86,7 @@ CONTENT_KEYS = frozenset(
         "count",
         "like_count",
         "comment_count",
+        "fb_comment_count",
         "video_view_count",
         "video_play_count",
         "play_count",

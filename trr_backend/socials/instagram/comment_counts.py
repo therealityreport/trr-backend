@@ -206,13 +206,17 @@ def observations_from_raw(
             result["post_reported_count"] = _observation(parsed, field, raw, observed_at=observed_at)
             break
     facebook = count(raw.get("fb_comment_count"))
+    native_facebook_observed = facebook is not None
     crosspost = _mapping(raw.get("facebook_crosspost"))
     # This retained object is produced exclusively from fb_comment_count.
     if facebook is None and crosspost.get("source"):
         facebook = count(crosspost.get("comments_count"))
     if facebook is not None and result["facebook_count_observed_on_instagram"]["value"] is None:
         result["facebook_count_observed_on_instagram"] = _observation(
-            facebook, "fb_comment_count", raw, observed_at=crosspost.get("observed_at") or observed_at
+            facebook,
+            "fb_comment_count",
+            raw,
+            observed_at=observed_at if native_facebook_observed else crosspost.get("observed_at") or observed_at,
         )
     # No supported Threads extraction has been demonstrated. Do not infer one.
     result["threads_count_observed_on_instagram"] = _unknown("no_supported_source_evidence")
@@ -256,6 +260,39 @@ def merge_observations(incoming: Mapping[str, Any], previous: Mapping[str, Any],
     return {OBSERVATION_KEY: merged, "comment_count_observation_conflicts": conflicts}
 
 
+def reconcile_prior_observations(*payloads: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the newest timed prior evidence per metric, retaining other values."""
+    selected = observations_from_raw({})
+    conflicts: list[dict[str, Any]] = []
+
+    def instant(observation: Mapping[str, Any]) -> float:
+        value = observation.get("observed_at")
+        if not isinstance(value, str):
+            return float("-inf")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.timestamp() if parsed.utcoffset() is not None else float("-inf")
+        except ValueError:
+            return float("-inf")
+
+    for payload in payloads:
+        conflicts.extend(item for item in _conflicts(payload) if item not in conflicts)
+        for metric, candidate in observations_from_raw(payload).items():
+            if candidate["value"] is None:
+                continue
+            previous = selected[metric]
+            if previous["value"] is None or instant(candidate) > instant(previous):
+                selected[metric] = candidate
+                displaced = previous
+            else:
+                displaced = candidate
+            if displaced["value"] is not None and displaced["value"] != selected[metric]["value"]:
+                conflict = {"metric": metric, **displaced}
+                if conflict not in conflicts:
+                    conflicts.append(conflict)
+    return {OBSERVATION_KEY: selected, "comment_count_observation_conflicts": conflicts}
+
+
 def build_comment_counts(row: Mapping[str, Any], inventory: Mapping[str, Any] | None = None) -> dict[str, Any]:
     raw = _mapping(row.get("raw_data"))
     observations = observations_from_raw(raw)
@@ -291,13 +328,11 @@ def reported_count_sql(raw_sql: str) -> str:
     )
 
 
-def capture_detail_observations(post: Any, node: Mapping[str, Any], *, observed_at: Any) -> None:
-    """Called only after fetching and extracting an individual post-details response."""
-    post.comment_count_observations = observations_from_raw(
-        node, observed_at=observed_at, source_surface="instagram_post_details"
-    )
-    post.comment_count_observation_conflicts = []
-    chosen = post.comment_count_observations["post_reported_count"]["value"]
+def detail_observation_metadata(node: Mapping[str, Any], *, observed_at: Any) -> dict[str, Any]:
+    """Build provenance only at a proven individual post-details boundary."""
+    observations = observations_from_raw(node, observed_at=observed_at, source_surface="instagram_post_details")
+    conflicts = []
+    chosen = observations["post_reported_count"]["value"]
     for field, value in (
         ("comment_count", node.get("comment_count")),
         ("commentsCount", node.get("commentsCount")),
@@ -305,9 +340,17 @@ def capture_detail_observations(post: Any, node: Mapping[str, Any], *, observed_
     ):
         parsed = count(value)
         if chosen is not None and parsed is not None and parsed != chosen:
-            post.comment_count_observation_conflicts.append(
+            conflicts.append(
                 {"metric": "post_reported_count", **_observation(parsed, field, node, observed_at=observed_at)}
             )
+    return {OBSERVATION_KEY: observations, "comment_count_observation_conflicts": conflicts}
+
+
+def capture_detail_observations(post: Any, node: Mapping[str, Any], *, observed_at: Any) -> None:
+    """Called only after fetching and extracting an individual post-details response."""
+    metadata = detail_observation_metadata(node, observed_at=observed_at)
+    post.comment_count_observations = metadata[OBSERVATION_KEY]
+    post.comment_count_observation_conflicts = metadata["comment_count_observation_conflicts"]
 
 
 def saved_count_sql(source_id_sql: str) -> str:

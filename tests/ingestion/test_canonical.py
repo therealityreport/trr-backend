@@ -171,6 +171,95 @@ def test_scraper_dto_and_native_comment_characterization():
     assert (native.comment_id, native.username, native.likes, native.reply_count) == ("native1", "native", 8, 3)
 
 
+def test_native_count_observations_reconcile_all_post_models_without_changing_unknowns(database):
+    from trr_backend.socials.instagram.comment_counts import detail_observation_metadata
+
+    def detailed_source(value, when):
+        source = copy.deepcopy(CAPTURE["post"])
+        source.update(shortcode="CountEvidenceA", pk="90000001", url="https://www.instagram.com/p/CountEvidenceA/")
+        source["comment_count"] = value
+        source["fb_comment_count"] = 0
+        source.update(detail_observation_metadata(source, observed_at=when))
+        return source
+
+    def all_counts(conn, ids):
+        models = [
+            load(conn, "instagram_posts", id=ids["post_id"]),
+            load(conn, "instagram_post_payloads", post_id=ids["post_id"]),
+            load(conn, "instagram_account_catalog_posts", id=ids["catalog_post_id"]),
+            load(conn, "instagram_account_catalog_post_payloads", catalog_post_id=ids["catalog_post_id"]),
+        ]
+        observations = [row["raw_data"]["comment_count_observations"] for row in models]
+        assert all(value == observations[0] for value in observations)
+        return observations[0], models
+
+    with database() as conn:
+        first = detailed_source(3, OBSERVED)
+        ids = post(conn, source=first)
+        counts, _ = all_counts(conn, ids)
+        assert counts["post_reported_count"]["value"] == 3
+        assert counts["facebook_count_observed_on_instagram"]["value"] == 0
+        assert counts["threads_count_observed_on_instagram"]["value"] is None
+        changed_at = OBSERVED + timedelta(hours=1)
+        post(conn, source=detailed_source(1, changed_at), observed=changed_at)
+        counts, models = all_counts(conn, ids)
+        assert counts["post_reported_count"]["value"] == 1
+        assert counts["post_reported_count"]["observed_at"] == changed_at.isoformat()
+        for row in models:
+            assert any(
+                item["metric"] == "post_reported_count" and item["value"] == 3
+                for item in row["raw_data"]["comment_count_observation_conflicts"]
+            )
+        thin = {key: first[key] for key in ("shortcode", "pk", "username", "post_type")}
+        thin["comments"] = 0  # A serializer default is not a source observation.
+        post(conn, source=thin, observed=OBSERVED + timedelta(hours=2))
+        counts, _ = all_counts(conn, ids)
+        assert counts["post_reported_count"]["value"] == 1
+        assert counts["post_reported_count"]["observed_at"] == changed_at.isoformat()
+        assert counts["post_reported_count"]["observed_in_latest_response"] is False
+        assert counts["facebook_count_observed_on_instagram"]["observed_at"] == changed_at.isoformat()
+        assert counts["facebook_count_observed_on_instagram"]["observed_in_latest_response"] is False
+
+
+def test_newer_catalog_count_survives_divergent_prior_models_and_a_thin_response(database):
+    from trr_backend.socials.instagram.comment_counts import detail_observation_metadata
+
+    source = copy.deepcopy(CAPTURE["post"])
+    source.update(shortcode="CountPriorB", pk="90000002", url="https://www.instagram.com/p/CountPriorB/")
+    source["comment_count"] = 3
+    source.update(detail_observation_metadata(source, observed_at=OBSERVED))
+    with database() as conn:
+        ids = post(conn, source=source)
+        newer_at = OBSERVED + timedelta(hours=1)
+        catalog = load(conn, "instagram_account_catalog_post_payloads", catalog_post_id=ids["catalog_post_id"])
+        newer = {**catalog["raw_data"], "comment_count": 1}
+        newer.pop("comment_count_observations", None)
+        newer.pop("comment_count_observation_conflicts", None)
+        newer.update(detail_observation_metadata(newer, observed_at=newer_at))
+        with conn.cursor() as cur:
+            cur.execute(
+                "update social.instagram_account_catalog_post_payloads "
+                "set raw_data=%s::jsonb,payload_updated_at=%s where catalog_post_id=%s",
+                (json.dumps(newer), newer_at, ids["catalog_post_id"]),
+            )
+        thin = {key: source[key] for key in ("shortcode", "pk", "username", "post_type")}
+        thin["comments"] = 0
+        post(conn, source=thin, observed=newer_at + timedelta(hours=1))
+        for table, key in (
+            ("instagram_post_payloads", {"post_id": ids["post_id"]}),
+            ("instagram_account_catalog_post_payloads", {"catalog_post_id": ids["catalog_post_id"]}),
+        ):
+            raw = load(conn, table, **key)["raw_data"]
+            selected = raw["comment_count_observations"]["post_reported_count"]
+            assert selected["value"] == 1
+            assert selected["observed_at"] == newer_at.isoformat()
+            assert selected["observed_in_latest_response"] is False
+            assert any(
+                item["metric"] == "post_reported_count" and item["value"] == 3
+                for item in raw["comment_count_observation_conflicts"]
+            )
+
+
 def test_post_all_models_metadata_and_original_observation(database):
     with database() as conn:
         ids = post(conn)
