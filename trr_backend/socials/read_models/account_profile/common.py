@@ -2077,6 +2077,13 @@ def get_social_account_profile_summary(
                     normalized_account,
                     conn=summary_conn,
                 )
+            # Capture inventory while the shared read connection is fresh. Legacy
+            # summary fallbacks can retire it after a failed subquery.
+            comment_counts = (
+                _comment_counts.profile_summary(normalized_account, conn=summary_conn)
+                if normalized_platform == "instagram" and normalized_detail != "distribution"
+                else None
+            )
             if normalized_detail == "distribution":
                 if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS):
                     per_show_counts = _timed_social_account_profile_summary_query(
@@ -2549,7 +2556,7 @@ def get_social_account_profile_summary(
                 **identity_fields,
             }
             if normalized_platform == "instagram":
-                payload["comment_counts"] = _comment_counts.profile_summary(normalized_account, conn=summary_conn)
+                payload["comment_counts"] = comment_counts
         return payload
     finally:
         _log_social_profile_perf(

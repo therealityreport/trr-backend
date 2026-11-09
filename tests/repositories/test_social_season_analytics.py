@@ -17502,6 +17502,7 @@ def test_get_social_account_profile_summary_uses_shared_instagram_detail_rollup(
     )
 
     def _fake_instagram_social_account_detail_rollup(account_handle: str, *, conn=None) -> dict[str, Any]:
+        assert contract_read["done"], "canonical inventory must precede legacy summary loaders"
         calls["detail_rollup"] += 1
         assert account_handle == "bravotv"
         assert conn is summary_conn
@@ -17554,11 +17555,13 @@ def test_get_social_account_profile_summary_uses_shared_instagram_detail_rollup(
 
     from trr_backend.socials.instagram import comment_counts
 
+    contract_read = {"done": False}
     count_contract = {"version": 1, "posts_count": 12, "post_reported_unknown_posts_count": 12}
 
     def _fake_count_summary(account_handle, *, conn=None):
         assert account_handle == "bravotv"
         assert conn is summary_conn
+        contract_read["done"] = True
         return count_contract
 
     monkeypatch.setattr(comment_counts, "profile_summary", _fake_count_summary)
