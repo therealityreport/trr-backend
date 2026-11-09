@@ -213,7 +213,16 @@ def main(argv=None):
                         }
                         for row in status["targets"]
                     ],
-                    "budget": budget.inspect(),
+                    "budget": (
+                        budget.inspect()
+                        if manifest.max_source_requests is None
+                        else {
+                            "scope": "existing_worker_run",
+                            "source_request_limit": manifest.max_source_requests,
+                            "run_seconds_limit": manifest.max_run_seconds,
+                            "recorded_source_requests": sum(row["requests"] for row in status["targets"]),
+                        }
+                    ),
                 },
                 default=str,
             )
