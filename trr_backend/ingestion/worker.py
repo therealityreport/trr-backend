@@ -213,6 +213,12 @@ class Worker:
 
         try:
             context = self.context(owned)
+            if os.getenv("TRR_INSTAGRAM_LOCAL_WORKER_PUBLIC_ONLY") == "1" and (
+                RunIntent.from_payload(context["run"]["intent"]).effective_source_profile.access_mode != "public"
+            ):
+                from trr_backend.ingestion.identity_policy import IdentityDeferred
+
+                raise IdentityDeferred("operator_public_only", None, blocked=True)
             from trr_backend.ingestion.fixed_run_budget import FixedRunBudget
             from trr_backend.ingestion.reply_context import execution_deadline
 

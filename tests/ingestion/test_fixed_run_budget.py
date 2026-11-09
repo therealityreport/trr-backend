@@ -179,6 +179,51 @@ def test_worker_exhaustion_holds_target_and_resets_deadline(tmp_path, monkeypatc
     assert execution_deadline.get() == before
 
 
+def test_public_worker_rejects_authenticated_intent_before_source(monkeypatch):
+    from trr_backend.ingestion.domain import RunIntent, SourceProfile
+    from trr_backend.ingestion.worker import Worker
+
+    failures = []
+
+    class Store:
+        def acquire(self, **kwargs):
+            return {}
+
+        def checkpoint_failure(self, **kwargs):
+            failures.append(kwargs["failure"])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Attempted credential-dependent source construction")
+
+    worker = Worker(
+        Store(),
+        listing_source=forbidden,
+        detail_source=forbidden,
+        comment_source=forbidden,
+        media_loader=None,
+        media_storage=None,
+    )
+    intent = RunIntent("bravotv", source_profile=SourceProfile.for_mode("authenticated"))
+    monkeypatch.setenv("TRR_INSTAGRAM_LOCAL_WORKER_PUBLIC_ONLY", "1")
+    monkeypatch.setattr(
+        worker,
+        "context",
+        lambda owned: {"run": {"intent": intent.payload()}, "target": {"owner_started_at": None, "checkpoint": {}}},
+    )
+    result = worker.execute(
+        {
+            "run_id": str(uuid4()),
+            "account": "bravotv",
+            "generation": 1,
+            "target_key": "Abc123",
+            "owner_token": "fixture",
+            "stage": "post_details",
+        }
+    )
+    assert result["code"] == "operator_public_only"
+    assert failures[0].identity_blocked is True
+
+
 @pytest.mark.parametrize(
     "changes",
     [
