@@ -150,9 +150,10 @@ class Worker:
                 raise LostOwnership("Run is no longer active")
             target = _row(
                 cur,
-                """select * from social.instagram_ingestion_targets
-                where run_id=%s and stage=%s and target_key=%s and owner_token=%s
-                and owner_expires_at>clock_timestamp() and outcome='unresolved'""",
+                """select t.*,m.cursor_state as operator_selection from social.instagram_ingestion_targets t
+                left join social.instagram_ingestion_manifests m using(run_id,stage)
+                where t.run_id=%s and t.stage=%s and t.target_key=%s and t.owner_token=%s
+                and t.owner_expires_at>clock_timestamp() and t.outcome='unresolved'""",
                 (owned["run_id"], owned["stage"].value, owned["target_key"], owned["owner_token"]),
             )
             if not target:
@@ -190,6 +191,8 @@ class Worker:
         source = None
         source_error = None
         source_settled = False
+        budget = None
+        budget_deadline_token = None
 
         def fetch(factory, **callbacks):
             nonlocal source
@@ -197,7 +200,7 @@ class Worker:
             # credentials and source construction behind that boundary too.
             if source is None:
                 source = factory(context, owned)
-            return source(**callbacks)
+            return source(**(budget.callbacks(callbacks) if budget else callbacks))
 
         def fetch_listing_detail(**callbacks):
             nonlocal source
@@ -210,8 +213,18 @@ class Worker:
 
         try:
             context = self.context(owned)
+            from trr_backend.ingestion.fixed_run_budget import FixedRunBudget
+            from trr_backend.ingestion.reply_context import execution_deadline
+
+            budget = FixedRunBudget.from_context(context)
+            if budget:
+                deadlines = [budget.monotonic_deadline]
+                if execution_deadline.get() is not None:
+                    deadlines.append(execution_deadline.get())
+                budget_deadline_token = execution_deadline.set(min(deadlines))
             if deadline_callback:
-                deadline_callback(context["target"]["owner_expires_at"])
+                expires = context["target"]["owner_expires_at"]
+                deadline_callback(min(expires, budget.expires_at) if budget else expires)
             if owned["stage"] == Stage.LISTING:
                 result = ListingActivity(self.store).execute(
                     **args,
@@ -291,6 +304,8 @@ class Worker:
                     # Never replace it or expose source exception text while
                     # attempting to release a shared identity probe.
                     LOGGER.warning("ingestion_source_cleanup_failed")
+            if budget_deadline_token is not None:
+                execution_deadline.reset(budget_deadline_token)
 
 
 def execute_reservation(

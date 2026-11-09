@@ -61,8 +61,20 @@ class FixedManifest:
     date_end: str = "2026-10-01T00:00:00+00:00"
     stages: tuple[str, ...] = (Stage.DETAILS.value, Stage.COMMENTS.value)
     source_profile: SourceProfile | None = None
+    max_source_requests: int | None = None
+    max_run_seconds: int | None = None
 
     def __post_init__(self):
+        bounded = self.max_source_requests is not None or self.max_run_seconds is not None
+        if bounded and (
+            len(self.posts) != 1
+            or type(self.max_source_requests) is not int
+            or not 1 <= self.max_source_requests <= 20
+            or type(self.max_run_seconds) is not int
+            or not 30 <= self.max_run_seconds <= 300
+            or (self.source_profile is not None and self.source_profile.access_mode != "public")
+        ):
+            raise ValueError("Bounded validation requires one public post, 1-20 requests and 30-300 seconds")
         if (
             not self.source_revision.strip()
             or not self.posts
@@ -98,6 +110,9 @@ class FixedManifest:
         data = asdict(self)
         if self.source_profile is None:
             data.pop("source_profile")  # Preserve existing public manifest hashes.
+        if self.max_source_requests is None and self.max_run_seconds is None:
+            data.pop("max_source_requests")
+            data.pop("max_run_seconds")
         return json.loads(stable_json(data))
 
     @property
