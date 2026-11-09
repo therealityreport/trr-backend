@@ -1,10 +1,52 @@
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
 import trr_backend.repositories.admin_operations as admin_operations
+
+
+def test_finish_interrupted_claim_requires_an_owner_token() -> None:
+    with patch.object(admin_operations.pg, "fetch_one") as fetch:
+        assert admin_operations.finish_interrupted_operation_claim(
+            str(uuid4()), claim_token=None, error_payload={"code": "REMOTE_OPERATION_INTERRUPTED"}
+        ) is None
+    fetch.assert_not_called()
+
+
+def test_finish_interrupted_claim_preserves_terminal_or_reclaimed_operations() -> None:
+    with patch.object(admin_operations.pg, "transaction", return_value=nullcontext()):
+        with patch.object(admin_operations.pg, "fetch_one", return_value=None) as fetch:
+            with patch.object(admin_operations, "append_operation_event") as append:
+                result = admin_operations.finish_interrupted_operation_claim(
+                    str(uuid4()), claim_token="old-owner", error_payload={"code": "REMOTE_OPERATION_INTERRUPTED"}
+                )
+    assert result is None
+    query, params = fetch.call_args.args
+    assert "and claim_token = %s::text" in query
+    assert "and status in ('running', 'cancelling')" in query
+    assert params[-1] == "old-owner"
+    append.assert_not_called()
+
+
+def test_finish_interrupted_claim_records_terminal_event_in_the_transaction() -> None:
+    operation_id = str(uuid4())
+    payload = {"code": "REMOTE_OPERATION_INTERRUPTED", "error_type": "InputCancellation"}
+    row = {"id": operation_id, "status": "failed", "error_payload": payload}
+    with patch.object(admin_operations.pg, "transaction", return_value=nullcontext()) as transaction:
+        with patch.object(admin_operations.pg, "fetch_one", return_value=row):
+            with patch.object(admin_operations, "append_operation_event") as append:
+                result = admin_operations.finish_interrupted_operation_claim(
+                    operation_id, claim_token="owner", error_payload=payload
+                )
+    assert result == row
+    transaction.assert_called_once_with()
+    assert append.call_args.kwargs["event_type"] == "error"
+    assert append.call_args.kwargs["event_payload"]["status"] == "failed"
+    assert append.call_args.kwargs["event_payload"]["error_type"] == "InputCancellation"
 
 
 def test_create_or_attach_operation_attaches_for_same_session_and_workflow() -> None:
@@ -455,6 +497,36 @@ def test_force_cancel_stale_operations_updates_rows_and_emits_terminal_events() 
     assert kwargs["event_type"] == "error"
     assert kwargs["event_payload"]["status"] == "cancelled"
     assert kwargs["event_payload"]["stale_cleanup"] is True
+
+
+def test_stale_cleanup_only_selects_requested_operation_and_preserves_renewed_claim() -> None:
+    selected_id, other_id = str(uuid4()), str(uuid4())
+    selected = {
+        "id": selected_id, "status": "running", "is_stale": True,
+        "stale_reason": "heartbeat_stale", "heartbeat_at": "2026-10-22T07:55:40+00:00",
+        "updated_at": "2026-10-22T07:55:40+00:00", "claim_token": None,
+        "lease_expires_at": None, "claimed_by_worker_id": None, "cancel_requested_at": None,
+    }
+    other = {**selected, "id": other_id}
+    health = {"active_operations": [selected, other], "stale_operations": [selected, other], "updated_at": "now"}
+    with patch.object(admin_operations, "list_active_operations", return_value=[selected, other]):
+        # A heartbeat or claim renewal between selection and update rejects the old snapshot.
+        with patch.object(admin_operations.pg, "fetch_all", return_value=[]) as update:
+            with patch.object(admin_operations, "append_operation_event") as append:
+                with patch.object(admin_operations, "get_admin_operations_health", return_value=health):
+                    result = admin_operations.force_cancel_stale_operations(operation_ids=[selected_id])
+    query, params = update.call_args.args
+    assert params[2] == [selected_id]
+    candidates = json.loads(params[3])
+    assert candidates == [{key: selected[key] for key in (
+        "id", "status", "heartbeat_at", "updated_at", "claim_token",
+        "lease_expires_at", "claimed_by_worker_id", "cancel_requested_at",
+    )}]
+    for key in ("heartbeat_at", "updated_at", "claim_token", "lease_expires_at"):
+        assert f"candidate.{key} is not distinct from core.admin_operations.{key}" in query
+    assert result["cancelled_operations"] == 0
+    assert result["cancelled_operation_ids"] == []
+    append.assert_not_called()
 
 
 def test_force_cancel_stale_operations_ignores_non_stale_requested_ids() -> None:

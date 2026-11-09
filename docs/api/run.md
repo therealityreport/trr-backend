@@ -1,7 +1,7 @@
 # TRR Backend API - Running Guide
 
 This document describes how to run the FastAPI-based TRR Backend API locally and deployment considerations.
-For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
+For the current production-target hosting plan, use [the Modal guide](../deploy/modal.md).
 For backend runtime ownership boundaries, use
 [Backend Runtime Ownership](../../../docs/workspace/backend-runtime-ownership.md).
 
@@ -78,7 +78,7 @@ If `CORS_ALLOW_ORIGINS` is not set, the API allows all origins but disables cred
 When origins are explicitly set:
 - Only listed origins are allowed
 - Credentials are enabled (required for authenticated requests)
-- For the Render cutover, include the exact Vercel Production and Preview origins that should send cookies or auth headers
+- For the Vercel + Modal setup, include the exact Vercel Production and Preview origins that should send cookies or auth headers
 
 ### Better Stack logging (Optional; free tier first is fine)
 
@@ -89,7 +89,7 @@ When origins are explicitly set:
 | `BETTER_STACK_LOG_TIMEOUT_SECONDS` | HTTP timeout for log shipping | `2.0` |
 | `BETTER_STACK_FAILURE_COOLDOWN_SECONDS` | Cooldown after a failed ship attempt | `60` |
 
-When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Render API + Modal jobs` steady state so app logs remain available after the legacy host and ad-hoc log sinks are retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
+When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Vercel app + Modal API and jobs` steady state so app logs remain available after the legacy host and ad-hoc log sinks are retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
 
 ### Object storage (Optional locally, required for media mirroring and uploads)
 
@@ -181,7 +181,7 @@ Admin allowlist
 **CORS guidance**
 
 - TRR App: set `CORS_ALLOW_ORIGINS` in the backend env to the app domain(s) so credentials are allowed.
-- Render target: keep `TRR_API_URL` pointing at the Render service URL for the public backend host while Modal remains the async executor.
+- Production target: set Vercel `TRR_API_URL=https://admin-56995--trr-backend-api.modal.run`. Modal hosts both the public API and asynchronous jobs in `admin-56995` / `main` / `trr-backend-jobs`.
 - Screenalytics: server-to-server calls do not require CORS.
 
 **Example calls**
@@ -211,7 +211,7 @@ python -m pytest tests/ --cov=api --cov-report=term-missing
 
 ## Production Deployment
 
-This guide is for local development. For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
+This guide is for local development. For the current production-target hosting plan, use [the Modal guide](../deploy/modal.md).
 
 ## API Endpoints
 

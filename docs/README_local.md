@@ -81,7 +81,7 @@ The workspace `make dev` path now runs a startup reconcile phase before it launc
 - `scripts/dev/runtime_reconcile_migration_allowlist.txt` is also the decision ledger for new tail migrations: add a plain version line when startup auto-apply is approved, or record `# manual: <version>` when startup should keep blocking until an operator applies it deliberately.
 - Startup will never auto-run `supabase migration repair`, rewrite migration history, or trigger schema-doc generation/checks.
 - Modal is boot-critical in the default profile. Startup may auto-apply named secrets and redeploy `trr_backend.modal_jobs` when readiness fails or the tracked runtime fingerprint changes.
-- Render and Decodo checks are verify-only and surface as advisories in `make status`.
+- Decodo checks are verify-only and surface as advisories in `make status`. Vercel serves the app; Modal hosts the API and jobs. Render is retired.
 
 If startup blocks on remote/local migration history drift, use `docs/runbooks/supabase_migration_history_repair.md` before rerunning `make dev`.
 

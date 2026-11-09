@@ -4,10 +4,10 @@
 
 This runbook covers social ingest queue operations, with Modal as the canonical
 production remote executor and the legacy worker scripts retained for local/dev
-and rollback only. The final public hosting target is Render; Modal remains the
-job plane:
+and rollback only. Vercel serves the application; Modal hosts the public API
+and background jobs:
 
-- Render-hosted backend API readiness
+- Modal-hosted backend API readiness
 - Modal dispatcher readiness (`serve_backend_api` and worker functions)
 - Modal dispatcher heartbeat availability (`social.scrape_workers`)
 - Queue backlog and stuck jobs (`social.scrape_jobs`, `social.scrape_runs`)
@@ -643,16 +643,17 @@ One catalog run can legitimately fan out into multiple classify jobs. Multiple
 queued classify jobs are downstream work from the same run, not proof that the
 operator clicked the backfill button more than once.
 
-After deploy, capture the public backend URL from the readiness output and point
-the deployed TRR-APP runtime at the Render service URL before running admin
-smoke checks. Keep the Modal API URL available only as the rollback target
-during the observation window. In this phase, staging means Vercel Preview and
-production means Vercel Production. `TRR_API_URL` is owned by Vercel env
-configuration, not repo-local `.env` files.
+After deploy, verify the public backend URL from the readiness output before
+running admin smoke checks through Vercel. Production `TRR_API_URL` must be
+`https://admin-56995--trr-backend-api.modal.run` for the `admin-56995` / `main` /
+`trr-backend-jobs` target. Select and verify the intended Modal target separately
+for Vercel Preview. `TRR_API_URL` is owned by Vercel environment configuration,
+not repo-local `.env` files. Keep the prior Modal deployment available for rollback;
+Render is retired and must not receive production traffic.
 
 Full legacy backend retirement is not complete until:
 
-- the Render backend API URL is the canonical `TRR_API_URL` for both Vercel Preview and Vercel Production
+- the intended Modal backend API URL is the canonical `TRR_API_URL` for each Vercel environment
 - covered admin image-analysis jobs no longer depend on the retired legacy host
 - social and non-social background work run only through Modal
 - Better Stack is receiving backend and Modal job logs so centralized log access stays intact

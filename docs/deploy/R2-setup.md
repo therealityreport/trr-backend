@@ -49,7 +49,7 @@ Prefer the R2-native token flow:
 3. Choose `Create Account API token`.
 
 Use an account token, not a user token, for the shared runtime credentials used
-by Render and Modal.
+by the Modal API and job runtimes.
 
 Important:
 
@@ -58,7 +58,7 @@ Important:
   creation.
 - It is not the preferred runtime credential for the app's S3-compatible boto3
   access.
-- Render and Modal should use the Access Key ID and Secret Access Key created
+- The Modal API and job runtimes should use the Access Key ID and Secret Access Key created
   from the R2-native `Manage API tokens` flow.
 
 ### Runtime Token
@@ -75,8 +75,7 @@ Create one long-lived runtime token with:
 
 Use this token for:
 
-- Render API runtime
-- Modal job runtime
+- Modal API and job runtimes
 - presigned upload generation
 - object reads/writes through the S3-compatible API
 
@@ -159,7 +158,7 @@ endpoint for those buckets only.
 4. Configure `media.thereality.report` for `trr-media-prod`.
 5. Sync AWS buckets to R2 with the existing migration scripts.
 6. Verify counts and bytes match.
-7. Set `OBJECT_STORAGE_*` in Render and Modal.
+7. Set `OBJECT_STORAGE_*` in the Modal runtime secrets.
 8. Validate one hosted asset read, one upload, one mirror path, and one
    manifest write.
 9. Freeze AWS buckets to read-only during rollback.
@@ -168,4 +167,4 @@ endpoint for those buckets only.
 ## Related Docs
 
 - [r2_migration.md](/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/r2_migration.md)
-- [render.md](/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md)
+- [modal.md](modal.md)

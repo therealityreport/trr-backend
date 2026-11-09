@@ -49,7 +49,7 @@ before treating this runbook as a recovery plan.
 ## Safety Rules
 
 1. Never run a drill by restoring over the active production project.
-2. Never point shared Render or Vercel runtimes at a restored target until repo
+2. Never point shared Modal or Vercel runtimes at a restored target until repo
    verification passes.
 3. Never commit backup artifacts or secret-bearing connection strings.
 4. Keep backup artifacts under an external operator path such as
@@ -247,7 +247,7 @@ After the restored target passes verification:
 1. Freeze risky writes while env changes are in progress.
 2. Update runtime secrets so both TRR-Backend and TRR-APP use the restored
    target through `TRR_DB_URL` and optional `TRR_DB_FALLBACK_URL`.
-3. Restart or redeploy Render and Vercel so the new DB envs are picked up.
+3. Restart or redeploy Modal and Vercel so the new DB envs are picked up.
 4. Re-run the row-count and `/health` checks against the live runtime.
 5. Record the incident timestamp, restore target, verifier, and follow-up tasks.
 

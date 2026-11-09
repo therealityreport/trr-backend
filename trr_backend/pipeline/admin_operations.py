@@ -595,12 +595,38 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
             retry_delay_seconds=delay,
             max_attempts=_OPERATION_RETRY_MAX_ATTEMPTS,
         )
+    except BaseException as exc:
+        # Modal InputCancellation and asyncio cancellation bypass Exception.
+        # Persist a fenced terminal outcome before finally releases the lease,
+        # then propagate the interruption to preserve the provider's outcome.
+        try:
+            interrupted = admin_operations.finish_interrupted_operation_claim(
+                operation_id,
+                claim_token=claim_token,
+                error_payload={
+                    "stage": "operation",
+                    "operation_id": operation_id,
+                    "code": "REMOTE_OPERATION_INTERRUPTED",
+                    "error": "Remote worker interrupted",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            if interrupted is not None:
+                finalize_sub_operation(operation_id, interrupted["status"])
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to record remote operation interruption: operation_id=%s", operation_id)
+        raise
     finally:
         if heartbeat_stop is not None:
             heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=1.0)
-        admin_operations.release_operation_claim(operation_id, claim_token=claim_token)
+        try:
+            admin_operations.release_operation_claim(operation_id, claim_token=claim_token)
+        except Exception:  # noqa: BLE001
+            # Claim expiry remains the recovery path if cleanup cannot reach the DB.
+            # A cleanup failure must not replace the worker's original interruption.
+            logger.exception("Failed to release remote operation claim: operation_id=%s", operation_id)
 
 
 def claim_and_execute_next_operation(

@@ -784,6 +784,15 @@ def force_cancel_stale_operations(
         if force_selected and normalized_ids
         else "Stale admin operation cancelled by health cleanup policy."
     )
+    # Selection and mutation are separate statements. Fence the mutation to
+    # the observed state so a renewed heartbeat or replacement claim wins.
+    candidate_snapshots = [
+        {key: row.get(key) for key in (
+            "id", "status", "heartbeat_at", "updated_at", "claim_token",
+            "lease_expires_at", "claimed_by_worker_id", "cancel_requested_at",
+        )}
+        for row in target_rows
+    ]
     update_rows = pg.fetch_all(
         f"""
         update core.admin_operations
@@ -799,6 +808,22 @@ def force_cancel_stale_operations(
           progress_payload = coalesce(progress_payload, '{{}}'::jsonb) || %s::jsonb
         where id = any(%s::uuid[])
           and status in ('pending', 'running', 'cancelling')
+          and exists (
+            select 1
+            from jsonb_to_recordset(%s::jsonb) as candidate(
+              id uuid, status text, heartbeat_at timestamptz, updated_at timestamptz,
+              claim_token text, lease_expires_at timestamptz,
+              claimed_by_worker_id text, cancel_requested_at timestamptz
+            )
+            where candidate.id = core.admin_operations.id
+              and candidate.status = core.admin_operations.status
+              and candidate.heartbeat_at is not distinct from core.admin_operations.heartbeat_at
+              and candidate.updated_at is not distinct from core.admin_operations.updated_at
+              and candidate.claim_token is not distinct from core.admin_operations.claim_token
+              and candidate.lease_expires_at is not distinct from core.admin_operations.lease_expires_at
+              and candidate.claimed_by_worker_id is not distinct from core.admin_operations.claimed_by_worker_id
+              and candidate.cancel_requested_at is not distinct from core.admin_operations.cancel_requested_at
+          )
         returning
           {_OPERATION_COLUMNS}
         """,
@@ -820,6 +845,7 @@ def force_cancel_stale_operations(
                 }
             ),
             stale_ids,
+            _to_json(candidate_snapshots),
         ],
     )
     cancelled_ids: list[str] = []
@@ -1069,6 +1095,48 @@ def heartbeat_operation_claim(
         [safe_lease_seconds, operation_id, token, token],
     )
     return bool(row)
+
+
+def finish_interrupted_operation_claim(
+    operation_id: str,
+    *,
+    claim_token: str | None,
+    error_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Record an interrupted worker's terminal outcome only while it owns the claim."""
+    token = _clean_text(claim_token)
+    if token is None:
+        return None
+    with pg.transaction():
+        row = pg.fetch_one(
+            f"""
+            update core.admin_operations
+            set
+              status = case when cancel_requested_at is not null or status = 'cancelling'
+                then 'cancelled' else 'failed' end,
+              completed_at = coalesce(completed_at, now()),
+              error_payload = coalesce(error_payload, '{{}}'::jsonb) || %s::jsonb,
+              progress_payload = coalesce(progress_payload, '{{}}'::jsonb) || %s::jsonb,
+              claimed_by_worker_id = null,
+              claim_token = null,
+              lease_expires_at = null,
+              next_retry_at = null,
+              heartbeat_at = now()
+            where id = %s::uuid
+              and status in ('running', 'cancelling')
+              and claim_token = %s::text
+            returning {_OPERATION_COLUMNS}
+            """,
+            [_to_json(error_payload), _to_json(error_payload), operation_id, token],
+        )
+        operation = _normalize_operation(row)
+        if operation is not None:
+            append_operation_event(
+                operation_id,
+                event_type="error",
+                event_payload={**error_payload, "operation_id": operation_id, "status": operation["status"]},
+            )
+    return operation
 
 
 def release_operation_claim(
