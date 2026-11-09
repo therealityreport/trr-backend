@@ -1614,7 +1614,8 @@ def probe_instagram_comments_auth(
     strict_authenticated: bool = False,
 ) -> dict[str, object]:
     strict_authenticated = bool(strict_authenticated)
-    if _instagram_public_first_mode_enabled() and not strict_authenticated:
+    public_only = str(os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE") or "").strip().lower() == "public"
+    if public_only or (_instagram_public_first_mode_enabled() and not strict_authenticated):
         return {
             "platform": "instagram",
             "account_handle": str(account_handle or "").strip().lower().lstrip("@"),
@@ -1630,8 +1631,14 @@ def probe_instagram_comments_auth(
             "proxy_state": "none",
             "auth_probe_skipped": True,
             "auth_required_for_hidden_comments": True,
-            "comments_auth_blocker": "strict_authenticated_probe_not_requested",
-            "operator_action": "Run a strict Instagram comments auth probe before launching hidden-comments recovery.",
+            "comments_auth_blocker": "public_only_policy"
+            if public_only
+            else "strict_authenticated_probe_not_requested",
+            "operator_action": (
+                "Instagram sign-in is disabled by the public-only policy."
+                if public_only
+                else "Run a strict Instagram comments auth probe before launching hidden-comments recovery."
+            ),
             "fallback_policy": {
                 "auth_fallback": "requires_approval",
                 "proxy_fallback": "requires_approval",
