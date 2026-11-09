@@ -298,8 +298,13 @@ def _require_exclusive_cursor(cur, own_run_id):
             union all
             select 'uncertain_dispatch' from social.instagram_ingestion_dispatches d
             join social.instagram_ingestion_targets t using(run_id,stage,target_key)
+            join social.instagram_ingestion_runs r using(run_id)
             where d.run_id is distinct from %s::uuid and t.outcome='unresolved'
-                and d.state in ('reserved','sending','accepted') limit 1""",
+                and d.state in ('reserved','sending','accepted')
+                and not (r.state='cancelled' and d.generation<r.generation
+                    and greatest(d.updated_at,r.updated_at)<=clock_timestamp()-interval '600 seconds'
+                    and exists(select 1 from social.instagram_ingestion_receipts x
+                        where x.run_id=d.run_id and x.owner_token=d.owner_token)) limit 1""",
         (own_run_id, own_run_id, own_run_id),
     )
     if other:
