@@ -32,6 +32,7 @@ from urllib3.util.retry import Retry
 import trr_backend.socials.instagram.cookie_refresh_runtime as cookie_refresh_runtime
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 from trr_backend.socials.instagram.auth_session_context import get_current_instagram_auth_session
+from trr_backend.socials.instagram.comment_counts import observations_from_raw
 from trr_backend.socials.instagram.constants import (
     COMMENT_REPLIES_URL as IG_COMMENT_REPLIES_URL,
 )
@@ -427,6 +428,8 @@ class InstagramPost:
     video_duration: float | None = None
     child_posts_data: list[dict[str, Any]] = field(default_factory=list)
     detail_snapshot: dict[str, Any] = field(default_factory=dict)
+    comment_count_observations: dict[str, Any] = field(default_factory=dict)
+    comment_count_observation_conflicts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -3074,6 +3077,7 @@ class InstagramScraper:
             audio_url=extras.get("audio_url"),
             video_duration=extras.get("video_duration"),
             child_posts_data=self._extract_child_posts_data(node),
+            comment_count_observations=observations_from_raw(node, observed_at=datetime.now(UTC)),
             detail_snapshot={
                 "version": 1,
                 "source": "instagram_response",

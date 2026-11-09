@@ -12,6 +12,80 @@ Plan reference: `/Users/thomashulihan/Projects/TRR/docs/codex/plans/2026-04-28-i
 - Raw payloads, raw observation snapshots, `raw_data`, `about_raw`, `normalized_payload`, and legacy refs are excluded from client responses.
 - `latestComments`, `firstComment`, and embedded comment snippets are excluded from all response examples and must not be exposed as saved comments or coverage counts.
 
+## Additive comment count contract (version 1)
+
+`trr_backend/socials/instagram/comment_counts.py` owns the maintained
+`InstagramCommentCounts` and `InstagramCommentCountsSummary` models. This source
+contract does not establish deployment or live acceptance.
+
+Instagram profile post lists, catalog lists/details, selected-post comments,
+season/week post rows and the post-comments modal add `comment_counts`:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | `1`. Legacy count, run-progress and completeness fields retain their existing meanings. |
+| `post_reported_count` | Nullable actual engagement count from an individual Instagram post-details response. |
+| `instagram_saved_count` | Unique active Instagram comment records, including replies, resolved by post shortcode. Facebook crosspost rows are excluded. |
+| `instagram_saved_top_level_count` | Active records with known top-level topology. |
+| `instagram_saved_reply_count` | Active records with reply flags, parent references or positive reply depth. |
+| `instagram_saved_unclassified_count` | Active records without sufficient topology to classify as top-level or reply. |
+| `instagram_marked_missing_count` | Unique retained records currently marked missing; excluded from the active saved count. |
+| `facebook_count_observed_on_instagram` | Nullable `fb_comment_count` observed in an Instagram response, including the retained `facebook_crosspost` adapter produced from that source field. This is not a count of comments collected directly from Facebook. |
+| `threads_count_observed_on_instagram` | `null`. No supported extraction evidence establishes this number. |
+| `post_minus_saved_difference` | Signed `post_reported_count - instagram_saved_count`, or `null` if either operand is unknown. This is a comparison, not a verified missing-comment total. |
+| `inventory_status` | `available` after a successful canonical inventory query; otherwise `unavailable`. |
+| `inventory_observed_at` | One ISO timestamp shared by all counts from the successful inventory query; `null` when unavailable. |
+| `observations` | Source observations for the post, Facebook and Threads values. |
+| `observation_conflicts` | Safe retained observations that disagree with the selected observation, including disagreements within one response. |
+
+All inventory values are nullable when the inventory query is unavailable. A
+successful query with no matching records establishes zero. Neither an embedded
+preview array nor a run counter is used to calculate inventory.
+
+Each observation has `value`, `status` (`observed` or `unknown`), `source`,
+`source_field`, `source_surface`, `observed_at`, `evidence_reference`,
+`observed_in_latest_response` and `unknown_reason`. Evidence references contain
+safe retained-payload field references, not raw source payloads or credentials.
+The post observation requires explicit `instagram_post_details` provenance and
+an original `comment_count`, `commentsCount` or `edge_media_to_comment.count`
+field. Historical catalog/timeline counts, parent/preview edge counts, serialized
+DTO `comments`, and a generic `detail_snapshot.comments_present` flag do not
+establish that provenance. Missing and invalid observations remain unknown.
+
+New observations and conflicting evidence use existing JSON storage:
+`raw_data.comment_count_observations` and
+`raw_data.comment_count_observation_conflicts`. An omitted field preserves the
+prior valid observation and its exact timestamp, with
+`observed_in_latest_response=false`. The read model does not rewrite historical
+records, missing flags, recovery holds or certificates.
+
+Profile summaries add `comment_counts` with `version`, deduplicated `posts_count`,
+the same inventory fields/status/timestamp, and
+`post_minus_saved_difference_known_subtotal`. For each prefix `post_reported`,
+`facebook` and `threads`, the summary provides `*_known_subtotal`,
+`*_known_posts_count` and `*_unknown_posts_count`. A known subtotal is not an
+assertion that every post has a known count. Signed differences sum only posts
+with both operands known.
+
+Summary cards use `posts_with_reported_comments_count`,
+`posts_reporting_zero_comments_count`, `reported_count_unknown_posts_count`
+(an alias of `post_reported_unknown_posts_count`), and
+`posts_with_reported_comments_but_no_saved_records_count`. The last field is
+nullable when inventory is unavailable. It counts positive reported totals with
+exactly zero active saved records; it does not estimate incomplete collection.
+
+Profile post queries accept additive `comment_filter` values
+`reported_positive`, `reported_zero`, `reported_unknown` and `count_difference`.
+`count_difference` selects a known nonzero signed difference. Additive `sort_by`
+values `post_reported_count`, `instagram_saved_count` and `count_difference` use
+the same contract semantics; unknown values sort last in either direction.
+Legacy filter and sort keys retain their previous behavior.
+
+Models can export JSON Schema with `model_json_schema()` for app type
+generation. `contract_smoke()` is a pure importable deployment check for version,
+unknown, zero and signed-difference behavior; it makes no database writes or
+source requests.
+
 ## Existing Routes To Modify
 
 These routes already exist in `api/routers/socials.py` and should be expanded additively when Phase 5 implementation starts:

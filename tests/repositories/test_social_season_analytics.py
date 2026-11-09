@@ -17552,7 +17552,18 @@ def test_get_social_account_profile_summary_uses_shared_instagram_detail_rollup(
     monkeypatch.setattr(social_repo, "_social_account_profile_grouped_counts", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(social_repo, "_avatar_registry_lookup_any", lambda **_kwargs: {})
 
+    from trr_backend.socials.instagram import comment_counts
+
+    count_contract = {"version": 1, "posts_count": 12, "post_reported_unknown_posts_count": 12}
+
+    def _fake_count_summary(account_handle, *, conn=None):
+        assert account_handle == "bravotv"
+        assert conn is summary_conn
+        return count_contract
+
+    monkeypatch.setattr(comment_counts, "profile_summary", _fake_count_summary)
     payload = social_repo.get_social_account_profile_summary("instagram", "bravotv")
+    assert payload["comment_counts"] is count_contract
 
     assert payload["catalog_total_posts"] == 12
     assert payload["catalog_assigned_posts"] == 7

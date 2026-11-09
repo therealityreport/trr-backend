@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from trr_backend.socials.instagram import comment_counts as _comment_counts
 from trr_backend.socials.provider_registry import (
     LateNamespaceProvider,
     publish_mapping_slot,
@@ -263,6 +264,7 @@ if TYPE_CHECKING:
         account_handle: str,
         *,
         search: str | None = None,
+        source_ids: Sequence[str] | None = None,
         limit: int | None = None,
         posted_since: datetime | None = None,
         collaborator_posted_since: datetime | None = None,
@@ -1905,6 +1907,7 @@ def _social_account_profile_post_item(
         facebook_crosspost_observed_at=row.get("facebook_crosspost_observed_at"),
         facebook_crosspost_source=row.get("facebook_crosspost_source"),
     )
+    payload["comment_counts"] = row.get("comment_counts") or _comment_counts.build_comment_counts(row)
     payload["saved_comments"] = breakdown["saved_instagram_comments"]
     payload["comment_breakdown"] = breakdown
     payload["comment_completeness"] = instagram_comment_completeness_from_breakdown(breakdown)
@@ -2545,6 +2548,8 @@ def get_social_account_profile_summary(
                 "media_coverage": media_coverage,
                 **identity_fields,
             }
+            if normalized_platform == "instagram":
+                payload["comment_counts"] = _comment_counts.profile_summary(normalized_account, conn=summary_conn)
         return payload
     finally:
         _log_social_profile_perf(
@@ -2581,7 +2586,32 @@ def get_social_account_profile_posts(
             normalized_comment_filter = _normalize_social_account_profile_comment_filter(comment_filter)
             normalized_sort_by = _normalize_social_account_profile_post_sort_by(sort_by)
             normalized_sort_dir = _normalize_social_account_profile_post_sort_dir(sort_dir)
-        if normalized_platform == "instagram" and comments_only and normalized_search is None:
+        if normalized_platform == "instagram" and normalized_comment_filter in {
+            "reported_positive", "reported_zero", "reported_unknown", "count_difference"
+        }:
+            comments_only = True
+        canonical_counts_request = normalized_platform == "instagram" and (
+            normalized_comment_filter in {"reported_positive", "reported_zero", "reported_unknown", "count_difference"}
+            or requested_sort_by in {"post_reported_count", "instagram_saved_count", "count_difference"}
+        )
+        if canonical_counts_request:
+            with _social_account_profile_summary_connection("social-profile-canonical-counts") as read_conn:
+                _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
+                search_where_sql, search_params = _instagram_profile_posts_page_search_where_sql(
+                    normalized_search, alias="d"
+                )
+                source_ids, total = _comment_counts.profile_post_keys(
+                    normalized_account, page=safe_page, page_size=safe_page_size,
+                    comment_filter=normalized_comment_filter, sort_by=normalized_sort_by,
+                    sort_dir=normalized_sort_dir, search_where_sql=search_where_sql,
+                    search_params=search_params, conn=read_conn,
+                )
+                rows = _instagram_social_account_profile_dataset_rows(
+                    normalized_account, source_ids=source_ids, sort_by="created", sort_dir="desc", conn=read_conn,
+                ) if source_ids else []
+                rows_by_source = {str(row.get("source_id") or row.get("shortcode") or ""): row for row in rows}
+                rows = [rows_by_source[key] for key in source_ids if key in rows_by_source]
+        elif normalized_platform == "instagram" and comments_only and normalized_search is None:
             with _social_account_profile_summary_connection(
                 "social-profile-posts-instagram-comments-only"
             ) as read_conn:
@@ -2639,7 +2669,13 @@ def get_social_account_profile_posts(
                     }
                 try:
                     with _social_profile_perf_span(breakdown, "fetch_rows"):
-                        if normalized_search is None and requested_sort_by is None:
+                        if requested_sort_by in {"count_difference", "post_reported_count", "instagram_saved_count"}:
+                            rows, total = _fetch_instagram_profile_rows_page(
+                                normalized_account, page=safe_page, page_size=safe_page_size,
+                                search=normalized_search, sort_by=normalized_sort_by,
+                                sort_dir=normalized_sort_dir, conn=read_conn,
+                            )
+                        elif normalized_search is None and requested_sort_by is None:
                             rows, total = _fetch_instagram_profile_rows_page_no_search_created(
                                 normalized_account,
                                 page=safe_page,
@@ -2708,6 +2744,13 @@ def get_social_account_profile_posts(
                     offset=(safe_page - 1) * safe_page_size,
                     search=normalized_search,
                 )
+        if normalized_platform == "instagram":
+            contracts = (
+                {str(row.get("source_id") or row.get("shortcode") or ""): row["comment_counts"] for row in rows}
+                if all(row.get("comment_counts") for row in rows) else _comment_counts.counts_for_posts(rows)
+            )
+            rows = [dict(row, comment_counts=contracts.get(str(row.get("source_id") or row.get("shortcode") or "")))
+                    for row in rows]
         with _social_profile_perf_span(breakdown, "build_items"):
             known_handle_identity_index = _build_social_account_profile_known_handle_identity_index(
                 normalized_platform,
@@ -3477,6 +3520,12 @@ def get_social_account_profile_comments(
                         breakdown_row,
                         facebook_comments=facebook_comments,
                     )
+                    post_rows = _comment_counts.load_post_rows([normalized_post_source_id], conn=read_conn)
+                    contracts = _comment_counts.counts_for_posts(
+                        [post_rows.get(normalized_post_source_id) or {"source_id": normalized_post_source_id}],
+                        conn=read_conn
+                    )
+                    payload["comment_counts"] = contracts.get(normalized_post_source_id)
                     payload["pagination_mode"] = "parent_threads"
         return payload
     finally:

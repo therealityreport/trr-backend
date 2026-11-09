@@ -183,8 +183,14 @@ LEGACY_SOURCE_SCOPE_ALIASES = _source_scopes.LEGACY_SOURCE_SCOPE_ALIASES
 normalize_source_scope = _source_scopes.normalize_source_scope
 _normalize_source_scope_input = _source_scopes.normalize_source_scope_input
 _source_scope_is_network_family = _source_scopes.source_scope_is_network_family
-SOCIAL_ACCOUNT_PROFILE_COMMENT_FILTERS = {"commentable", "incomplete", "not_commentable"}
+SOCIAL_ACCOUNT_PROFILE_COMMENT_FILTERS = {
+    "commentable", "incomplete", "not_commentable",
+    "reported_positive", "reported_zero", "reported_unknown", "count_difference",
+}
 SOCIAL_ACCOUNT_PROFILE_POST_SORT_FIELDS = {
+    "post_reported_count",
+    "instagram_saved_count",
+    "count_difference",
     "post",
     "created",
     "caption",
@@ -25723,6 +25729,10 @@ def _ingest_instagram(
                             post_payload = scraper.fetch_post_info(shortcode, delay=post_delay_seconds)
                             node = _extract_instagram_post_detail_node(post_payload)
                             parsed_post = scraper._parse_post_node(node, detail_config) if node else None  # noqa: SLF001
+                            if parsed_post is not None:
+                                from trr_backend.socials.instagram.comment_counts import capture_detail_observations
+
+                                capture_detail_observations(parsed_post, node, observed_at=_now_utc())
                     if parsed_post is not None:
                         now_utc = _now_utc()
                         try:
@@ -52530,6 +52540,9 @@ def _week_detail_instagram(
         for row in comment_rows:
             comments_by_post[row["post_id"]].append(row)
 
+    from trr_backend.socials.instagram.comment_counts import counts_for_posts
+
+    count_contracts = counts_for_posts(posts)
     result_posts = []
     total_engagement = 0
     total_comments_count = 0
@@ -52620,6 +52633,7 @@ def _week_detail_instagram(
             {
                 **{
                     "source_id": p["source_id"],
+                    "comment_counts": count_contracts.get(str(p["source_id"])),
                     "author": p["author"] or "",
                     "text": p.get("text") or "",
                     "url": instagram_post_permalink(
@@ -56959,6 +56973,19 @@ def _sort_social_account_profile_post_rows(
 ) -> list[dict[str, Any]]:
     normalized_sort_by = _normalize_social_account_profile_post_sort_by(sort_by)
     normalized_sort_dir = _normalize_social_account_profile_post_sort_dir(sort_dir)
+    if normalized_sort_by in {"count_difference", "post_reported_count", "instagram_saved_count"}:
+        from trr_backend.socials.instagram.comment_counts import build_comment_counts
+
+        known, unknown = [], []
+        for source_row in rows:
+            row = dict(source_row)
+            contract = row.get("comment_counts") or build_comment_counts(row)
+            metric = "post_minus_saved_difference" if normalized_sort_by == "count_difference" else normalized_sort_by
+            difference = contract.get(metric)
+            (unknown if difference is None else known).append((row, difference))
+        known.sort(key=lambda item: (item[1], str(item[0].get("source_id") or "")),
+                   reverse=normalized_sort_dir == "desc")
+        return [row for row, _ in known] + [row for row, _ in unknown]
     return sorted(
         (dict(row) for row in rows),
         key=lambda row: (
@@ -57648,6 +57675,7 @@ def _instagram_social_account_profile_dataset_rows(
     account_handle: str,
     *,
     search: str | None = None,
+    source_ids: Sequence[str] | None = None,
     limit: int | None = None,
     posted_since: datetime | None = None,
     collaborator_posted_since: datetime | None = None,
@@ -57663,7 +57691,7 @@ def _instagram_social_account_profile_dataset_rows(
 
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     fetch_limit = max(1, int(limit)) if limit is not None else None
-    source_kwargs: dict[str, Any] = {}
+    source_kwargs: dict[str, Any] = {"source_ids": list(source_ids)} if source_ids is not None else {}
     if search and comments_only and fetch_limit is None:
         candidate_rows = []
         for loader, args, projection, surface, mode, priority, since in (
@@ -57814,6 +57842,9 @@ def _instagram_social_account_profile_dataset_rows(
                 "instagram",
                 conn=conn,
             )
+    from trr_backend.socials.instagram.comment_counts import counts_for_posts
+
+    count_contracts = counts_for_posts(dataset_rows, conn=conn)
     normalized_comment_filter = _normalize_social_account_profile_comment_filter(comment_filter)
     enriched_rows: list[dict[str, Any]] = []
     for row in dataset_rows:
@@ -57831,10 +57862,22 @@ def _instagram_social_account_profile_dataset_rows(
                 comment_breakdown.get("classified_missing_comments")
             )
         normalized_row["saved_comments"] = _normalize_non_negative_int(saved_comment_counts.get(row_id, 0))
+        normalized_row["comment_counts"] = count_contracts.get(str(row.get("source_id") or row.get("shortcode") or ""))
         if comments_only:
             reported_comments = _normalize_non_negative_int(normalized_row.get("comments_count"))
             saved_comments = _normalize_non_negative_int(normalized_row.get("saved_comments"))
-            if normalized_comment_filter == "commentable":
+            contract = normalized_row["comment_counts"] or {}
+            observed = contract.get("post_reported_count")
+            difference = contract.get("post_minus_saved_difference")
+            if normalized_comment_filter == "reported_positive":
+                include = observed is not None and observed > 0
+            elif normalized_comment_filter == "reported_zero":
+                include = observed == 0
+            elif normalized_comment_filter == "reported_unknown":
+                include = observed is None
+            elif normalized_comment_filter == "count_difference":
+                include = difference is not None and difference != 0
+            elif normalized_comment_filter == "commentable":
                 include = reported_comments > 0
             elif normalized_comment_filter == "not_commentable":
                 include = reported_comments == 0
@@ -57906,6 +57949,8 @@ def _comments_only_profile_order_by_sql(
             "greatest(coalesce(filtered_rows.saved_comments, 0), 0), 0)"
         )
     )
+    from trr_backend.socials.instagram.comment_counts import reported_count_sql, saved_count_sql
+
     sort_expressions = {
         "post": "lower(nullif(filtered_rows.source_id, ''))",
         "created": "filtered_rows.posted_at",
@@ -57916,6 +57961,12 @@ def _comments_only_profile_order_by_sql(
         "post_total": "greatest(coalesce(filtered_rows.comments_count, 0), 0)",
         "saved_comments": "greatest(coalesce(filtered_rows.saved_comments, 0), 0)",
         "missing_comments": missing_comments_expr,
+        "post_reported_count": reported_count_sql("filtered_rows.raw_data"),
+        "instagram_saved_count": saved_count_sql("filtered_rows.source_id"),
+        "count_difference": (
+            f"({reported_count_sql('filtered_rows.raw_data')} - "
+            f"{saved_count_sql('filtered_rows.source_id')})"
+        ),
         "likes": "greatest(coalesce(filtered_rows.likes, 0), 0)",
     }
     primary = sort_expressions[normalized_sort_by]
@@ -57935,6 +57986,18 @@ def _comments_only_profile_filter_where_sql(
     accounted_comments_sql: str | None = None,
     reported_comments_is_normalized: bool = False,
 ) -> str:
+    if comment_filter in {"reported_positive", "reported_zero", "reported_unknown", "count_difference"}:
+        from trr_backend.socials.instagram.comment_counts import reported_count_sql, saved_count_sql
+
+        alias = reported_comments_sql.split(".")[0]
+        observed = reported_count_sql(f"{alias}.raw_data")
+        if comment_filter == "reported_unknown":
+            return f"({observed}) is null"
+        if comment_filter == "reported_positive":
+            return f"({observed}) > 0"
+        if comment_filter == "reported_zero":
+            return f"({observed}) = 0"
+        return f"({observed}) <> {saved_count_sql(f'{alias}.source_id')}"
     reported_comments = (
         str(reported_comments_sql)
         if reported_comments_is_normalized
@@ -61421,6 +61484,11 @@ def get_social_account_catalog_posts(
             statuses=statuses,
             conn=read_conn,
         )
+    if normalized_platform == "instagram":
+        from trr_backend.socials.instagram.comment_counts import counts_for_posts
+
+        contracts = counts_for_posts(rows)
+        rows = [dict(row, comment_counts=contracts.get(str(row.get("source_id") or ""))) for row in rows]
     return {
         "items": [
             _social_account_profile_post_item(
@@ -61429,6 +61497,7 @@ def get_social_account_catalog_posts(
                 account_handle=normalized_account,
             )
             | {
+                **({"comment_counts": row.get("comment_counts")} if normalized_platform == "instagram" else {}),
                 "assignment_status": str(row.get("assignment_status") or "unassigned"),
                 "assignment_source": str(row.get("assignment_source") or "") or None,
                 "candidate_matches": list(row.get("candidate_matches") or []),
@@ -61824,6 +61893,11 @@ def get_social_account_catalog_post_detail(
         "hosted_profile_pic_url": str(merged_row.get("hosted_owner_profile_pic_url") or "").strip() or None,
         "is_verified": merged_row.get("owner_is_verified"),
     }
+    from trr_backend.socials.instagram.comment_counts import counts_for_posts
+
+    count_contract = (detail_payload or {}).get("comment_counts") or counts_for_posts([merged_row], conn=conn).get(
+        normalized_source_id
+    )
     saved_metrics = {**metrics, "saved_comments": saved_comments}
     assignment = _metadata_dict(catalog_row)
     payload = {
@@ -61897,6 +61971,7 @@ def get_social_account_catalog_post_detail(
         "stats": metrics,
         "saved_metrics": saved_metrics,
         "saved_comments": saved_comments,
+        "comment_counts": count_contract,
         "facebook_crosspost": facebook_crosspost,
         "comment_completeness": comment_completeness,
         "hashtags": hashtags,
