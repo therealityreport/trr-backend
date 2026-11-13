@@ -12,8 +12,6 @@ from dotenv import dotenv_values
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-RENDER_BLUEPRINT_PATH = REPO_ROOT / "render.yaml"
-RENDER_DOC_PATH = REPO_ROOT / "docs" / "deploy" / "render.md"
 SOURCE_ENV_PATH = REPO_ROOT / ".env"
 DECODO_USAGE_API_TOKEN_KEYS = ("DECODO_API_TOKEN", "DECODO_AUTH_TOKEN")
 
@@ -64,21 +62,6 @@ def _configured_decodo_usage_api_sources() -> list[str]:
     return sources
 
 
-def verify_render_contract() -> dict[str, Any]:
-    component = default_component(verify_only=True)
-    blueprint_text = RENDER_BLUEPRINT_PATH.read_text(encoding="utf-8")
-    doc_text = RENDER_DOC_PATH.read_text(encoding="utf-8")
-    required_blueprint_markers = ("runtime: docker", "healthCheckPath: /health", "autoDeploy: false")
-    required_doc_markers = ("public FastAPI host on Render", "long-running and admin execution on Modal")
-    missing = [marker for marker in required_blueprint_markers if marker not in blueprint_text]
-    missing.extend(marker for marker in required_doc_markers if marker not in doc_text)
-    if missing:
-        component["state"] = "advisory"
-        component["reason"] = "render_contract_mismatch"
-        component["remediation"] = "Render blueprint/docs drift detected: " + ", ".join(missing)
-    return component
-
-
 def verify_decodo_contract() -> dict[str, Any]:
     component = default_component(verify_only=True)
     proxy_url = _resolve_env_value("DECODO_PROXY_URL")
@@ -114,14 +97,10 @@ def verify_decodo_contract() -> dict[str, Any]:
 
 
 def verify_external_runtime_contracts() -> dict[str, Any]:
-    render = verify_render_contract()
     decodo = verify_decodo_contract()
-    state = "advisory" if "advisory" in {render["state"], decodo["state"]} else "ok"
-    reason_parts = [component["reason"] for component in (render, decodo) if component.get("reason")]
     return {
-        "state": state,
-        "reason": ",".join(reason_parts) if reason_parts else None,
-        "render": render,
+        "state": decodo["state"],
+        "reason": decodo.get("reason"),
         "decodo": decodo,
     }
 

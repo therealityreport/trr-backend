@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from trr_backend.socials.instagram import comment_counts as _comment_counts
 from trr_backend.socials.provider_registry import LateNamespaceProvider, register_legacy_patchable_namespace
 from trr_backend.socials.tiktok.analytics.reads import (
     get_tiktok_cast_members,
@@ -2498,6 +2499,9 @@ def get_post_comments(
                 "views": post["views"],
                 "engagement": engagement,
             },
+            "comment_counts": _comment_counts.counts_for_posts([
+                {**post, "source_id": source_id}
+            ]).get(source_id),
             "total_comments_in_db": len(comments),
             "comments": [_serialize_comment_tree(node) for node in _thread_comments(comments)],
         }

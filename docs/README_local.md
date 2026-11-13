@@ -12,7 +12,9 @@ Supabase-first data pipeline and API for reality TV show/cast metadata.
 
 Python 3.11+ is required.
 
-- Workspace policy contract: `AGENTS.md` is canonical for each repo entrypoint, only `/Users/thomashulihan/Projects/TRR/CLAUDE.md`, `/Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md`, and `/Users/thomashulihan/Projects/TRR/TRR-APP/CLAUDE.md` are validated symlink entrypoints to their matching `AGENTS.md` files, and `/Users/thomashulihan/Projects/TRR/TRR Workspace Brain/CLAUDE.md`, `/Users/thomashulihan/Projects/TRR/TRR-Backend/TRR Backend Brain/CLAUDE.md`, and `/Users/thomashulihan/Projects/TRR/TRR-APP/TRR App Brain/CLAUDE.md` are outside `scripts/check-policy.sh`.
+- Workspace policy lives in each project entrypoint's `AGENTS.md`. Do not create
+  project `CLAUDE.md` links; the shared user-level instructions own the only
+  required Claude symlink at `~/.claude/CLAUDE.md`.
 
 1. **Create venv + install deps**
    ```bash
@@ -81,7 +83,7 @@ The workspace `make dev` path now runs a startup reconcile phase before it launc
 - `scripts/dev/runtime_reconcile_migration_allowlist.txt` is also the decision ledger for new tail migrations: add a plain version line when startup auto-apply is approved, or record `# manual: <version>` when startup should keep blocking until an operator applies it deliberately.
 - Startup will never auto-run `supabase migration repair`, rewrite migration history, or trigger schema-doc generation/checks.
 - Modal is boot-critical in the default profile. Startup may auto-apply named secrets and redeploy `trr_backend.modal_jobs` when readiness fails or the tracked runtime fingerprint changes.
-- Render and Decodo checks are verify-only and surface as advisories in `make status`.
+- Decodo checks are verify-only and surface as advisories in `make status`. Vercel serves the app; Modal hosts the API and jobs. Render is retired.
 
 If startup blocks on remote/local migration history drift, use `docs/runbooks/supabase_migration_history_repair.md` before rerunning `make dev`.
 

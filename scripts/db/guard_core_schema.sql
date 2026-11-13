@@ -12,6 +12,8 @@
 --   cat scripts/db/guard_core_schema.sql your_script.sql | psql "${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-$DATABASE_URL}}"
 -- =============================================================================
 
+\set ON_ERROR_STOP on
+
 -- Fail fast if core schema doesn't exist
 do $$
 begin

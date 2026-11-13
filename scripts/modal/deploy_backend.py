@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.modal.api_canary import DEFAULT_CANARY_TIMEOUT_SECONDS, run_api_cold_start_canary
+from trr_backend.modal_runtime_config import validate_maintenance_deployment
 
 DEFAULT_APP_REF = "trr_backend.modal_jobs"
 DEFAULT_APP_NAME = "trr-backend-jobs"
@@ -35,6 +36,8 @@ MODAL_OWNERSHIP_ENV_KEYS = frozenset(
         "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED",
         "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED",
         "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED",
+        "TRR_MODAL_API_MIN_CONTAINERS",
+        "TRR_MODAL_API_MAX_CONTAINERS",
     }
 )
 DEFAULT_HISTORY_LIMIT = 5
@@ -370,6 +373,11 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr, flush=True)
         return 2
     env = pinned_modal_env()
+    try:
+        env.update(validate_maintenance_deployment(env))
+    except RuntimeError as exc:
+        print(f"Modal deploy blocked: {exc}", file=sys.stderr, flush=True)
+        return 2
     context = verify_required_workspace(env=env)
     command = build_deploy_command(args)
     print(
@@ -386,6 +394,14 @@ def main(argv: list[str] | None = None) -> int:
         return int(completed.returncode)
     try:
         readiness = verify_deployed_readiness(args, env=env)
+        maintenance_check = subprocess.run(
+            [python_command(), str(REPO_ROOT / "scripts/modal/verify_maintenance_schedule.py"), "--env", args.env],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+        )
+        if maintenance_check.returncode:
+            raise RuntimeError("Deployed maintenance ownership/schedule verification failed.")
         canary = dict(readiness.get("api_canary") or {})
         if canary.get("ok") is not True:
             canary = run_api_cold_start_canary(

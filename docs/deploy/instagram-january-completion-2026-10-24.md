@@ -295,7 +295,7 @@ another Cloudflare account and cannot mutate the TRR account; those resources
 were left untouched.
 
 Private manifests, binding proof, test/operator receipts, deployment and handover
-records: `~/.codex/tmp/trr-instagram-speed-01a16b47/january-completion/`.
+records: `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-speed-01a16b47/january-completion/`.
 Deployment and current progress are appended after provider/local verification.
 
 TRR-APP build: not applicable (backend-only/internal worker contracts). No schema
@@ -891,7 +891,7 @@ Source ownership: recovery helper owns comment_recovery.py/local_worker.py and
 its admission tests; branch helper owns comments.py/comment_transport.py/
 composition.py/reply failure scheduling/fetcher and targeted tests; lead owns
 hosted reader/client tests, integration, release/control and this record.
-Evidence base: `~/.codex/tmp/trr-instagram-20261025-01a171e0/`. Investigation
+Evidence base: `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-20261025-01a171e0/`. Investigation
 records are sibling `trr-instagram-20261025-r2` and `trr-instagram-20261025-stall`.
 
 Passing source evidence so far:60 recovery/worker cases plus2 strengthened
@@ -955,7 +955,7 @@ owns productive continuations, subsequent guarded recovery and certification.
 The two retained runnable copies are current v159 and rollback v158. Twenty-one
 superseded inactive runnable packages were moved to actual Trash with exact source
 verification and recovery mappings; original task evidence and saved data remain.
-Evidence base: `~/.codex/tmp/trr-instagram-20261025-01a171e0/`, including manifests,
+Evidence base: `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-20261025-01a171e0/`, including manifests,
 review acceptance, deployment/readiness/cloud smoke, activation preimages,
 installed qualification, exact diagnostic journal and preservation receipts.
 Backend/source checks and the live repaired path pass. One existing media-cache
@@ -1122,7 +1122,7 @@ closed and no native request or database connection was made by that smoke.
 Separate local-package validation verified 2734 files/1040 runtime entries.
 The local handover installed the same candidate; timers and source policy stayed
 unchanged. Deployment, source and private operator receipts are retained under
-trr-instagram-20261025-01a171e0/heartbeat-rollout.
+`~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-20261025-01a171e0/heartbeat-rollout/`.
 
 The coherent 09:41:53 watchdog sample shows the next heartbeat query started
 2.451584s after the previous completion; it had been in flight only 0.074125s
@@ -1839,7 +1839,7 @@ process/dependency checks; current plus rollback are retained.
 No full-history/resume-tail release, authenticated fallback, scheduled task, SQL
 migration, app production deployment, or hosted-byte completeness claim occurred.
 Final bounded-run outcome, certification and native-service restoration follow
-below. Private evidence: `~/.codex/tmp/ig-reliability-01a17583/`.
+below. Private evidence: `~/Library/Application Support/TRR/instagram-worker/state/ig-reliability-01a17583/`.
 
 
 ### Consolidated audit findings and repair evidence (current task)
@@ -2166,7 +2166,7 @@ refunds. Six old success fixtures had stale-low totals inconsistent with their
 own replies; their inputs/assertions were corrected without relaxing the
 production overshoot guard. Independent review's dispatch/refund findings were
 repaired and its final targeted review found no blocking issue. Evidence root:
-`~/.codex/tmp/ig-performance-next-01a1798c/`; final performance report is
+`~/Library/Application Support/TRR/instagram-worker/logs/ig-performance-next-01a1798c/`; final performance report is
 `advisory-performance-final.json`, with `media-io-pair.log` for attachment I/O.
 
 Modal v166 deployed at 3:47:51 p.m. New York to verified
@@ -2544,7 +2544,7 @@ worker was restored on `ig-useful-6a5720a2a1ee` with one coordinator grant.
 Before/after transition fingerprints matched across all 1,103 targets, 163,437
 accounted requests and 1,118 receipts. The interrupted controller was not
 restarted. The recovery procedure and receipts are retained under
-`~/.codex/tmp/ig-plan-01a17c45/restore-9/`.
+`~/Library/Application Support/TRR/recovery/instagram/ig-plan-01a17c45/restore-9/`.
 
 The reconstructed generation-9 comparison found all 133,328 earlier comment
 and reply IDs, missing flags and parent links unchanged. No hosted slot was
@@ -2563,7 +2563,7 @@ At the generation-9 baseline, comparison with known recorded expectations gave
 4,398 fewer nonmissing saved records across 234 posts, while five expected totals
 were unknown. These measures are not interchangeable and do not establish how
 many records remain publicly available. The certificate is
-`~/.codex/tmp/ig-plan-01a17c45/restore-9/final-certificate.json`.
+`~/Library/Application Support/TRR/recovery/instagram/ig-plan-01a17c45/restore-9/final-certificate.json`.
 
 At reconciliation, the unresolved comment targets were `DTgXh94kXyo` and
 `DTojfyxDeaq` at their existing attempt ceilings, plus `DTv5xOQklqU`,
@@ -2623,7 +2623,7 @@ to treat it as a completed media-stall predecessor. A fresh media opportunity
 would need an explicit bounded authorization and a verified continuation path;
 the last held-generation certificate remains blocked as recorded above.
 Release, review and preservation receipts are under
-`~/.codex/tmp/ig-plan-01a17c45/`.
+`~/Library/Application Support/TRR/recovery/instagram/ig-plan-01a17c45/`.
 
 ## 2026-10-29: general run controls and arbitrary date ranges
 
@@ -2633,4 +2633,11 @@ Ordinary local resume/retry now uses the normal API with compatible-worker, plac
 
 The matching local worker package was activated at verified idleness. Unique lease and process working directory were verified. All local run and target fingerprints, holds and request counts were unchanged. The previous local package ig-cdn-f131d25b0045 and Modal v175 remain rollback paths. The superseded local ig-useful-6a5720a2a1ee package was moved to actual Trash.
 
-Qualification included 92 backend tests plus three targeted follow-ups, independent review and corrections, 28 app ingestion tests and 79 quick-validation tests. Source and runtime delivery do not establish comment or whole-January completeness. No collection window was opened; the earlier one-time exception remains unused. The generalized six-issue implementation plan is workspace plans/056-instagram-date-range-recovery.md. Evidence is retained in ~/.codex/tmp/trr-consolidation-01a18605/.
+Qualification included 92 backend tests plus three targeted follow-ups, independent review and corrections, 28 app ingestion tests and 79 quick-validation tests. Source and runtime delivery do not establish comment or whole-January completeness. No collection window was opened; the earlier one-time exception remains unused. The generalized six-issue implementation plan is workspace plans/056-instagram-date-range-recovery.md. Evidence is retained in ~/Library/Application Support/TRR/recovery/repository-consolidation/trr-consolidation-01a18605/.
+
+
+## 2026-10-31: permanent recovery entry point
+
+Use `~/Library/Application Support/TRR/recovery/permanent-paths/README.md` for canonical worker configurations and the read-only historical-path resolver. Original recovery receipts, source snapshots, capabilities, manifests and one-shot installers remain unchanged as indexed historical evidence. They are not supported replay entry points after the temporary aliases are retired.
+
+The kit preserves original and derived configuration hashes separately. Of 20 historical plists, 19 describe workers and one describes an old execution controller; 18 worker release directories no longer exist. Only the retained `ig-cdn-f131d25b0045` package is an installed historical worker candidate, with its 13 pinned source hashes verified offline. Any future rollback still requires current idle/ownership checks and post-start verification. This path migration does not authorize a recovery run or establish historical ingestion completeness.

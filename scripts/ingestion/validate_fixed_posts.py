@@ -71,9 +71,14 @@ def main(argv=None):
     parser.add_argument("--initiated-by")
     parser.add_argument("--idempotency-key")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--create-only", action="store_true", help="Queue one explicitly bounded post for the existing Mac worker."
+    )
     options = parser.parse_args(argv)
     try:
         manifest = FixedManifest.from_payload(json.loads(options.manifest.read_text()))
+        if options.create_only and (options.action != "start" or manifest.max_source_requests is None):
+            raise ValueError("Create-only requires start and an explicitly bounded one-post manifest")
         if options.action == "restart-lane" and not all(
             (options.target_key, options.lane, options.reason, options.initiated_by, options.idempotency_key)
         ):
@@ -158,7 +163,7 @@ def main(argv=None):
                 and not state.get("pending_control")
             ):
                 _control(store, manifest, state, options.action, options.state)
-        if options.action in {"start", "resume"}:
+        if options.action in {"start", "resume"} and not options.create_only:
 
             def worker_factory(workflow_store):
                 worker = composition.build_worker(execution_placement="local")
@@ -185,7 +190,7 @@ def main(argv=None):
         print(
             json.dumps(
                 {
-                    "status": status["validation"]["status"],
+                    "status": "created" if options.create_only else status["validation"]["status"],
                     "workflow_state": status["run"]["state"],
                     "validation": status["validation"],
                     "run_id": state["run_id"],
@@ -208,12 +213,21 @@ def main(argv=None):
                         }
                         for row in status["targets"]
                     ],
-                    "budget": budget.inspect(),
+                    "budget": (
+                        budget.inspect()
+                        if manifest.max_source_requests is None
+                        else {
+                            "scope": "existing_worker_run",
+                            "source_request_limit": manifest.max_source_requests,
+                            "run_seconds_limit": manifest.max_run_seconds,
+                            "recorded_source_requests": sum(row["requests"] for row in status["targets"]),
+                        }
+                    ),
                 },
                 default=str,
             )
         )
-        return 0 if status["validation"]["passed"] else 2
+        return 0 if options.create_only or status["validation"]["passed"] else 2
     except Exception as error:
         print(json.dumps({"status": "failed", "failure_class": type(error).__name__}))
         return 1

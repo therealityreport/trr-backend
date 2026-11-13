@@ -52,3 +52,6 @@ The [Repository Map workflow](../../.github/workflows/repo_map.yml) runs weekly 
 | Hand-authored | `diagrams/` | Manual edits only |
 
 **Rule:** Never manually edit files in `generated/` - they will be overwritten.
+The checked-in generated maps are snapshots of an earlier generation; they do
+not establish current repository structure until regenerated and checked
+against this checkout.

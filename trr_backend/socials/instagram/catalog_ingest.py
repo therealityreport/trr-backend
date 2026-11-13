@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from trr_backend.socials.control_plane.run_lifecycle import _legacy_module as _published_legacy_module
 from trr_backend.socials.instagram import payload_sidecars as _payload_sidecars
+from trr_backend.socials.instagram.comment_counts import capture_detail_observations, merge_observations
 from trr_backend.socials.instagram.post_normalizer import _REPOST_COUNT_ALIASES, _extract_repost_count
 from trr_backend.socials.provider_registry import (
     LateNamespaceProvider,
@@ -691,6 +692,9 @@ def _instagram_post_payload(
                 )
                 or {}
             )
+    count_observation_update = merge_observations(
+        raw_data, existing_row.get("raw_data") or {}, observed_at=_now_utc()
+    )
     existing_views = _normalize_non_negative_int(existing_row.get("views"))
     if incoming_raw_data_is_thin:
         existing_raw_data = existing_row.get("raw_data")
@@ -820,6 +824,13 @@ def _instagram_post_payload(
         }
         raw_data["facebook_crosspost"] = facebook_crosspost_payload
 
+    if has_facebook_crosspost and fb_comment_count is not None:
+        incoming_count_raw = dict(raw_data_raw) if isinstance(raw_data_raw, dict) else {}
+        incoming_count_raw["facebook_crosspost"] = facebook_crosspost_payload
+        count_observation_update = merge_observations(
+            incoming_count_raw, existing_row.get("raw_data") or {}, observed_at=_now_utc()
+        )
+    raw_data.update(count_observation_update)
     reported_comments = max(
         _normalize_non_negative_int(getattr(post, "comments", 0)),
         _instagram_reported_comment_count_from_payload(raw_data),
@@ -1208,6 +1219,9 @@ def _shared_catalog_instagram_post_payload(
     media_urls = [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url).strip()]
     raw_data = post.to_dict() if hasattr(post, "to_dict") else {}
     raw_data = raw_data if isinstance(raw_data, dict) else {}
+    count_observation_update = merge_observations(
+        raw_data, (existing_row or {}).get("raw_data") or {}, observed_at=_now_utc()
+    )
     child_posts_data = getattr(post, "child_posts_data", None)
     if _instagram_raw_data_is_thin_comments_header(raw_data) and existing_row:
         existing_raw_data = existing_row.get("raw_data")
@@ -1217,6 +1231,7 @@ def _shared_catalog_instagram_post_payload(
             existing_children = existing_row.get("child_posts_data")
             if isinstance(existing_children, list) and existing_children:
                 child_posts_data = list(existing_children)
+    raw_data.update(count_observation_update)
     resolved_repost_count = _instagram_repost_count_from_post(post, raw_data)
     payload = _shared_catalog_payload_base(
         source_id=shortcode,
@@ -2777,6 +2792,8 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
                 nonlocal parsed
                 node = _extract_instagram_post_detail_node(payload)
                 parsed = scraper._parse_post_node(node, scrape_config) if node else None  # noqa: SLF001
+                if parsed is not None:
+                    capture_detail_observations(parsed, node, observed_at=_now_utc())
                 if not parsed:
                     raise ValueError("detail_response_missing")
                 proof = parsed.detail_snapshot
@@ -3216,6 +3233,8 @@ def _scrape_shared_instagram_post_details_refresh(
                     post_payload = scraper.fetch_post_info(shortcode, delay=detail_config.delay_seconds)
                     node = _extract_instagram_post_detail_node(post_payload)
                     parsed_post = scraper._parse_post_node(node, detail_config) if node else None  # noqa: SLF001
+                    if parsed_post is not None:
+                        capture_detail_observations(parsed_post, node, observed_at=_now_utc())
             if parsed_post is not None and legacy_inline_enrichment:
                 try:
                     _enrich_instagram_post_from_permalink(post=parsed_post, scraper=scraper, now_utc=now_utc)

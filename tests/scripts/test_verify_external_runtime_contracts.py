@@ -5,18 +5,16 @@ import pytest
 from scripts.dev import verify_external_runtime_contracts as cli
 
 
-def test_verify_render_contract_flags_blueprint_drift(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    render_yaml = tmp_path / "render.yaml"
-    render_doc = tmp_path / "render.md"
-    render_yaml.write_text("services:\n  - type: web\n", encoding="utf-8")
-    render_doc.write_text("Render docs\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "RENDER_BLUEPRINT_PATH", render_yaml)
-    monkeypatch.setattr(cli, "RENDER_DOC_PATH", render_doc)
+@pytest.mark.parametrize("state,reason", [("ok", None), ("advisory", "decodo_unconfigured")])
+def test_external_runtime_contracts_only_reports_supported_auxiliary_services(
+    monkeypatch: pytest.MonkeyPatch, state: str, reason: str | None,
+) -> None:
+    component = {"state": state, "reason": reason, "verify_only": True}
+    monkeypatch.setattr(cli, "verify_decodo_contract", lambda: component)
 
-    result = cli.verify_render_contract()
-
-    assert result["state"] == "advisory"
-    assert result["reason"] == "render_contract_mismatch"
+    assert cli.verify_external_runtime_contracts() == {
+        "state": state, "reason": reason, "decodo": component,
+    }
 
 
 def test_verify_decodo_contract_warns_when_credentials_missing(monkeypatch: pytest.MonkeyPatch) -> None:

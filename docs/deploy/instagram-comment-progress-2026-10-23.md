@@ -66,4 +66,7 @@ A strict saved-evidence audit at 20:36:58 Eastern verified 10 targets, found 156
 
 Backend/API: targeted tests and deployed worker verification passed; public API shape unchanged. TRR-APP build: not applicable (backend scraper/persistence changes only). No schema migration or SQL ownership change; existing ingestion persistence and fenced operational budget updates only.
 
-Private detailed logs, manifests, test output, benchmark and operation receipts are retained under `~/.codex/tmp/trr-instagram-speed-01a16b47/`. This report records a completed implementation batch, not completion of the January dataset.
+Private detailed logs, manifests, test output, benchmark and operation receipts are retained under `~/Library/Application Support/TRR/instagram-worker/state/trr-instagram-speed-01a16b47/`. This report records a completed implementation batch, not completion of the January dataset.
+
+
+Permanent recovery entry point: `~/Library/Application Support/TRR/recovery/permanent-paths/README.md`. Original receipts and run-specific recovery programs remain historical evidence; use the indexed resolver and canonical templates rather than replaying old installers or recreating temporary aliases.

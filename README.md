@@ -1,7 +1,6 @@
 # The Reality Report Backend Data Pipeline
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Production](https://img.shields.io/badge/status-production-green.svg)](https://github.com/therealityreport/trr-backend)
 
 **The Reality Report** backend data pipeline for reality TV show and cast information. This system automatically collects, enriches, and curates comprehensive data about reality TV shows and their cast members from multiple sources.
@@ -274,7 +273,8 @@ TMDb/IMDb/Fandom   import/sync     core.*     FastAPI + S3
 
 ### Data Validation
 - **Type Checking**: Validates data types and formats
-- **Required Fields**: Ensures all required fields are present
+- **Required Fields**: Database constraints enforce specific required columns;
+  validate each import path's own required inputs before relying on it
 - **Consistency Checks**: Verifies data consistency across sources
 - **Conflict Resolution**: Handles data conflicts intelligently
 
@@ -412,7 +412,8 @@ PYTHONPATH=. python scripts/verify/verify_media_unification.py
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+No `LICENSE` file is currently included in this repository. The earlier MIT
+claim has not been verified; confirm the intended license with the maintainers.
 
 ## 🙏 Acknowledgments
 

@@ -5,7 +5,7 @@ This directory contains scripts for database maintenance, verification, and migr
 ## Quick Start
 
 ```bash
-# Run any SQL script safely (auto-resolves DB URL from env, .env, or local Supabase)
+# Run a SQL script after verifying the resolved DB target; stop on SQL errors
 ./scripts/db/run_sql.sh scripts/db/verify_pre_0033_cleanup.sql
 
 # Run an ad-hoc query
@@ -30,7 +30,10 @@ This directory contains scripts for database maintenance, verification, and migr
 
 ### How DB URL is Resolved
 
-`run_sql.sh` resolves the database URL in this order, checking exported environment first and then the local `.env` file for each key:
+`run_sql.sh` resolves the database URL in this order, checking exported
+environment first and then the local `.env` file for each key. This order is
+specific to the shell runner; Python runtime DB resolution also supports
+`TRR_DB_DIRECT_URL` and an explicit transaction lane.
 
 1. **`TRR_DB_SESSION_URL`** - Preferred Supabase session-pooler URL
 2. **`TRR_DB_URL`** - Compatibility runtime Postgres URL
@@ -130,11 +133,17 @@ Before running destructive migrations, verify you're on the right database:
 
 ## Core Schema Guard
 
-All scripts in this directory include `guard_core_schema.sql` which:
+Some SQL files in this directory include `guard_core_schema.sql`. It:
 
-- **Aborts immediately** if `core` schema doesn't exist
-- **Prevents damage** to wrong databases (e.g., local Postgres without TRR schema)
+- **Checks** that the `core` schema and `core.shows` table exist
+- **Does not verify** the Supabase project or distinguish two TRR-like databases
 - **Shows clear error** explaining how to fix
+
+Verify the exact target separately before a write. An ad-hoc `-c` invocation
+does not inject this guard. `run_sql.sh` invokes `psql` with `-X` and
+`ON_ERROR_STOP=1` in both command and file modes; the guard itself also sets
+`ON_ERROR_STOP`. These stop SQL processing on an error, but neither verifies
+that the URL belongs to the intended TRR project.
 
 Example error when connected to wrong database:
 
@@ -234,8 +243,9 @@ from trr_backend.db.connection import (
     validate_supabase_connection,
     DatabaseConnectionError,
 )
+import sys
 
-# Get DB URL (same resolution order as run_sql.sh)
+# Get DB URL using the Python runtime resolver (not run_sql.sh's order)
 try:
     db_url = resolve_database_url()
 except DatabaseConnectionError as e:

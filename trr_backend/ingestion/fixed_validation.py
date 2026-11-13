@@ -61,8 +61,20 @@ class FixedManifest:
     date_end: str = "2026-10-01T00:00:00+00:00"
     stages: tuple[str, ...] = (Stage.DETAILS.value, Stage.COMMENTS.value)
     source_profile: SourceProfile | None = None
+    max_source_requests: int | None = None
+    max_run_seconds: int | None = None
 
     def __post_init__(self):
+        bounded = self.max_source_requests is not None or self.max_run_seconds is not None
+        if bounded and (
+            len(self.posts) != 1
+            or type(self.max_source_requests) is not int
+            or not 1 <= self.max_source_requests <= 20
+            or type(self.max_run_seconds) is not int
+            or not 30 <= self.max_run_seconds <= 300
+            or (self.source_profile is not None and self.source_profile.access_mode != "public")
+        ):
+            raise ValueError("Bounded validation requires one public post, 1-20 requests and 30-300 seconds")
         if (
             not self.source_revision.strip()
             or not self.posts
@@ -98,6 +110,9 @@ class FixedManifest:
         data = asdict(self)
         if self.source_profile is None:
             data.pop("source_profile")  # Preserve existing public manifest hashes.
+        if self.max_source_requests is None and self.max_run_seconds is None:
+            data.pop("max_source_requests")
+            data.pop("max_run_seconds")
         return json.loads(stable_json(data))
 
     @property
@@ -283,8 +298,13 @@ def _require_exclusive_cursor(cur, own_run_id):
             union all
             select 'uncertain_dispatch' from social.instagram_ingestion_dispatches d
             join social.instagram_ingestion_targets t using(run_id,stage,target_key)
+            join social.instagram_ingestion_runs r using(run_id)
             where d.run_id is distinct from %s::uuid and t.outcome='unresolved'
-                and d.state in ('reserved','sending','accepted') limit 1""",
+                and d.state in ('reserved','sending','accepted')
+                and not (r.state='cancelled' and d.generation<r.generation
+                    and greatest(d.updated_at,r.updated_at)<=clock_timestamp()-interval '600 seconds'
+                    and exists(select 1 from social.instagram_ingestion_receipts x
+                        where x.run_id=d.run_id and x.owner_token=d.owner_token)) limit 1""",
         (own_run_id, own_run_id, own_run_id),
     )
     if other:

@@ -806,6 +806,55 @@ def test_run_remote_claimed_operation_heartbeats_claim(monkeypatch: pytest.Monke
     release_mock.assert_called_once_with(operation_id, claim_token="claim-123")
 
 
+@pytest.mark.parametrize("terminal_status", ["failed", "cancelled", None])
+@pytest.mark.parametrize("interruption_kind", ["base_exception", "modal"])
+@pytest.mark.parametrize("cleanup_failure", ["none", "release", "finish_and_release"])
+def test_remote_interruption_is_recorded_before_claim_release(
+    terminal_status: str | None, interruption_kind: str, cleanup_failure: str,
+) -> None:
+    class RemoteInterruption(BaseException):
+        pass
+
+    operation_id = str(uuid4())
+    operation = {"id": operation_id, "operation_type": "admin_show_refresh", "claim_token": "owner"}
+    interruption_type = (
+        pytest.importorskip("modal.exception").InputCancellation
+        if interruption_kind == "modal" else RemoteInterruption
+    )
+    interrupted = interruption_type("worker stopped")
+    terminal = {"id": operation_id, "status": terminal_status} if terminal_status else None
+    calls: list[str] = []
+
+    def finish_claim(*_args, **_kwargs):
+        calls.append("finish")
+        if cleanup_failure == "finish_and_release":
+            raise RuntimeError("terminal write unavailable")
+        return terminal
+
+    def release_claim(*_args, **_kwargs):
+        calls.append("release")
+        if cleanup_failure != "none":
+            raise RuntimeError("claim release unavailable")
+
+    with patch.object(pipeline_admin_operations, "_resolve_remote_operation_producer", return_value=lambda: []):
+        with patch.object(pipeline_admin_operations, "_run_operation_worker", side_effect=interrupted):
+            with patch.object(admin_ops_repo, "finish_interrupted_operation_claim", return_value=terminal) as finish:
+                finish.side_effect = finish_claim
+                with patch.object(admin_ops_repo, "release_operation_claim", side_effect=release_claim):
+                    with patch.object(pipeline_admin_operations, "finalize_sub_operation") as finalize:
+                        with pytest.raises(interruption_type) as raised:
+                            pipeline_admin_operations._run_remote_claimed_operation(operation)
+
+    assert raised.value is interrupted
+    assert calls == ["finish", "release"]
+    assert finish.call_args.kwargs["claim_token"] == "owner"
+    assert finish.call_args.kwargs["error_payload"]["code"] == "REMOTE_OPERATION_INTERRUPTED"
+    if terminal_status and cleanup_failure != "finish_and_release":
+        finalize.assert_called_once_with(operation_id, terminal_status)
+    else:
+        finalize.assert_not_called()
+
+
 def test_modal_dispatch_emits_operation_and_dispatched_events(monkeypatch: pytest.MonkeyPatch) -> None:
     """When Modal dispatch succeeds, both an 'operation' envelope and
     'dispatched_to_modal' event are emitted with monotonic event_seq.

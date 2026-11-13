@@ -19,7 +19,6 @@ This document describes the security measures in place to protect sensitive data
 - `.env.example` with placeholder values
 - Environment variable names (references only)
 - Documentation with `REDACTED` or masked values
-- A tracked `docs/ai/evidence/README.md` that documents the local-only evidence policy
 
 ### Protection Layers
 

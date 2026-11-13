@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter
@@ -22,6 +23,13 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
+def _public_instagram_policy(platform: str) -> bool:
+    return (
+        platform.strip().lower() == "instagram"
+        and os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE", "").strip().lower() == "public"
+    )
+
+
 @router.get("/profiles/{platform}/{account_handle}/cookies/health")
 def get_cookie_health_route(
     platform: str,
@@ -31,6 +39,29 @@ def get_cookie_health_route(
     comments_auth: bool = Query(default=False, description="Include Instagram Modal comments endpoint auth probe"),
     user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
+    if _public_instagram_policy(platform):
+        return {
+            "platform": "instagram",
+            "required": False,
+            "healthy": True,
+            "reason": "public_only_policy",
+            "source_kind": "public_only",
+            "auth_probe_skipped": True,
+            "refresh_supported": False,
+            "refresh_available": False,
+            "refresh_action": None,
+            "refresh_label": None,
+            "comments_auth_health": {
+                "platform": "instagram",
+                "status": "public",
+                "category": "public",
+                "ready": False,
+                "public_ready": True,
+                "authenticated_ready": False,
+                "auth_probe_skipped": True,
+                "reason": "public_only_policy",
+            },
+        }
     from trr_backend.socials.control_plane.runtime import check_platform_cookie_health
 
     if TYPE_CHECKING:
@@ -190,6 +221,14 @@ def post_cookie_refresh_route(
     payload: CookieRefreshRequest,
     user: InternalAdminUser = cast(InternalAdminUser, None),
 ) -> dict[str, Any]:
+    if _public_instagram_policy(platform):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "INSTAGRAM_PUBLIC_ONLY",
+                "message": "Instagram sign-in is disabled by the public-only policy.",
+            },
+        )
     from trr_backend.socials.control_plane.runtime import (
         check_platform_cookie_health,
         refresh_platform_cookies_interactive,

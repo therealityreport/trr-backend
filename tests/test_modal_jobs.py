@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 import os
 import subprocess
 import sys
@@ -834,8 +836,10 @@ def test_sweep_social_dispatch_queue_invokes_pending_launch_recovery(monkeypatch
     monkeypatch.setattr(
         modal_jobs,
         "_recover_stale_pending_social_catalog_launches",
-        lambda: recovery_calls.append("recovered")
-        or {"scanned": 1, "recovered": 1, "recovered_run_ids": ["run-1"], "failed_run_ids": []},
+        lambda: (
+            recovery_calls.append("recovered")
+            or {"scanned": 1, "recovered": 1, "recovered_run_ids": ["run-1"], "failed_run_ids": []}
+        ),
     )
     monkeypatch.setattr(pg, "close_pool", lambda: None)
 
@@ -977,6 +981,8 @@ def test_modal_deploy_schedules_are_disabled_by_default(monkeypatch: pytest.Monk
     reloaded = importlib.reload(modal_jobs)
     try:
         assert "schedule" not in reloaded.sweep_social_dispatch_queue._modal_function_options
+        assert reloaded.sweep_social_dispatch_queue._modal_function_options["scaledown_window"] == 5
+        assert "scaledown_window" not in reloaded.heartbeat_remote_executors._modal_function_options
         assert "schedule" not in reloaded.heartbeat_remote_executors._modal_function_options
         assert "schedule" not in reloaded.poll_due_show_season_media_watches._modal_function_options
         assert "schedule" not in reloaded.sync_nbcumv_official_images._modal_function_options
@@ -1329,9 +1335,11 @@ def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
 
 
 @pytest.mark.parametrize("reddit_enabled", [False, True])
+@pytest.mark.parametrize("maintenance_owner", ["modal_singleton_cron", "api_runtime_scheduler"])
 def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     monkeypatch: pytest.MonkeyPatch,
     reddit_enabled: bool,
+    maintenance_owner: str,
 ) -> None:
     from trr_backend.db import pg
 
@@ -1364,11 +1372,12 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
         "_poll_due_show_season_media_watches_impl",
         lambda: media_poll_calls.append(True) or {"status": "completed", "claimed": 0},
     )
-    monkeypatch.setattr(modal_jobs, "_validate_modal_maintenance_owner_config", lambda: "modal_singleton_cron")
+    monkeypatch.setattr(modal_jobs, "_validate_modal_maintenance_owner_config", lambda: maintenance_owner)
 
     payload = modal_jobs.heartbeat_remote_executors.local()
-    assert media_poll_calls == [True]
-    assert reddit_wakes == ([True] if reddit_enabled else [])
+    owns_coordination = maintenance_owner == "modal_singleton_cron"
+    assert media_poll_calls == ([True] if owns_coordination else [])
+    assert reddit_wakes == ([True] if owns_coordination and reddit_enabled else [])
 
     assert payload == {
         "ok": True,
@@ -1415,8 +1424,12 @@ def test_modal_completion_evidence_contract_is_explicit() -> None:
 
 def test_browser_image_runtime_probe_is_bound_without_secrets() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"] is modal_jobs._browser_image
-    source = modal_jobs.probe_browser_image_runtime.get_raw_f().__doc__ or ""
-    assert "state" in source.lower()
+    module = ast.parse(inspect.getsource(modal_jobs))
+    probe = next(node for node in module.body if isinstance(node, ast.FunctionDef)
+                 and node.name == "probe_browser_image_runtime")
+    decorator = probe.decorator_list[0]
+    assert isinstance(decorator, ast.Call)
+    assert all(keyword.arg != "secrets" for keyword in decorator.keywords)
 
 
 def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
@@ -1466,7 +1479,7 @@ def test_browser_image_runtime_probe_closes_browser_before_playwright_context(
     monkeypatch.delenv("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_DOC_IDS", raising=False)
     monkeypatch.delenv("INSTAGRAM_POST_CHILD_COMMENTS_GRAPHQL_FRIENDLY_NAME", raising=False)
 
-    result = modal_jobs.probe_browser_image_runtime.get_raw_f()()
+    result = modal_jobs.probe_browser_image_runtime.local()
 
     assert result["healthy"] is True
     assert result["versions"]["chromium"] == "test-chromium"
@@ -1512,8 +1525,9 @@ def test_run_cast_screentime_analysis_delegates_to_runtime(monkeypatch: pytest.M
     monkeypatch.setattr(
         modal_jobs,
         "_worker_started",
-        lambda worker_family, **kwargs: worker_events.append(("started", {"worker_family": worker_family, **kwargs}))
-        or "started-at",
+        lambda worker_family, **kwargs: (
+            worker_events.append(("started", {"worker_family": worker_family, **kwargs})) or "started-at"
+        ),
     )
     monkeypatch.setattr(
         modal_jobs,
@@ -1569,8 +1583,9 @@ def test_run_cast_screentime_subtitle_extraction_delegates_to_service(
     monkeypatch.setattr(
         modal_jobs,
         "_worker_started",
-        lambda worker_family, **kwargs: worker_events.append(("started", {"worker_family": worker_family, **kwargs}))
-        or "started-at",
+        lambda worker_family, **kwargs: (
+            worker_events.append(("started", {"worker_family": worker_family, **kwargs})) or "started-at"
+        ),
     )
     monkeypatch.setattr(
         modal_jobs,
@@ -1791,6 +1806,7 @@ def test_modal_api_deploy_env_overrides_named_secret_without_mutation(
         {"named": "trr-social-auth"},
     ]
     assert reloaded.serve_backend_api._modal_function_options["env"] == {
+        **reloaded._maintenance_runtime_env(),
         "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "compare",
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0.1",
     }
@@ -1809,6 +1825,7 @@ def test_modal_preview_read_only_propagates_to_api_and_state_free_browser_canary
     reloaded = importlib.reload(modal_jobs)
 
     assert reloaded.serve_backend_api._modal_function_options["env"] == {
+        **reloaded._maintenance_runtime_env(),
         "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
         "TRR_PREVIEW_READ_ONLY": "1",
@@ -1834,6 +1851,7 @@ def test_modal_preview_read_only_decorator_env_is_absent_by_default(
     reloaded = importlib.reload(modal_jobs)
 
     assert reloaded.serve_backend_api._modal_function_options["env"] == {
+        **reloaded._maintenance_runtime_env(),
         "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE": "legacy",
         "SOCIAL_INSTAGRAM_PAYLOAD_COMPARE_SAMPLE_RATE": "0",
     }
@@ -2004,3 +2022,48 @@ def test_reddit_rollout_environment_precedes_local_mounts() -> None:
     image = modal_jobs._build_lean_image_base(runtime_env={"REDDIT_PIPELINE_V2_ENABLED": "0"}, image_factory=_FakeImage)
     names = [name for name, _, _ in image.operations]
     assert names.index("env") < names.index("add_local_python_source")
+
+
+@pytest.mark.parametrize("cron", [False, True])
+def test_maintenance_functions_bind_one_owner_and_fixed_intervals(monkeypatch, modal_reload_guard, cron):
+    monkeypatch.setenv("TRR_MODAL_API_MAX_CONTAINERS", "1")
+    monkeypatch.setitem(sys.modules, "modal", types.ModuleType("modal"))
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", str(int(cron)))
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", str(int(not cron)))
+    reloaded = importlib.reload(modal_jobs)
+    expected = reloaded._maintenance_runtime_env()
+    for name in (
+        "serve_backend_api",
+        "heartbeat_remote_executors",
+        "sweep_social_dispatch_queue",
+        "poll_due_show_season_media_watches",
+        "probe_modal_maintenance_config",
+    ):
+        options = getattr(reloaded, name)._modal_function_options
+        assert {key: options["env"][key] for key in expected} == expected
+    for name in ("heartbeat_remote_executors", "sweep_social_dispatch_queue"):
+        assert ("schedule" in getattr(reloaded, name)._modal_function_options) is cron
+    assert expected["TRR_MODAL_RUNTIME_HEARTBEAT_INTERVAL_SECONDS"] == "60"
+    assert expected["TRR_MODAL_RUNTIME_SOCIAL_RECOVERY_INTERVAL_SECONDS"] == "120"
+
+
+def test_direct_modal_import_rejects_api_owner_with_multiple_replicas(monkeypatch, modal_reload_guard):
+    monkeypatch.setitem(sys.modules, "modal", types.ModuleType("modal"))
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "0")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("TRR_MODAL_API_MAX_CONTAINERS", "8")
+    with pytest.raises(RuntimeError, match="min/max containers"):
+        importlib.reload(modal_jobs)
+
+
+def test_remote_worker_import_ignores_deployment_scaling_guard(monkeypatch, modal_reload_guard):
+    fake_modal = types.ModuleType("modal")
+    # Keep the existing test Modal implementation, overriding only locality.
+    for key, value in vars(sys.modules["modal"]).items():
+        setattr(fake_modal, key, value)
+    fake_modal.is_local = lambda: False
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+    monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "0")
+    monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("TRR_MODAL_API_MAX_CONTAINERS", "8")
+    importlib.reload(modal_jobs)

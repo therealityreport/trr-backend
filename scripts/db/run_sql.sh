@@ -3,7 +3,7 @@
 # Safe SQL Runner for TRR Backend
 # =============================================================================
 # Resolves database URL from environment, local .env, or local Supabase, then runs SQL.
-# Includes guardrails to prevent running against the wrong database.
+# Stops on SQL errors. Operators must verify the resolved database target.
 #
 # Usage:
 #   ./scripts/db/run_sql.sh scripts/db/verify_pre_0033_cleanup.sql
@@ -199,11 +199,11 @@ For local development:
     # Run psql with the resolved URL
     if [[ "$1" == "-c" ]]; then
         shift
-        psql "$db_url" -c "$*"
+        psql -X -v ON_ERROR_STOP=1 "$db_url" -c "$*"
     else
         # Change to repo root so \i paths work correctly
         cd "$(dirname "$0")/../.."
-        psql "$db_url" -f "$1"
+        psql -X -v ON_ERROR_STOP=1 "$db_url" -f "$1"
     fi
 }
 

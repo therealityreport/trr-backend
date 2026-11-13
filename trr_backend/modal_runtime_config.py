@@ -4,6 +4,56 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Mapping
+
+MAINTENANCE_CRON_ENV = "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"
+MAINTENANCE_API_ENV = "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"
+
+
+def maintenance_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Bind runtime ownership to the same inputs that build Modal schedules.
+
+    Function-level env is applied after named secrets by Modal. This prevents a
+    stale runtime secret from enabling the API scheduler alongside deployed cron.
+    Empty ownership remains importable for state-free tooling, but is rejected by
+    deployment preflight and the existing production startup validation.
+    """
+    env = os.environ if environ is None else environ
+
+    def enabled(key: str) -> bool:
+        return str(env.get(key) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    cron, api = enabled(MAINTENANCE_CRON_ENV), enabled(MAINTENANCE_API_ENV)
+    if cron and api:
+        raise RuntimeError("Modal maintenance has duplicate active owners; select exactly one before deployment.")
+    return {
+        MAINTENANCE_CRON_ENV: "1" if cron else "0",
+        MAINTENANCE_API_ENV: "1" if api else "0",
+        "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED": "1",
+        "TRR_MODAL_RUNTIME_HEARTBEAT_INTERVAL_SECONDS": "60",
+        "TRR_MODAL_RUNTIME_SOCIAL_RECOVERY_INTERVAL_SECONDS": "120",
+    }
+
+
+def validate_api_maintenance_scaling(environ: Mapping[str, str]) -> None:
+    """API-owned timers require one continuously available replica."""
+    api = str(environ.get(MAINTENANCE_API_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+    cron = str(environ.get(MAINTENANCE_CRON_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+    if api and not cron:
+        if (environ.get("TRR_MODAL_API_MIN_CONTAINERS", "1"), environ.get("TRR_MODAL_API_MAX_CONTAINERS", "8")) != (
+            "1",
+            "1",
+        ):
+            raise RuntimeError("API maintenance ownership requires API min/max containers both exactly 1.")
+
+
+def validate_maintenance_deployment(environ: Mapping[str, str]) -> dict[str, str]:
+    config = maintenance_runtime_env(environ)
+    if config[MAINTENANCE_CRON_ENV] == config[MAINTENANCE_API_ENV] == "0":
+        raise RuntimeError("Modal maintenance has no active owner; select exactly one before deployment.")
+    validate_api_maintenance_scaling(environ)
+    return config
+
 
 _INSTAGRAM_PAYLOAD_READ_MODE_ENV = "SOCIAL_INSTAGRAM_PAYLOAD_READ_MODE"
 _MODAL_INSTAGRAM_PAYLOAD_READ_MODE_ENV = "TRR_MODAL_INSTAGRAM_PAYLOAD_READ_MODE"

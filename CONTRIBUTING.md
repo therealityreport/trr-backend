@@ -50,11 +50,10 @@ pre-commit run --all-files
 
 CI gates new code forward-only: the `lint` job runs `ruff` on the Python files
 changed in each PR (pinned to ruff 0.14.4), so legacy debt does not need to be
-fixed all at once. `pyright`, the full test suite, and Modal lockfile freshness
-run as non-blocking signal jobs until their backlogs are burned down.
+fixed all at once. `pyright` is a blocking CI job. The full test suite and
+Modal lockfile freshness are non-blocking signal jobs.
 
 ## Security
 
 - Never commit `.env` or anything under `keys/`.
 - Never force-push to `main`.
-

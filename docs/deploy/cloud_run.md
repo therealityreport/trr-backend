@@ -1,8 +1,8 @@
 # Cloud Run Deployment (TRR-Backend)
 
 This document is retained for legacy reference only. The current public-hosting
-target for TRR AWS exit is Render; use
-`/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md` for the
+target for TRR AWS exit is Modal; use
+`/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/modal.md` for the
 active deployment path.
 
 This guide deploys the FastAPI app on Google Cloud Run using the repo `Dockerfile` at the repo root.

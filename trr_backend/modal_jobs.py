@@ -17,7 +17,11 @@ from trr_backend.modal_runtime_config import (
     api_runtime_env as _modal_api_runtime_env,
 )
 from trr_backend.modal_runtime_config import (
+    maintenance_runtime_env as _maintenance_runtime_env,
+)
+from trr_backend.modal_runtime_config import (
     preview_read_only_env,
+    validate_api_maintenance_scaling,
 )
 from trr_backend.modal_runtime_config import (
     preview_read_only_function_kwargs as _modal_preview_read_only_function_kwargs,
@@ -134,6 +138,8 @@ _API_FUNCTION_NAME = str(os.getenv("TRR_MODAL_API_FUNCTION") or "serve_backend_a
 _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() or "trr-backend-api"
 _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1")))
 _API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8")))
+if getattr(modal, "is_local", lambda: True)():
+    validate_api_maintenance_scaling(os.environ)
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")))
 _SOCIAL_COMMENTS_CONCURRENCY_LIMIT = max(
     1,
@@ -676,9 +682,10 @@ def _validate_modal_maintenance_owner_config() -> str | None:
 
 
 def _modal_cron_schedule_kwargs(expression: str) -> dict[str, object]:
+    runtime_env = _maintenance_runtime_env()
     if not _modal_always_on_schedules_enabled():
-        return {}
-    return {"schedule": modal.Cron(expression, timezone=_TIMEZONE)}
+        return {"env": runtime_env}
+    return {"env": runtime_env, "schedule": modal.Cron(expression, timezone=_TIMEZONE)}
 
 
 def _runtime_secret_name() -> str:
@@ -940,7 +947,7 @@ def probe_browser_image_runtime() -> dict[str, object]:
     # Keep database round trips within the US; unconstrained placement can land
     # in Asia and serialize seconds of network delay in the single profile pool.
     region="us",
-    env=_modal_api_runtime_env(),
+    env={**_modal_api_runtime_env(), **_maintenance_runtime_env()},
 )
 # Live-status streams remain open; reserve shared input capacity for API requests
 # without increasing the existing container or database connection limits.
@@ -950,6 +957,23 @@ def serve_backend_api():
     from api.main import app as fastapi_app
 
     return fastapi_app
+
+
+@app.function(
+    secrets=_secrets,
+    env=_maintenance_runtime_env(),
+    retries=0,
+    timeout=30,
+    max_containers=1,
+    scaledown_window=5,
+)
+def probe_modal_maintenance_config() -> dict[str, object]:
+    """Read effective deployment ownership without touching jobs or databases."""
+    return {
+        "owner": _validate_modal_maintenance_owner_config(),
+        "env": {key: os.getenv(key) for key in _maintenance_runtime_env()},
+        "state_free": True,
+    }
 
 
 def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
@@ -1301,6 +1325,7 @@ def _poll_due_show_season_media_watches_impl() -> dict[str, object]:
     retries=0,
     timeout=5 * 60,
     max_containers=1,
+    env=_maintenance_runtime_env(),
 )
 def poll_due_show_season_media_watches() -> dict[str, object]:
     """On-demand entrypoint; the minute heartbeat owns the durable clock."""
@@ -1557,6 +1582,10 @@ def probe_instagram_posts_auth(account_handle: str) -> dict[str, object]:
                 "proxy_fallback": "requires_approval",
             },
         }
+    from trr_backend.socials import social_season_analytics_impl as social_provider
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.pipelines.account_catalog.launch import _probe_instagram_posts_endpoint_for_launch
 
     payload = dict(_probe_instagram_posts_endpoint_for_launch(account_handle=account_handle))
@@ -1585,7 +1614,8 @@ def probe_instagram_comments_auth(
     strict_authenticated: bool = False,
 ) -> dict[str, object]:
     strict_authenticated = bool(strict_authenticated)
-    if _instagram_public_first_mode_enabled() and not strict_authenticated:
+    public_only = str(os.getenv("SOCIAL_INSTAGRAM_SCRAPE_MODE") or "").strip().lower() == "public"
+    if public_only or (_instagram_public_first_mode_enabled() and not strict_authenticated):
         return {
             "platform": "instagram",
             "account_handle": str(account_handle or "").strip().lower().lstrip("@"),
@@ -1601,13 +1631,23 @@ def probe_instagram_comments_auth(
             "proxy_state": "none",
             "auth_probe_skipped": True,
             "auth_required_for_hidden_comments": True,
-            "comments_auth_blocker": "strict_authenticated_probe_not_requested",
-            "operator_action": "Run a strict Instagram comments auth probe before launching hidden-comments recovery.",
+            "comments_auth_blocker": "public_only_policy"
+            if public_only
+            else "strict_authenticated_probe_not_requested",
+            "operator_action": (
+                "Instagram sign-in is disabled by the public-only policy."
+                if public_only
+                else "Run a strict Instagram comments auth probe before launching hidden-comments recovery."
+            ),
             "fallback_policy": {
                 "auth_fallback": "requires_approval",
                 "proxy_fallback": "requires_approval",
             },
         }
+    from trr_backend.socials import social_season_analytics_impl as social_provider
+    from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
+
+    register_social_control_plane_providers(social_provider.__dict__)
     from trr_backend.socials.pipelines.comments.instagram import _probe_instagram_comments_endpoint_for_launch
 
     payload = dict(
@@ -1841,6 +1881,37 @@ def probe_getty_remote_access() -> dict[str, object]:
     return _probe_getty_remote_access()
 
 
+@app.function(
+    name="probe_twitter_public_conversation",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=[],
+    retries=0,
+    timeout=120,
+    max_containers=1,
+)
+def probe_twitter_public_conversation(tweet_id: str, max_pages: int = 2, max_items: int = 40) -> dict:
+    """Explicit anonymous mirror probe: no schedule, secrets, or storage writes."""
+    from trr_backend.socials.twitter.public_probe import probe_public_conversation
+
+    result = probe_public_conversation(tweet_id, max_pages=max_pages, max_items=max_items)
+    return {**result, "execution_backend": "modal"}
+
+
+@app.function(
+    name="probe_twitter_public_search",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=[],
+    retries=0,
+    timeout=60,
+    max_containers=1,
+)
+def probe_twitter_public_search(query: str) -> dict:
+    """One explicit search page, at most ten records; never scheduled."""
+    from trr_backend.socials.twitter.public_probe import probe_public_research_search
+
+    return {**probe_public_research_search(query), "execution_backend": "modal"}
+
+
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:
     from trr_backend.socials import social_season_analytics_impl as social_provider
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
@@ -2053,6 +2124,7 @@ def _execute_ingestion_reservation(reservation: dict[str, object], *, stages: se
     retries=0,
     timeout=15 * 60,
     max_containers=_SOCIAL_RECOVERY_CONCURRENCY_LIMIT,
+    scaledown_window=5,
     region="us-east",
     **_modal_cron_schedule_kwargs("*/2 * * * *"),
 )
@@ -2199,9 +2271,11 @@ def sync_nbcumv_official_images() -> dict[str, object]:
     **_modal_cron_schedule_kwargs("* * * * *"),
 )
 def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
-    _validate_modal_maintenance_owner_config()
-    # Reuse the existing minute clock; Reddit executes in its own bounded worker.
-    if os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}:
+    maintenance_owner = _validate_modal_maintenance_owner_config()
+    # The API scheduler already has dedicated Reddit and media-watch clocks.
+    # Keep the heartbeat's minute clock as their owner in cron mode only.
+    owns_coordination = maintenance_owner != "api_runtime_scheduler"
+    if owns_coordination and os.getenv("REDDIT_PIPELINE_V2_ENABLED", "").lower() in {"1", "true", "yes"}:
         try:
             dispatch_reddit_capture_work.spawn()
         except Exception:
@@ -2210,12 +2284,12 @@ def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_schedule
     from trr_backend.socials.control_plane_bootstrap import register_social_control_plane_providers
 
     register_social_control_plane_providers(social_provider.__dict__)
-    try:
-        _poll_due_show_season_media_watches_impl()
-    except Exception:
-        # Keep the pre-existing executor heartbeat independent while making the
-        # media poll visible in its own structured worker-failure logs.
-        logger.exception("[executor-heartbeat] show-season media poll failed")
+    if owns_coordination:
+        try:
+            _poll_due_show_season_media_watches_impl()
+        except Exception:
+            # A media poll failure must not suppress the executor heartbeat.
+            logger.exception("[executor-heartbeat] show-season media poll failed")
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
     from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 

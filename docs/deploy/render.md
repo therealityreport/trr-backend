@@ -1,60 +1,15 @@
-# Render Deployment (TRR-Backend)
+# Render deployment retired
 
-Render is the canonical public host for `TRR-Backend`.
+Render is no longer a TRR production target. Vercel serves the application;
+Modal hosts the API and jobs. Follow [the Modal deployment guide](modal.md).
 
-Live runtime split:
+Render service `trr-backend-api` was suspended on **2026-10-31**, according to
+its provider event history. The repository hosting contracts were updated on
+**2026-11-09**. These dates do not establish the first production traffic cutover.
 
-- public FastAPI host on Render
-- long-running and admin execution on Modal
-- hosted media on S3-compatible object storage
+The obsolete `render.yaml` blueprint and workspace deployment wrappers have
+been retired. Do not recreate or resume the service through these old links.
+Historical release receipts remain evidence of their original releases.
 
-Render should run the repo Docker image as a single `uvicorn` process per container via `start-api.sh`. Do not add extra container workers unless `REDIS_URL` is configured and realtime fanout has been validated for that topology.
-
-## Canonical Deployment Artifact
-
-- `/Users/thomashulihan/Projects/TRR/TRR-Backend/render.yaml`
-
-## Required Operator Inputs
-
-Export these locally before deploying or updating the Render service:
-
-```bash
-export RENDER_API_KEY=...
-export BETTER_STACK_SOURCE_TOKEN=...
-export BETTER_STACK_INGESTING_HOST=in.logs.betterstack.com
-export CORS_ALLOW_ORIGINS=https://trr-app.vercel.app,https://preview.example.vercel.app
-export OBJECT_STORAGE_PROVIDER=r2
-export OBJECT_STORAGE_BUCKET=trr-backend
-export OBJECT_STORAGE_REGION=auto
-export OBJECT_STORAGE_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
-export OBJECT_STORAGE_ACCESS_KEY_ID=...
-export OBJECT_STORAGE_SECRET_ACCESS_KEY=...
-export OBJECT_STORAGE_PUBLIC_BASE_URL=https://media.thereality.report
-```
-
-## Validation
-
-Verify the deployed Render URL directly:
-
-- `GET /health`
-- `GET /openapi.json`
-- authenticated admin routes
-- social kickoff routes
-- image-analysis routes
-- `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` with service token
-
-Also verify:
-
-- Better Stack ingestion from the Render API process
-- Modal jobs triggered from the Render host
-- object-storage reads/writes using the `OBJECT_STORAGE_*` contract
-
-## Workspace Startup Boundary
-
-`make dev` and `make preflight` may verify this Render contract, but they do not mutate Render. Render remains verify-only in the workspace startup flow:
-
-- no Render API create/update calls
-- no blueprint apply
-- no secret/env mutation
-
-If startup reports `render_contract_mismatch`, fix `render.yaml` or these docs, then rerun `make status` / `make preflight`.
+The workspace retirement record is
+`docs/workspace/hosting-retirement-2026-11-09.md`.

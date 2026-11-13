@@ -1,7 +1,7 @@
 # TRR Backend API - Running Guide
 
 This document describes how to run the FastAPI-based TRR Backend API locally and deployment considerations.
-For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
+For the current production-target hosting plan, use [the Modal guide](../deploy/modal.md).
 For backend runtime ownership boundaries, use
 [Backend Runtime Ownership](../../../docs/workspace/backend-runtime-ownership.md).
 
@@ -73,12 +73,14 @@ Container deployments use the same `start-api.sh` launcher in non-reload mode. T
 |----------|-------------|---------|
 | `CORS_ALLOW_ORIGINS` | Comma-separated allowed origins | `https://trr-app.vercel.app,https://preview.example.vercel.app` |
 
-If `CORS_ALLOW_ORIGINS` is not set, the API allows all origins but disables credentials (safer default for development).
+If `CORS_ALLOW_ORIGINS` is not set, local/development runtimes allow all origins
+with credentials disabled. Deployed runtimes require explicit origins and fail
+startup when the setting is missing.
 
 When origins are explicitly set:
 - Only listed origins are allowed
 - Credentials are enabled (required for authenticated requests)
-- For the Render cutover, include the exact Vercel Production and Preview origins that should send cookies or auth headers
+- For the Vercel + Modal setup, include the exact Vercel Production and Preview origins that should send cookies or auth headers
 
 ### Better Stack logging (Optional; free tier first is fine)
 
@@ -89,7 +91,7 @@ When origins are explicitly set:
 | `BETTER_STACK_LOG_TIMEOUT_SECONDS` | HTTP timeout for log shipping | `2.0` |
 | `BETTER_STACK_FAILURE_COOLDOWN_SECONDS` | Cooldown after a failed ship attempt | `60` |
 
-When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Render API + Modal jobs` steady state so app logs remain available after the legacy host and ad-hoc log sinks are retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
+When `BETTER_STACK_SOURCE_TOKEN` is set, the backend ships structured Python logs directly to Better Stack over HTTP. This is intended for the final `Vercel app + Modal API and jobs` steady state so app logs remain available after the legacy host and ad-hoc log sinks are retired. The default operator choice is to start with a Better Stack free source and only upgrade if actual volume or retention needs exceed the free tier.
 
 ### Object storage (Optional locally, required for media mirroring and uploads)
 
@@ -181,7 +183,7 @@ Admin allowlist
 **CORS guidance**
 
 - TRR App: set `CORS_ALLOW_ORIGINS` in the backend env to the app domain(s) so credentials are allowed.
-- Render target: keep `TRR_API_URL` pointing at the Render service URL for the public backend host while Modal remains the async executor.
+- Production target: set Vercel `TRR_API_URL=https://admin-56995--trr-backend-api.modal.run`. Modal hosts both the public API and asynchronous jobs in `admin-56995` / `main` / `trr-backend-jobs`.
 - Screenalytics: server-to-server calls do not require CORS.
 
 **Example calls**
@@ -211,7 +213,7 @@ python -m pytest tests/ --cov=api --cov-report=term-missing
 
 ## Production Deployment
 
-This guide is for local development. For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
+This guide is for local development. For the current production-target hosting plan, use [the Modal guide](../deploy/modal.md).
 
 ## API Endpoints
 
@@ -265,7 +267,7 @@ Reddit-style discussion threads for episodes.
 | GET | `/api/v1/posts/{post_id}/reactions` | Get reaction counts | Public |
 | POST | `/api/v1/posts/{post_id}/reactions` | Toggle reaction | Required |
 
-**Authentication:** Write endpoints require a valid Supabase JWT in the `Authorization: Bearer <token>` header. The API validates tokens via Supabase Auth and enforces RLS policies using the user's identity.
+**Authentication:** Write endpoints require a valid Supabase JWT in the `Authorization: Bearer <token>` header. The backend verifies the JWT locally using its configured Supabase signing secret. Access checks also depend on each route's authorization logic and database policies.
 
 #### Thread Types
 
@@ -303,7 +305,10 @@ GET /api/v1/threads/{thread_id}/posts?cursor=2025-01-01T00:00:00Z&limit=50
 | POST | `/api/v1/dms/{conversation_id}/messages` | Send a message | Required |
 | POST | `/api/v1/dms/{conversation_id}/read` | Update read receipt | Required |
 
-**Authentication:** All DM endpoints require a valid Supabase JWT. RLS policies ensure users can only access conversations they're members of.
+**Authentication:** All DM endpoints require a locally verified Supabase JWT.
+The API checks conversation membership before member-only reads and writes;
+the schema also defines RLS policies for user-scoped database access. The API's
+direct Postgres calls do not set per-user JWT claims for RLS.
 
 #### Creating a Conversation
 
