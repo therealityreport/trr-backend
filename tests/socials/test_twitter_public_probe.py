@@ -71,4 +71,5 @@ def test_ui_dispatch_probe_never_loads_auth_or_persists(monkeypatch):
     assert result["forbidden_calls"] == {"auth": 0, "persist": 0}
     assert result["tweets"][0]["likes"] is None
     assert result["complete"] is False
-    assert len(result["source_sha256"]) == 3
+    assert "trr_backend.socials.twitter.public_collect" in result["source_sha256"]
+    assert all(len(sha) == 64 for sha in result["source_sha256"].values())

@@ -163,3 +163,102 @@ def test_dict_direct_call_cannot_silently_ignore_write_flags(monkeypatch, option
             load_auth=lambda: pytest.fail("must not load auth"),
             persist_search=lambda *_args, **_kwargs: pytest.fail("must not persist"),
         )
+
+
+def test_fxtwitter_route_preserves_unknown_metrics_and_bypasses_auth(headers, forbid_side_effects, monkeypatch):
+    import json
+
+    from trr_backend.socials.twitter import public_collect
+
+    payload = {
+        "code": 200,
+        "results": [
+            {
+                "id": "2121297625022365945",
+                "text": "#RHOSLC",
+                "author": {"screen_name": "BravoTV"},
+                "reposts": 7,
+                "quotes": 3,
+            }
+        ],
+    }
+    monkeypatch.setattr(public_collect, "fetch", lambda *a, **kw: json.dumps(payload).encode())
+    response = TestClient(app).post(
+        ENDPOINT,
+        headers=headers,
+        json={"mode": "anonymous_research", "provider": "fxtwitter", "query": "#RHOSLC", "max_pages": 2},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    post = body["tweets"][0]
+    assert post["retweets"] == 7 and post["quotes"] == 3
+    assert post["likes"] is None and post["shares"] is None and post["date_time"] is None
+    assert body["complete"] is False and body["retrieval_meta"]["status"] == "complete"
+
+
+def test_fxtwitter_date_and_persistence_contract():
+    from pydantic import ValidationError
+
+    from api.routers.socials.platform_scrape import TwitterSearchRequest
+
+    request = TwitterSearchRequest(
+        mode="anonymous_research",
+        provider="fxtwitter",
+        query="from:BravoTV #RHOSLC",
+        date_start="2026-11-01T00:00:00Z",
+        date_end="2026-11-13T00:00:00Z",
+    )
+    assert request.provider == "fxtwitter"
+    with pytest.raises(ValidationError):
+        TwitterSearchRequest(mode="anonymous_research", provider="fxtwitter", query="#RHOSLC", persist=True)
+
+
+def test_public_options_cannot_enter_standard_auth_and_unknown_options_rejected():
+    from pydantic import ValidationError
+
+    from api.routers.socials.platform_scrape import TwitterSearchRequest
+
+    for fields in ({"capability": "profile"}, {"verify_parents": True}):
+        with pytest.raises(ValidationError):
+            TwitterSearchRequest(
+                query="@BravoTV", date_start="2026-11-01T00:00:00Z", date_end="2026-11-13T00:00:00Z", **fields
+            )
+    with pytest.raises(ValidationError):
+        TwitterSearchRequest(mode="anonymous_research", provider="fxtwitter", query="#RHOSLC", unknown_option=True)
+
+
+def test_parent_verification_does_not_continue_after_rate_limit(monkeypatch):
+    import json
+
+    from trr_backend.socials.twitter import public_collect, public_verification
+    from trr_backend.socials.twitter.anonymous_search import search_anonymous_twitter
+
+    replies = {
+        "code": 200,
+        "results": [
+            {"id": "123", "text": "#RHOSLC", "author": {"screen_name": "BravoTV"}, "replying_to": {"status": "100"}}
+        ],
+        "cursor": {"bottom": "next"},
+    }
+    pending = iter([replies, ValueError("Mirror HTTP 429")])
+
+    def fetch(*a, **kw):
+        value = next(pending)
+        if isinstance(value, Exception):
+            raise value
+        return json.dumps(value).encode()
+
+    monkeypatch.setattr(public_collect, "fetch", fetch)
+    monkeypatch.setattr(
+        public_verification, "fetch", lambda *a, **kw: pytest.fail("blocked collection must stop verification")
+    )
+    r = search_anonymous_twitter(
+        {
+            "query": "#RHOSLC",
+            "mode": "anonymous_research",
+            "provider": "fxtwitter",
+            "max_pages": 2,
+            "verify_parents": True,
+        }
+    )
+    assert r["retrieval_meta"]["parent_checks"][0]["status"] == "unavailable"

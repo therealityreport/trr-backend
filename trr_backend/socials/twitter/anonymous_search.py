@@ -3,19 +3,84 @@
 from __future__ import annotations
 
 import re
+import time
 from types import SimpleNamespace
 from typing import Any
 
 from trr_backend.socials.twitter.public_search import search_public_posts
 
 
-def search_anonymous_twitter(request: Any) -> dict[str, Any]:
+def search_anonymous_twitter(request: Any, *, cancelled=None) -> dict[str, Any]:
     """No credential loader, database, scheduler, or media service is used here."""
     if isinstance(request, dict):
         request = SimpleNamespace(**request)
     # Keep these guards for direct Python callers as well as validated API input.
     if getattr(request, "persist", False) or getattr(request, "mirror_to_s3", False):
         raise ValueError("Anonymous research does not persist results or upload media")
+    if request.provider == "fxtwitter":
+        from trr_backend.socials.twitter.public_collect import collect_public
+        from trr_backend.socials.twitter.public_verification import verify_parent
+
+        max_pages = getattr(request, "max_pages", None) or 1
+        max_items = getattr(request, "max_items", 20)
+        if not 1 <= max_pages <= 2 or not 1 <= max_items <= 40:
+            raise ValueError("Anonymous research is limited to two pages and forty posts")
+        deadline = time.monotonic() + 120
+        result = collect_public(
+            request.query,
+            capability=getattr(request, "capability", "search"),
+            sort=getattr(request, "sort", "latest"),
+            max_pages=max_pages,
+            max_items=max_items,
+            date_start=getattr(request, "date_start", None),
+            date_end=getattr(request, "date_end", None),
+            cancelled=cancelled,
+            deadline_seconds=max(0.001, deadline - time.monotonic()),
+        )
+        metadata = result["metadata"]
+        if getattr(request, "verify_parents", False):
+            replies = [p for p in result["posts"] if p["reply_to_tweet_id"]]
+            checks = []
+            halted = metadata["stop_reason"] in {"blocked", "cancelled"}
+            for index, post in enumerate(replies):
+                if halted or index >= 10 or time.monotonic() >= deadline or (cancelled and cancelled()):
+                    checks.append(
+                        {
+                            "child_id": post["tweet_id"],
+                            "provider_parent_id": post["reply_to_tweet_id"],
+                            "first_party_parent_id": None,
+                            "status": "unavailable",
+                            "evidence": None,
+                            "reason": "Not attempted: collection blocked/cancelled or verification budget exhausted",
+                        }
+                    )
+                    continue
+                check = verify_parent(post, deadline=deadline, cancelled=cancelled)
+                checks.append(check)
+                if re.search(r"HTTP (401|403|429)", check.get("reason") or ""):
+                    halted = True
+            metadata["parent_verification_limit"] = 10
+            metadata["parent_checks"] = checks
+            if len(checks) != len(replies) or any(c["status"] != "verified" for c in checks):
+                metadata["status"] = "partial"
+                metadata["parentage"] = "independent verification incomplete"
+            else:
+                metadata["parentage"] = "verified for returned explicit parents" if replies else "no explicit parents"
+        return {
+            "success": bool(result["posts"]) or metadata["status"] == "complete",
+            "query": request.query,
+            "tweets_found": len(result["posts"]),
+            "tweets": result["posts"],
+            "search_query_used": request.query,
+            "filters_applied": {"mode": "anonymous_research", **metadata["effective_plan"]},
+            "retrieval_meta": metadata,
+            "complete": False,
+            "persist_summary": None,
+            "scrape_run_id": None,
+            "error": metadata["issues"][-1]
+            if metadata["stop_reason"] in {"failed", "blocked"} and metadata["issues"]
+            else None,
+        }
     result = search_public_posts(
         request.query,
         provider=request.provider,

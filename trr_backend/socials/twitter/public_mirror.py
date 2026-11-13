@@ -12,7 +12,6 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
@@ -49,7 +48,7 @@ class PublicMirrorConversation:
             "external_dependency": True,
             "paid_services": False,
             "parentage": "provider-reported; not independently verified",
-            "optional_fields": "provider-reported; absent metrics default to zero",
+            "optional_fields": "provider-reported; absent metrics remain null",
             "pages": self.pages,
         }
 
@@ -60,66 +59,10 @@ def _fetch_page(url: str, *, deadline: float) -> bytes:
     return fetch(url, deadline=deadline)
 
 
-def _to_tweet(post: Any, *, root_id: str, role: str) -> Tweet:
-    from trr_backend.socials.twitter.scraper import Tweet
+def _to_tweet(post: Any, *, root_id: str, role: str):
+    from trr_backend.socials.twitter.public_models import normalize
 
-    if not isinstance(post, dict):
-        raise ValueError("Invalid mirror post")
-    post_id, text, author = post.get("id"), post.get("text"), post.get("author")
-    if (
-        not isinstance(post_id, str)
-        or not re.fullmatch(r"[0-9]{2,20}", post_id)
-        or not isinstance(text, str)
-        or not isinstance(author, dict)
-        or not isinstance(author.get("screen_name"), str)
-        or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author["screen_name"])
-    ):
-        raise ValueError("Invalid mirror post identity or text")
-    username = author["screen_name"]
-    parent = post.get("replying_to")
-    if parent is not None and not isinstance(parent, dict):
-        raise ValueError("Invalid mirror parent")
-    parent_id = parent.get("status") if isinstance(parent, dict) else None
-    if parent_id is not None and (not isinstance(parent_id, str) or not re.fullmatch(r"[0-9]{2,20}", parent_id)):
-        raise ValueError("Invalid mirror parent ID")
-    date_time = post.get("created_at") or ""
-    if not isinstance(date_time, str):
-        raise ValueError("Invalid mirror post date")
-    try:
-        created_at = int(parsedate_to_datetime(date_time).timestamp()) if date_time else 0
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("Invalid mirror post date") from exc
-
-    def count(key: str) -> int:
-        value = post.get(key)
-        return max(0, value) if isinstance(value, int) and not isinstance(value, bool) else 0
-
-    return Tweet(
-        tweet_id=post_id,
-        date_time=date_time,
-        created_at=created_at,
-        text=text,
-        hashtags=re.findall(r"#(\w+)", text),
-        mentions=re.findall(r"@([A-Za-z0-9_]+)", text),
-        likes=count("likes"),
-        retweets=count("retweets"),
-        replies=count("replies"),
-        quotes=count("quote_count"),
-        views=count("views"),
-        url=f"https://x.com/{username}/status/{post_id}",
-        username=username,
-        display_name=author.get("name") if isinstance(author.get("name"), str) else username,
-        user_verified=author.get("verified") is True,
-        is_reply=parent_id is not None,
-        is_retweet=False,
-        is_quote=isinstance(post.get("quote"), dict),
-        reply_to_tweet_id=parent_id,
-        user_id=str(author["id"]) if author.get("id") else None,
-        user_profile_url=f"https://x.com/{username}",
-        thread_root_tweet_id=root_id,
-        is_thread_part=role == "thread",
-        twitter_context_role=role,
-    )
+    return normalize(post, root_id=root_id, role=role)
 
 
 def fetch_public_conversation(
@@ -166,12 +109,9 @@ def fetch_public_conversation(
             if next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > 8192):
                 raise ValueError("Invalid mirror cursor")
             # Validate the whole page before accepting any of its rows.
-            tweets = [_to_tweet(data["status"], root_id=tweet_id, role="root")]
-            for role in ("thread", "replies"):
-                tweets.extend(
-                    _to_tweet(post, root_id=tweet_id, role="reply" if role == "replies" else role)
-                    for post in data[role]
-                )
+            from trr_backend.socials.twitter.public_models import conversation_posts
+
+            tweets = conversation_posts(data, root_id=tweet_id)
             added = 0
             truncated = False
             for tweet in tweets:
