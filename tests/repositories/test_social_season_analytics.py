@@ -759,26 +759,28 @@ def test_get_social_account_profile_posts_uses_instagram_collaborator_dataset_ro
         profile_common,
         "_fetch_instagram_profile_rows_page_no_search_created",
         lambda account_handle, **_kwargs: (
-            [
-                {
-                    "id": "catalog-post-1",
-                    "source_id": "C123",
-                    "posted_at": "2026-03-22T12:00:00Z",
-                    "caption": "Bravo Daily Dish x Bravo",
-                    "show_name": "The Real Housewives of Beverly Hills",
-                    "season_number": 14,
-                    "hashtags": ["Bravo"],
-                    "mentions": [],
-                    "collaborators": ["bravo"],
-                    "source_account": "bravo",
-                    "_profile_match_mode": "collaborator",
-                    "_profile_source_surface": "catalog",
-                }
-            ],
-            1,
-        )
-        if account_handle == "bravodailydish"
-        else ([], 0),
+            (
+                [
+                    {
+                        "id": "catalog-post-1",
+                        "source_id": "C123",
+                        "posted_at": "2026-03-22T12:00:00Z",
+                        "caption": "Bravo Daily Dish x Bravo",
+                        "show_name": "The Real Housewives of Beverly Hills",
+                        "season_number": 14,
+                        "hashtags": ["Bravo"],
+                        "mentions": [],
+                        "collaborators": ["bravo"],
+                        "source_account": "bravo",
+                        "_profile_match_mode": "collaborator",
+                        "_profile_source_surface": "catalog",
+                    }
+                ],
+                1,
+            )
+            if account_handle == "bravodailydish"
+            else ([], 0)
+        ),
     )
     monkeypatch.setattr(
         social_repo,
@@ -4825,8 +4827,9 @@ def test_probe_modal_remote_auth_health_caches_ready_results(monkeypatch: pytest
     monkeypatch.setattr(
         social_repo,
         "_probe_modal_remote_auth_health_uncached",
-        lambda platform: probe_calls.append(platform)
-        or {"platform": platform, "ready": True, "reason": None, "detail": None},
+        lambda platform: (
+            probe_calls.append(platform) or {"platform": platform, "ready": True, "reason": None, "detail": None}
+        ),
     )
 
     first = social_repo._probe_modal_remote_auth_health("instagram")
@@ -4849,8 +4852,10 @@ def test_probe_modal_remote_auth_health_expires_failed_results_quickly(monkeypat
     monkeypatch.setattr(
         social_repo,
         "_probe_modal_remote_auth_health_uncached",
-        lambda platform: probe_calls.append(platform)
-        or {"platform": platform, "ready": False, "reason": "probe_invocation_timeout", "detail": None},
+        lambda platform: (
+            probe_calls.append(platform)
+            or {"platform": platform, "ready": False, "reason": "probe_invocation_timeout", "detail": None}
+        ),
     )
 
     first = social_repo._probe_modal_remote_auth_health("instagram")
@@ -8128,7 +8133,7 @@ def test_ingest_shared_accounts_catalog_mode_uses_frontier_for_bounded_instagram
     )
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: stored_total)
     monkeypatch.setattr(
-        social_repo, "_shared_catalog_total_posts_for_window", lambda *_args, **_kwargs: (1903 if stored_total else 0)
+        social_repo, "_shared_catalog_total_posts_for_window", lambda *_args, **_kwargs: 1903 if stored_total else 0
     )
     monkeypatch.setattr(
         social_repo,
@@ -9903,8 +9908,9 @@ def test_start_social_account_comments_scrape_batches_explicit_audit_cursor_targ
     monkeypatch.setattr(
         social_repo,
         "_create_job",
-        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {}))
-        or f"comments-job-{len(created_jobs) + 1}",
+        lambda *_args, **kwargs: (
+            created_jobs.append(dict(kwargs.get("config") or {})) or f"comments-job-{len(created_jobs) + 1}"
+        ),
     )
     monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
     monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **_kwargs: None)
@@ -28526,8 +28532,9 @@ def test_ingest_season_stores_sync_strategy_and_platform_scope(monkeypatch) -> N
     monkeypatch.setattr(
         social_repo,
         "dispatch_due_social_jobs",
-        lambda **kwargs: dispatch_calls.append(dict(kwargs))
-        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+        lambda **kwargs: (
+            dispatch_calls.append(dict(kwargs)) or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None}
+        ),
     )
 
     payload = social_repo.ingest_season(
@@ -28760,8 +28767,9 @@ def test_ingest_season_creates_sharded_posts_for_adaptive_dual_runner(monkeypatc
     monkeypatch.setattr(
         social_repo,
         "dispatch_due_social_jobs",
-        lambda **kwargs: dispatch_calls.append(dict(kwargs))
-        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+        lambda **kwargs: (
+            dispatch_calls.append(dict(kwargs)) or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None}
+        ),
     )
 
     payload = social_repo.ingest_season(
@@ -28845,8 +28853,9 @@ def test_ingest_season_keeps_multi_account_targeted_runs_dual_lane_and_fair(monk
     monkeypatch.setattr(
         social_repo,
         "dispatch_due_social_jobs",
-        lambda **kwargs: dispatch_calls.append(dict(kwargs))
-        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+        lambda **kwargs: (
+            dispatch_calls.append(dict(kwargs)) or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None}
+        ),
     )
 
     payload = social_repo.ingest_season(
@@ -29630,8 +29639,9 @@ def test_recover_stale_running_jobs_releases_matching_frontier_lease(monkeypatch
     monkeypatch.setattr(
         social_repo,
         "repair_instagram_canonical_metrics_for_run",
-        lambda run_id, **_kwargs: repaired_runs.append(run_id)
-        or {"run_id": run_id, "canonical_metric_rows_repaired": 0},
+        lambda run_id, **_kwargs: (
+            repaired_runs.append(run_id) or {"run_id": run_id, "canonical_metric_rows_repaired": 0}
+        ),
     )
     monkeypatch.setattr(
         social_repo,
@@ -30211,10 +30221,12 @@ def test_dispatch_due_social_jobs_modal_dispatches_eligible_jobs(monkeypatch: py
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30334,10 +30346,12 @@ def test_dispatch_due_social_jobs_skips_instagram_posts_auth_cooldown(
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30543,10 +30557,12 @@ def test_dispatch_due_social_jobs_uses_env_dispatch_limit(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30614,10 +30630,12 @@ def test_dispatch_due_social_jobs_catalog_mode_honors_platform_cap(monkeypatch: 
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30702,10 +30720,12 @@ def test_dispatch_due_social_jobs_catalog_mode_skips_same_active_account(
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30790,10 +30810,12 @@ def test_dispatch_due_social_jobs_catalog_mode_honors_run_cap(monkeypatch: pytes
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30873,10 +30895,12 @@ def test_dispatch_due_social_jobs_keeps_modal_required_instagram_catalog_jobs_di
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -30956,10 +30980,12 @@ def test_dispatch_due_social_jobs_skips_redispatch_when_modal_call_is_pending(
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -31157,10 +31183,12 @@ def test_dispatch_due_social_jobs_redispatches_unknown_modal_call_for_due_queue_
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -31259,10 +31287,12 @@ def test_dispatch_due_social_jobs_redispatches_terminal_modal_call_without_coold
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -31357,10 +31387,12 @@ def test_dispatch_due_social_jobs_redispatches_refreshed_terminal_modal_call_wit
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -31866,10 +31898,12 @@ def test_dispatch_due_social_jobs_caps_comments_scrapling_as_comments(
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -31939,10 +31973,12 @@ def test_dispatch_due_social_jobs_honors_comments_shard_count_over_default_platf
     monkeypatch.setattr(
         dispatch_runtime,
         "_touch_dispatch_metadata_for_snapshot",
-        lambda job, **updates: social_repo._touch_job_dispatch_metadata(
-            job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
-        )
-        is not False,
+        lambda job, **updates: (
+            social_repo._touch_job_dispatch_metadata(
+                job["id"], **{key: value for key, value in updates.items() if key != "expected_reservation"}
+            )
+            is not False
+        ),
     )
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -34253,8 +34289,10 @@ def test_scrape_shared_instagram_post_details_refresh_force_fetches_complete_gal
     monkeypatch.setattr(
         social_repo,
         "_batch_upsert_instagram_posts",
-        lambda _context, **kwargs: upsert_calls.extend({"post": post} for post in kwargs["posts"])
-        or [{"id": "post-db-1", "shortcode": "abc123"}],
+        lambda _context, **kwargs: (
+            upsert_calls.extend({"post": post} for post in kwargs["posts"])
+            or [{"id": "post-db-1", "shortcode": "abc123"}]
+        ),
     )
     monkeypatch.setattr(
         social_repo,
@@ -41325,8 +41363,9 @@ def test_upsert_facebook_post_falls_back_to_scraped_at_when_posted_at_missing(
     monkeypatch.setattr(
         social_repo,
         "_platform_posts_has_column",
-        lambda platform, column, *, conn=None: platform == "facebook"
-        and column in {"hashtags", "mentions", "user_avatar_url"},
+        lambda platform, column, *, conn=None: (
+            platform == "facebook" and column in {"hashtags", "mentions", "user_avatar_url"}
+        ),
     )
 
     def _fake_pg_upsert(table: str, payload: dict[str, object], conflict_col: str, conn=None):  # noqa: ANN001
@@ -41389,8 +41428,9 @@ def test_upsert_threads_post_falls_back_to_scraped_at_when_posted_at_missing(
     monkeypatch.setattr(
         social_repo,
         "_platform_posts_has_column",
-        lambda platform, column, *, conn=None: platform == "threads"
-        and column in {"hashtags", "mentions", "user_avatar_url"},
+        lambda platform, column, *, conn=None: (
+            platform == "threads" and column in {"hashtags", "mentions", "user_avatar_url"}
+        ),
     )
 
     def _fake_pg_upsert(table: str, payload: dict[str, object], conflict_col: str, conn=None):  # noqa: ANN001
@@ -43153,8 +43193,9 @@ def test_rebalance_slow_instagram_comments_shards_cancels_source_and_splits_rema
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda query, params=None, **_kwargs: update_calls.append({"query": query, "params": params})
-        or {"id": "slow-job-1"},
+        lambda query, params=None, **_kwargs: (
+            update_calls.append({"query": query, "params": params}) or {"id": "slow-job-1"}
+        ),
     )
     monkeypatch.setattr(
         social_repo,
@@ -43463,8 +43504,9 @@ def test_rebalance_waiting_instagram_comments_shards_splits_oversized_queued_job
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda query, params=None, **_kwargs: update_calls.append({"query": query, "params": params})
-        or {"id": "queued-large-1"},
+        lambda query, params=None, **_kwargs: (
+            update_calls.append({"query": query, "params": params}) or {"id": "queued-large-1"}
+        ),
     )
     monkeypatch.setattr(
         social_repo,
@@ -43568,8 +43610,10 @@ def test_cancel_social_account_comments_job_cancels_only_requested_active_job(
     monkeypatch.setattr(
         cast(Any, instagram_comments_pipeline).pg,
         "fetch_one",
-        lambda query, params=None, **_kwargs: fetch_one_calls.append({"query": query, "params": params})
-        or {"id": "22222222-2222-2222-2222-222222222222", "status": "cancelled"},
+        lambda query, params=None, **_kwargs: (
+            fetch_one_calls.append({"query": query, "params": params})
+            or {"id": "22222222-2222-2222-2222-222222222222", "status": "cancelled"}
+        ),
     )
     monkeypatch.setattr(
         instagram_comments_pipeline,
@@ -45392,15 +45436,17 @@ def test_finalization_reconciles_streaming_comments_without_deferred_relaunch(
     monkeypatch.setattr(
         run_lifecycle.legacy,
         "reconcile_instagram_catalog_comments_streaming_targets",
-        lambda **kwargs: reconciled.append(kwargs)
-        or {
-            "run_id": kwargs["run_id"],
-            "comments_run_id": "comments-run-stream",
-            "source_ids_reconciled": 3,
-            "targets_enqueued": 1,
-            "targets_skipped_duplicate": 2,
-            "state": "appending",
-        },
+        lambda **kwargs: (
+            reconciled.append(kwargs)
+            or {
+                "run_id": kwargs["run_id"],
+                "comments_run_id": "comments-run-stream",
+                "source_ids_reconciled": 3,
+                "targets_enqueued": 1,
+                "targets_skipped_duplicate": 2,
+                "state": "appending",
+            }
+        ),
     )
     monkeypatch.setattr(
         run_lifecycle.legacy,
@@ -50962,12 +51008,14 @@ def test_run_shared_account_frontier_posts_stage_uses_public_for_operator_recove
     monkeypatch.setattr(
         social_repo,
         "_fetch_shared_instagram_graphql_posts_page",
-        lambda **kwargs: fetch_calls.append(kwargs)
-        or (
-            [{"shortcode": "def", "taken_at": 1738454400}],
-            {"has_next_page": False, "end_cursor": None},
-            {"total_posts": 34},
-            "public",
+        lambda **kwargs: (
+            fetch_calls.append(kwargs)
+            or (
+                [{"shortcode": "def", "taken_at": 1738454400}],
+                {"has_next_page": False, "end_cursor": None},
+                {"total_posts": 34},
+                "public",
+            )
         ),
     )
     monkeypatch.setattr(
@@ -51058,19 +51106,21 @@ def test_run_shared_account_frontier_posts_stage_retries_cursor_forbidden_withou
     monkeypatch.setattr(
         social_repo,
         "_fetch_shared_instagram_graphql_posts_page",
-        lambda **kwargs: fetch_calls.append(kwargs)
-        or (
-            [],
-            {},
-            {
-                "error_code": "instagram_graphql_cursor_forbidden",
-                "error_class": "InstagramRequestFailure",
-                "error_status_code": 403,
-                "retryable": False,
-                "graphql_cursor": "cursor-2",
-                "transport": "authenticated",
-            },
-            "authenticated",
+        lambda **kwargs: (
+            fetch_calls.append(kwargs)
+            or (
+                [],
+                {},
+                {
+                    "error_code": "instagram_graphql_cursor_forbidden",
+                    "error_class": "InstagramRequestFailure",
+                    "error_status_code": 403,
+                    "retryable": False,
+                    "graphql_cursor": "cursor-2",
+                    "transport": "authenticated",
+                },
+                "authenticated",
+            )
         ),
     )
     monkeypatch.setattr(
@@ -53108,8 +53158,9 @@ def test_cancel_run_marks_running_jobs_cancelling_and_clears_terminal_heartbeats
     monkeypatch.setattr(
         social_repo,
         "_finalize_run_status",
-        lambda _run_id, force_recompute=False: finalize_calls.append(f"{_run_id}:{force_recompute}")
-        or {"total_jobs": 12},
+        lambda _run_id, force_recompute=False: (
+            finalize_calls.append(f"{_run_id}:{force_recompute}") or {"total_jobs": 12}
+        ),
     )
     monkeypatch.setattr(social_repo, "_invalidate_week_detail_cache_after_run_terminal_status", lambda: None)
     monkeypatch.setattr(

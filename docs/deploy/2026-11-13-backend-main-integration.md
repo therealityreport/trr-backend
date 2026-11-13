@@ -52,11 +52,14 @@ accepted by this merge. In particular:
 - Focused merged-candidate run: 401 passed, six failures. The failures identified
   the stage fixture mismatch, environment-dependent dry run, and obsolete SDK API.
 - Affected repair run: 92 passed, covering every failed check and affected behavior.
+- Existing summary-contract regression: one passed.
 - Real isolated PostgreSQL: owner/raw collaborator membership, count ordering,
   pagination totals, and empty zero-count selection passed. No configured TRR DB used.
 - SQL runner: shell syntax and four stub cases passed (command/file modes, successful
   and failed psql exits); no database connection was made.
-- All 49 changed Python files parse and pass Ruff. Repository hygiene and environment
+- All 49 changed Python files parse and pass Ruff. GitHub exposed formatting
+  differences under its pinned Ruff 0.17.4; all changed files now pass that exact
+  check and formatter. AST equality verifies the formatting follow-up changes no behavior. Repository hygiene and environment
   example checks pass. App direct-SQL inventory check passes; SQL ownership unchanged.
 - Independent review of the complete committed batch and affected repairs found no
   remaining merge blocker. Deferred sealed-manifest corruption hardening has no

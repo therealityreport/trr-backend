@@ -1425,8 +1425,9 @@ def test_modal_completion_evidence_contract_is_explicit() -> None:
 def test_browser_image_runtime_probe_is_bound_without_secrets() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_browser_image_runtime"] is modal_jobs._browser_image
     module = ast.parse(inspect.getsource(modal_jobs))
-    probe = next(node for node in module.body if isinstance(node, ast.FunctionDef)
-                 and node.name == "probe_browser_image_runtime")
+    probe = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "probe_browser_image_runtime"
+    )
     decorator = probe.decorator_list[0]
     assert isinstance(decorator, ast.Call)
     assert all(keyword.arg != "secrets" for keyword in decorator.keywords)

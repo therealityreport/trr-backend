@@ -90,5 +90,6 @@ def test_equivalent_percent_encoding_preserves_query():
 
 def test_search_passes_shared_deadline(monkeypatch):
     from trr_backend.socials.twitter import public_transport
+
     monkeypatch.setattr(public_transport, "fetch", lambda url, *, deadline: (url, deadline))
     assert public_search._fetch(URL, deadline=123) == (URL, 123)

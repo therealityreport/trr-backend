@@ -11,9 +11,12 @@ import trr_backend.repositories.admin_operations as admin_operations
 
 def test_finish_interrupted_claim_requires_an_owner_token() -> None:
     with patch.object(admin_operations.pg, "fetch_one") as fetch:
-        assert admin_operations.finish_interrupted_operation_claim(
-            str(uuid4()), claim_token=None, error_payload={"code": "REMOTE_OPERATION_INTERRUPTED"}
-        ) is None
+        assert (
+            admin_operations.finish_interrupted_operation_claim(
+                str(uuid4()), claim_token=None, error_payload={"code": "REMOTE_OPERATION_INTERRUPTED"}
+            )
+            is None
+        )
     fetch.assert_not_called()
 
 
@@ -502,10 +505,16 @@ def test_force_cancel_stale_operations_updates_rows_and_emits_terminal_events() 
 def test_stale_cleanup_only_selects_requested_operation_and_preserves_renewed_claim() -> None:
     selected_id, other_id = str(uuid4()), str(uuid4())
     selected = {
-        "id": selected_id, "status": "running", "is_stale": True,
-        "stale_reason": "heartbeat_stale", "heartbeat_at": "2026-10-22T07:55:40+00:00",
-        "updated_at": "2026-10-22T07:55:40+00:00", "claim_token": None,
-        "lease_expires_at": None, "claimed_by_worker_id": None, "cancel_requested_at": None,
+        "id": selected_id,
+        "status": "running",
+        "is_stale": True,
+        "stale_reason": "heartbeat_stale",
+        "heartbeat_at": "2026-10-22T07:55:40+00:00",
+        "updated_at": "2026-10-22T07:55:40+00:00",
+        "claim_token": None,
+        "lease_expires_at": None,
+        "claimed_by_worker_id": None,
+        "cancel_requested_at": None,
     }
     other = {**selected, "id": other_id}
     health = {"active_operations": [selected, other], "stale_operations": [selected, other], "updated_at": "now"}
@@ -518,10 +527,21 @@ def test_stale_cleanup_only_selects_requested_operation_and_preserves_renewed_cl
     query, params = update.call_args.args
     assert params[2] == [selected_id]
     candidates = json.loads(params[3])
-    assert candidates == [{key: selected[key] for key in (
-        "id", "status", "heartbeat_at", "updated_at", "claim_token",
-        "lease_expires_at", "claimed_by_worker_id", "cancel_requested_at",
-    )}]
+    assert candidates == [
+        {
+            key: selected[key]
+            for key in (
+                "id",
+                "status",
+                "heartbeat_at",
+                "updated_at",
+                "claim_token",
+                "lease_expires_at",
+                "claimed_by_worker_id",
+                "cancel_requested_at",
+            )
+        }
+    ]
     for key in ("heartbeat_at", "updated_at", "claim_token", "lease_expires_at"):
         assert f"candidate.{key} is not distinct from core.admin_operations.{key}" in query
     assert result["cancelled_operations"] == 0

@@ -787,10 +787,19 @@ def force_cancel_stale_operations(
     # Selection and mutation are separate statements. Fence the mutation to
     # the observed state so a renewed heartbeat or replacement claim wins.
     candidate_snapshots = [
-        {key: row.get(key) for key in (
-            "id", "status", "heartbeat_at", "updated_at", "claim_token",
-            "lease_expires_at", "claimed_by_worker_id", "cancel_requested_at",
-        )}
+        {
+            key: row.get(key)
+            for key in (
+                "id",
+                "status",
+                "heartbeat_at",
+                "updated_at",
+                "claim_token",
+                "lease_expires_at",
+                "claimed_by_worker_id",
+                "cancel_requested_at",
+            )
+        }
         for row in target_rows
     ]
     update_rows = pg.fetch_all(

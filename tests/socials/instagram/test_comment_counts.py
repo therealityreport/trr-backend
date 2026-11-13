@@ -335,9 +335,11 @@ def test_new_sort_preserves_legacy_comments_only_selection(monkeypatch, comment_
     monkeypatch.setattr(common, "_log_social_profile_perf", lambda **k: None)
     monkeypatch.setattr(counts, "profile_post_keys", lambda *a, **k: pytest.fail("Legacy selection was bypassed"))
     calls = []
+
     def select(account, **kwargs):
         calls.append(kwargs)
         return [{"source_id": "filtered"}], 1
+
     monkeypatch.setattr(common, "_fetch_instagram_comments_only_profile_rows_page", select)
     monkeypatch.setattr(common, "_social_account_profile_post_item", lambda platform, row, **k: dict(row))
     payload = common.get_social_account_profile_posts(
@@ -354,8 +356,14 @@ def test_canonical_pages_and_summary_use_shared_owner_and_collaborator_membershi
     monkeypatch.setattr(counts, "_query", lambda sql, params, **kw: seen.append((sql, params)) or [])
     monkeypatch.setattr(counts, "counts_for_posts", lambda *a, **kw: {})
     counts.profile_summary("bravotv")
-    counts.profile_post_keys("bravotv", page=1, page_size=25, comment_filter="reported_unknown",
-                             sort_by="post_reported_count", sort_dir="desc")
+    counts.profile_post_keys(
+        "bravotv",
+        page=1,
+        page_size=25,
+        comment_filter="reported_unknown",
+        sort_by="post_reported_count",
+        sort_dir="desc",
+    )
     for sql, params in seen:
         assert sql.count("_ig_account_match.account_handle") > 1
         assert "owner_username" in sql and "collaborators_detail" in sql

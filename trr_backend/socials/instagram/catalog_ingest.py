@@ -692,9 +692,7 @@ def _instagram_post_payload(
                 )
                 or {}
             )
-    count_observation_update = merge_observations(
-        raw_data, existing_row.get("raw_data") or {}, observed_at=_now_utc()
-    )
+    count_observation_update = merge_observations(raw_data, existing_row.get("raw_data") or {}, observed_at=_now_utc())
     existing_views = _normalize_non_negative_int(existing_row.get("views"))
     if incoming_raw_data_is_thin:
         existing_raw_data = existing_row.get("raw_data")

@@ -184,8 +184,13 @@ normalize_source_scope = _source_scopes.normalize_source_scope
 _normalize_source_scope_input = _source_scopes.normalize_source_scope_input
 _source_scope_is_network_family = _source_scopes.source_scope_is_network_family
 SOCIAL_ACCOUNT_PROFILE_COMMENT_FILTERS = {
-    "commentable", "incomplete", "not_commentable",
-    "reported_positive", "reported_zero", "reported_unknown", "count_difference",
+    "commentable",
+    "incomplete",
+    "not_commentable",
+    "reported_positive",
+    "reported_zero",
+    "reported_unknown",
+    "count_difference",
 }
 SOCIAL_ACCOUNT_PROFILE_POST_SORT_FIELDS = {
     "post_reported_count",
@@ -56983,8 +56988,9 @@ def _sort_social_account_profile_post_rows(
             metric = "post_minus_saved_difference" if normalized_sort_by == "count_difference" else normalized_sort_by
             difference = contract.get(metric)
             (unknown if difference is None else known).append((row, difference))
-        known.sort(key=lambda item: (item[1], str(item[0].get("source_id") or "")),
-                   reverse=normalized_sort_dir == "desc")
+        known.sort(
+            key=lambda item: (item[1], str(item[0].get("source_id") or "")), reverse=normalized_sort_dir == "desc"
+        )
         return [row for row, _ in known] + [row for row, _ in unknown]
     return sorted(
         (dict(row) for row in rows),
@@ -57964,8 +57970,7 @@ def _comments_only_profile_order_by_sql(
         "post_reported_count": reported_count_sql("filtered_rows.raw_data"),
         "instagram_saved_count": saved_count_sql("filtered_rows.source_id"),
         "count_difference": (
-            f"({reported_count_sql('filtered_rows.raw_data')} - "
-            f"{saved_count_sql('filtered_rows.source_id')})"
+            f"({reported_count_sql('filtered_rows.raw_data')} - {saved_count_sql('filtered_rows.source_id')})"
         ),
         "likes": "greatest(coalesce(filtered_rows.likes, 0), 0)",
     }
@@ -65338,8 +65343,9 @@ _configure_account_catalog_freshness_dependencies(
         cached_live_profile_total_posts=lambda platform, account_handle: _cached_live_profile_total_posts(
             platform, account_handle
         ),  # noqa: E501
-        cached_live_profile_total_posts_cached_only=lambda platform,
-        account_handle: _cached_live_profile_total_posts_cached_only(platform, account_handle),  # noqa: E501
+        cached_live_profile_total_posts_cached_only=lambda platform, account_handle: (
+            _cached_live_profile_total_posts_cached_only(platform, account_handle)
+        ),  # noqa: E501
         now_utc=lambda: _now_utc(),
         iso=lambda value: _iso(value),
         gap_analysis_operation_type=lambda: SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,

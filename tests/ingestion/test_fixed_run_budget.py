@@ -387,12 +387,17 @@ def test_create_only_queues_without_inline_worker(tmp_path, monkeypatch, capsys)
 @pytest.mark.parametrize("field,value", [("id", "999_456"), ("code", "Other123"), ("owner", "other")])
 def test_bounded_detail_rejects_changed_frozen_identity_before_observation(tmp_path, monkeypatch, field, value):
     from trr_backend.ingestion.domain import Conflict
+
     frozen = manifest()
     monkeypatch.setenv("TRR_INSTAGRAM_LOCAL_WORKER_BUDGET_DIR", str(tmp_path / "private"))
     context = {
-        "run": {"run_id": str(uuid4()), "intent": frozen.intent().payload(),
-                "intent_hash": frozen.intent().digest, "execution_placement": "local",
-                "created_at": datetime.now(UTC)},
+        "run": {
+            "run_id": str(uuid4()),
+            "intent": frozen.intent().payload(),
+            "intent_hash": frozen.intent().digest,
+            "execution_placement": "local",
+            "created_at": datetime.now(UTC),
+        },
         "target": {"stage": "post_details", "target_key": "Abc123", "operator_selection": _selection_setup(frozen)},
     }
     budget = FixedRunBudget.from_context(context)

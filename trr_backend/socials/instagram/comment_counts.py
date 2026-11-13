@@ -606,17 +606,17 @@ def profile_summary(account: str, *, conn: Any | None = None) -> dict[str, Any]:
         f"""
         select distinct on (source_id) source_id, raw_data from (
           select p.shortcode as source_id,
-            {_source_count_projection('coalesce(s.raw_data, p.raw_data)')} as raw_data, 1 as priority
+            {_source_count_projection("coalesce(s.raw_data, p.raw_data)")} as raw_data, 1 as priority
           from social.instagram_posts p
           left join social.instagram_post_payloads s on s.post_id = p.id
           where {_profile_account_match_sql()}
           union all
-          select p.source_id, {_source_count_projection('coalesce(s.raw_data, p.raw_data)')}, 2
+          select p.source_id, {_source_count_projection("coalesce(s.raw_data, p.raw_data)")}, 2
           from social.instagram_account_catalog_posts p
           left join social.instagram_account_catalog_post_payloads s on s.catalog_post_id = p.id
           where {_profile_account_match_sql()}
           union all
-          select p.source_id, {_source_count_projection('coalesce(s.raw_data, p.raw_data)')}, 3
+          select p.source_id, {_source_count_projection("coalesce(s.raw_data, p.raw_data)")}, 3
           from social.instagram_account_catalog_post_collaborators m
           join social.instagram_account_catalog_posts p on p.id = m.catalog_post_id
           left join social.instagram_account_catalog_post_payloads s on s.catalog_post_id = p.id

@@ -2499,9 +2499,7 @@ def get_post_comments(
                 "views": post["views"],
                 "engagement": engagement,
             },
-            "comment_counts": _comment_counts.counts_for_posts([
-                {**post, "source_id": source_id}
-            ]).get(source_id),
+            "comment_counts": _comment_counts.counts_for_posts([{**post, "source_id": source_id}]).get(source_id),
             "total_comments_in_db": len(comments),
             "comments": [_serialize_comment_tree(node) for node in _thread_comments(comments)],
         }

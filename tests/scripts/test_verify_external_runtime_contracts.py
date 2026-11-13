@@ -7,13 +7,17 @@ from scripts.dev import verify_external_runtime_contracts as cli
 
 @pytest.mark.parametrize("state,reason", [("ok", None), ("advisory", "decodo_unconfigured")])
 def test_external_runtime_contracts_only_reports_supported_auxiliary_services(
-    monkeypatch: pytest.MonkeyPatch, state: str, reason: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    reason: str | None,
 ) -> None:
     component = {"state": state, "reason": reason, "verify_only": True}
     monkeypatch.setattr(cli, "verify_decodo_contract", lambda: component)
 
     assert cli.verify_external_runtime_contracts() == {
-        "state": state, "reason": reason, "decodo": component,
+        "state": state,
+        "reason": reason,
+        "decodo": component,
     }
 
 

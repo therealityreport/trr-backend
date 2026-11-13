@@ -810,7 +810,9 @@ def test_run_remote_claimed_operation_heartbeats_claim(monkeypatch: pytest.Monke
 @pytest.mark.parametrize("interruption_kind", ["base_exception", "modal"])
 @pytest.mark.parametrize("cleanup_failure", ["none", "release", "finish_and_release"])
 def test_remote_interruption_is_recorded_before_claim_release(
-    terminal_status: str | None, interruption_kind: str, cleanup_failure: str,
+    terminal_status: str | None,
+    interruption_kind: str,
+    cleanup_failure: str,
 ) -> None:
     class RemoteInterruption(BaseException):
         pass
@@ -818,8 +820,7 @@ def test_remote_interruption_is_recorded_before_claim_release(
     operation_id = str(uuid4())
     operation = {"id": operation_id, "operation_type": "admin_show_refresh", "claim_token": "owner"}
     interruption_type = (
-        pytest.importorskip("modal.exception").InputCancellation
-        if interruption_kind == "modal" else RemoteInterruption
+        pytest.importorskip("modal.exception").InputCancellation if interruption_kind == "modal" else RemoteInterruption
     )
     interrupted = interruption_type("worker stopped")
     terminal = {"id": operation_id, "status": terminal_status} if terminal_status else None
