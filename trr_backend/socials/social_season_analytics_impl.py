@@ -25733,11 +25733,12 @@ def _ingest_instagram(
                             details_refresh_detail_fetch_attempts += 1
                             post_payload = scraper.fetch_post_info(shortcode, delay=post_delay_seconds)
                             node = _extract_instagram_post_detail_node(post_payload)
-                            parsed_post = scraper._parse_post_node(node, detail_config) if node else None  # noqa: SLF001
-                            if parsed_post is not None:
-                                from trr_backend.socials.instagram.comment_counts import capture_detail_observations
+                            if node:
+                                parsed_post = scraper._parse_post_node(node, detail_config)  # noqa: SLF001
+                                if parsed_post is not None:
+                                    from trr_backend.socials.instagram.comment_counts import capture_detail_observations
 
-                                capture_detail_observations(parsed_post, node, observed_at=_now_utc())
+                                    capture_detail_observations(parsed_post, node, observed_at=_now_utc())
                     if parsed_post is not None:
                         now_utc = _now_utc()
                         try:

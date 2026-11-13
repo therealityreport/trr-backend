@@ -1,7 +1,10 @@
+from typing import cast
+
 import pytest
 from fastapi import HTTPException
 
 from api.routers.socials import profile_cookies
+from api.routers.socials.profile_reads import CookieRefreshRequest
 from trr_backend.socials.control_plane import runtime
 
 
@@ -30,9 +33,11 @@ def test_public_refresh_rejected_before_loading_login_info(monkeypatch):
 
     monkeypatch.setattr(runtime, "check_platform_cookie_health", forbidden)
     with pytest.raises(HTTPException) as error:
-        profile_cookies.post_cookie_refresh_route("instagram", "bravotv", None)
+        profile_cookies.post_cookie_refresh_route("instagram", "bravotv", CookieRefreshRequest())
     assert error.value.status_code == 403
-    assert error.value.detail["code"] == "INSTAGRAM_PUBLIC_ONLY"
+    detail = cast(object, error.value.detail)
+    assert isinstance(detail, dict)
+    assert detail["code"] == "INSTAGRAM_PUBLIC_ONLY"
 
 
 def test_modal_strict_probe_cannot_override_public_only_policy(monkeypatch):

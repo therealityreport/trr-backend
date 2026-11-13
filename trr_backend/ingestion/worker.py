@@ -185,6 +185,8 @@ class Worker:
         )
 
     def execute(self, reservation: dict[str, Any], *, deadline_callback: Callable | None = None) -> dict[str, Any]:
+        from trr_backend.ingestion.reply_context import execution_deadline
+
         owned = {key: reservation[key] for key in ("run_id", "account", "generation", "target_key", "owner_token")}
         owned["stage"] = Stage(reservation["stage"])
         args = {key: value for key, value in owned.items() if key != "stage"}
@@ -220,13 +222,13 @@ class Worker:
 
                 raise IdentityDeferred("operator_public_only", None, blocked=True)
             from trr_backend.ingestion.fixed_run_budget import FixedRunBudget
-            from trr_backend.ingestion.reply_context import execution_deadline
 
             budget = FixedRunBudget.from_context(context)
             if budget:
                 deadlines = [budget.monotonic_deadline]
-                if execution_deadline.get() is not None:
-                    deadlines.append(execution_deadline.get())
+                inherited_deadline = execution_deadline.get()
+                if inherited_deadline is not None:
+                    deadlines.append(inherited_deadline)
                 budget_deadline_token = execution_deadline.set(min(deadlines))
             if deadline_callback:
                 expires = context["target"]["owner_expires_at"]

@@ -18,7 +18,7 @@ from trr_backend.db import pg
 logger = logging.getLogger(__name__)
 OBSERVATION_KEY = "comment_count_observations"
 SOURCE_FIELDS = ("post_reported_count", "facebook_count_observed_on_instagram", "threads_count_observed_on_instagram")
-INVENTORY_FIELDS = (
+INVENTORY_FIELDS: tuple[str, ...] = (
     "instagram_saved_count",
     "instagram_saved_top_level_count",
     "instagram_saved_reply_count",
@@ -519,7 +519,7 @@ def profile_post_keys(
         "reported_zero": "reported_count = 0",
         "reported_unknown": "reported_count is null",
         "count_difference": "reported_count is not null",
-    }.get(comment_filter, "true")
+    }.get(comment_filter or "", "true")
     needs_saved = sort_by in {"instagram_saved_count", "count_difference", "saved_comments", "missing_comments"}
     needs_saved = needs_saved or comment_filter == "count_difference"
     all_saved = sort_by in {"instagram_saved_count", "saved_comments", "missing_comments"}

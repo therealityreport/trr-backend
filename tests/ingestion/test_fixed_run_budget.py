@@ -8,9 +8,11 @@ from uuid import uuid4
 
 import pytest
 
+from trr_backend.ingestion.domain import Failure
 from trr_backend.ingestion.fixed_run_budget import FixedRunBudget
 from trr_backend.ingestion.fixed_validation import FixedManifest, FixedPost, _selection_setup
 from trr_backend.ingestion.identity_policy import IdentityDeferred
+from trr_backend.ingestion.persistence import Store
 
 
 def manifest():
@@ -26,6 +28,22 @@ def manifest():
 def consumed(budget):
     with sqlite3.connect(budget.path) as db:
         return db.execute("select consumed from budget where id=1").fetchone()[0]
+
+
+class FailureRecordingStore(Store):
+    def __init__(self):
+        super().__init__(execution_placement="local")
+        self.failures: list[Failure] = []
+
+    def acquire(self, *args, **kwargs):
+        return {}
+
+    def checkpoint_failure(self, *args, failure: Failure, **kwargs):
+        self.failures.append(failure)
+
+
+def forbidden(*args, **kwargs):
+    raise AssertionError("Attempted unexpected source construction")
 
 
 def test_historical_manifest_hash_shape_is_preserved():
@@ -88,7 +106,7 @@ def test_actual_source_gate_transaction_protocol(tmp_path, monkeypatch, finalize
         calls.append("ordinary")
 
     if finalized:
-        before.finalize_in_transaction = lambda *args: calls.append("finalize")
+        monkeypatch.setattr(before, "finalize_in_transaction", lambda *args: calls.append("finalize"), raising=False)
     budget = FixedRunBudget(tmp_path / "private", uuid4(), "hash", 1, time.time() + 180)
     gate.before_counted_request(budget.wrap(before))
     assert consumed(budget) == 1
@@ -132,14 +150,7 @@ def test_worker_exhaustion_holds_target_and_resets_deadline(tmp_path, monkeypatc
         },
         "post": {"id": str(uuid4()), "comments_count": 1},
     }
-    failures = []
-
-    class Store:
-        def acquire(self, **kwargs):
-            return {}
-
-        def checkpoint_failure(self, **kwargs):
-            failures.append(kwargs["failure"])
+    store = FailureRecordingStore()
 
     class Source:
         def __call__(self, **callbacks):
@@ -151,12 +162,12 @@ def test_worker_exhaustion_holds_target_and_resets_deadline(tmp_path, monkeypatc
 
     source = Source()
     worker = module.Worker(
-        Store(),
-        listing_source=None,
-        detail_source=None,
+        store,
+        listing_source=forbidden,
+        detail_source=forbidden,
         comment_source=lambda *args: source,
-        media_loader=None,
-        media_storage=None,
+        media_loader=forbidden,
+        media_storage=forbidden,
     )
     monkeypatch.setattr(worker, "context", lambda owned: context)
     monkeypatch.setattr(
@@ -175,7 +186,7 @@ def test_worker_exhaustion_holds_target_and_resets_deadline(tmp_path, monkeypatc
     )
     assert result["outcome"] == "unresolved"
     assert result["code"] == "operator_request_limit"
-    assert failures[0].identity_blocked is True
+    assert store.failures[0].identity_blocked is True
     assert execution_deadline.get() == before
 
 
@@ -183,25 +194,14 @@ def test_public_worker_rejects_authenticated_intent_before_source(monkeypatch):
     from trr_backend.ingestion.domain import RunIntent, SourceProfile
     from trr_backend.ingestion.worker import Worker
 
-    failures = []
-
-    class Store:
-        def acquire(self, **kwargs):
-            return {}
-
-        def checkpoint_failure(self, **kwargs):
-            failures.append(kwargs["failure"])
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Attempted credential-dependent source construction")
-
+    store = FailureRecordingStore()
     worker = Worker(
-        Store(),
+        store,
         listing_source=forbidden,
         detail_source=forbidden,
         comment_source=forbidden,
-        media_loader=None,
-        media_storage=None,
+        media_loader=forbidden,
+        media_storage=forbidden,
     )
     intent = RunIntent("bravotv", source_profile=SourceProfile.for_mode("authenticated"))
     monkeypatch.setenv("TRR_INSTAGRAM_LOCAL_WORKER_PUBLIC_ONLY", "1")
@@ -221,7 +221,7 @@ def test_public_worker_rejects_authenticated_intent_before_source(monkeypatch):
         }
     )
     assert result["code"] == "operator_public_only"
-    assert failures[0].identity_blocked is True
+    assert store.failures[0].identity_blocked is True
 
 
 @pytest.mark.parametrize(
@@ -285,7 +285,7 @@ def test_deadline_and_binding_fail_without_extra_admission(tmp_path):
         FixedRunBudget(tmp_path / "private", run, "different", 3, 1100, clock=lambda: 1000)
 
 
-def test_both_transaction_paths_count_once_and_preserve_release(tmp_path):
+def test_both_transaction_paths_count_once_and_preserve_release(tmp_path, monkeypatch):
     budget = FixedRunBudget(tmp_path / "private", uuid4(), "hash", 3, time.time() + 180)
     calls = []
 
@@ -301,20 +301,28 @@ def test_both_transaction_paths_count_once_and_preserve_release(tmp_path):
     def release(*args):
         calls.append("release")
 
-    transactional.release_in_transaction = release
-    outer.in_transaction = transactional
-    outer.run_id = "fixture"
-    outer.deadline = time.monotonic() + 5
+    monkeypatch.setattr(transactional, "release_in_transaction", release, raising=False)
+    monkeypatch.setattr(outer, "in_transaction", transactional, raising=False)
+    monkeypatch.setattr(outer, "run_id", "fixture", raising=False)
+    deadline = time.monotonic() + 5
+    monkeypatch.setattr(outer, "deadline", deadline, raising=False)
     wrapped = budget.wrap(outer)
-    wrapped.in_transaction(None)
-    transactional.finalize_in_transaction = finalize
+    wrapped_transactional = getattr(wrapped, "in_transaction", None)
+    assert callable(wrapped_transactional)
+    wrapped_transactional(None)
+    monkeypatch.setattr(transactional, "finalize_in_transaction", finalize, raising=False)
     wrapped = budget.wrap(outer)
-    wrapped.in_transaction.finalize_in_transaction(None, "sql", ())
-    wrapped.in_transaction.release_in_transaction(None, None)
+    wrapped_transactional = getattr(wrapped, "in_transaction", None)
+    wrapped_finalize = getattr(wrapped_transactional, "finalize_in_transaction", None)
+    wrapped_release = getattr(wrapped_transactional, "release_in_transaction", None)
+    assert callable(wrapped_finalize)
+    assert callable(wrapped_release)
+    wrapped_finalize(None, "sql", ())
+    wrapped_release(None, None)
     assert consumed(budget) == 2
     assert calls == ["transactional", "finalize", "release"]
-    assert wrapped.deadline == outer.deadline
-    assert wrapped.run_id == "fixture"
+    assert getattr(wrapped, "deadline", None) == deadline
+    assert getattr(wrapped, "run_id", None) == "fixture"
 
 
 def test_persisted_selection_and_intent_must_match(tmp_path, monkeypatch):
@@ -330,7 +338,9 @@ def test_persisted_selection_and_intent_must_match(tmp_path, monkeypatch):
         },
         "target": {"stage": "comments", "target_key": "Abc123", "operator_selection": _selection_setup(frozen)},
     }
-    assert FixedRunBudget.from_context(context).limit == 3
+    budget = FixedRunBudget.from_context(context)
+    assert budget is not None
+    assert budget.limit == 3
     context["target"]["operator_selection"]["manifest"]["max_source_requests"] = 4
     with pytest.raises(IdentityDeferred, match="operator_budget_invalid"):
         FixedRunBudget.from_context(context)
@@ -401,6 +411,7 @@ def test_bounded_detail_rejects_changed_frozen_identity_before_observation(tmp_p
         "target": {"stage": "post_details", "target_key": "Abc123", "operator_selection": _selection_setup(frozen)},
     }
     budget = FixedRunBudget.from_context(context)
+    assert budget is not None
     captured = []
     observe = budget.callbacks({"source_observer": lambda *a: captured.append(a)})["source_observer"]
     payload = {"id": "123_456", "code": "Abc123", "user": {"pk": "456", "username": "bravotv"}}

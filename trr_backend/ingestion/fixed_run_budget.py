@@ -5,19 +5,39 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, ParamSpec, Self, TypeVar
 from uuid import UUID
 
+from trr_backend.ingestion.callable_attributes import with_attributes
 from trr_backend.ingestion.domain import Stage, fingerprint
 from trr_backend.ingestion.identity_policy import IdentityDeferred
 
+if TYPE_CHECKING:
+    from trr_backend.ingestion.fixed_validation import FixedPost
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 
 class FixedRunBudget:
-    def __init__(self, directory, run_id, manifest_hash, limit, deadline, *, clock=time.time):
+    def __init__(
+        self,
+        directory: str | Path,
+        run_id: str | UUID,
+        manifest_hash: str,
+        limit: int,
+        deadline: float,
+        *,
+        clock: Callable[[], float] = time.time,
+        detail_post: FixedPost | None = None,
+    ):
         self.run_id = str(UUID(str(run_id)))
         self.limit, self.deadline, self.clock = limit, deadline, clock
+        self.detail_post = detail_post
         self.binding = fingerprint(
             {"run": self.run_id, "manifest": manifest_hash, "limit": limit, "deadline": deadline}
         )
@@ -45,7 +65,7 @@ class FixedRunBudget:
             raise IdentityDeferred("operator_budget_unavailable", None, blocked=True) from None
 
     @classmethod
-    def from_context(cls, context):
+    def from_context(cls, context: Mapping[str, Any]) -> Self | None:
         setup = context["target"].get("operator_selection") or {}
         manifest = setup.get("manifest") if isinstance(setup, dict) else None
         if not isinstance(setup, dict) or setup.get("kind") != "operator_selection_setup":
@@ -68,6 +88,8 @@ class FixedRunBudget:
                 raise ValueError("Frozen local budget binding required")
             if frozen.max_source_requests is None:
                 return None
+            if frozen.max_run_seconds is None:
+                raise ValueError("A bounded selection requires a run deadline")
             if not directory:
                 raise ValueError("Private operator budget directory required")
             created = run["created_at"]
@@ -75,15 +97,14 @@ class FixedRunBudget:
                 created = datetime.fromisoformat(created.replace("Z", "+00:00"))
             if created.utcoffset() is None:
                 raise ValueError("Timezone-aware run start required")
-            budget = cls(
+            return cls(
                 directory,
                 run["run_id"],
                 frozen.digest,
                 frozen.max_source_requests,
                 created.timestamp() + frozen.max_run_seconds,
+                detail_post=frozen.posts[0] if target["stage"] == Stage.DETAILS.value else None,
             )
-            budget.detail_post = frozen.posts[0] if target["stage"] == Stage.DETAILS.value else None
-            return budget
         except IdentityDeferred:
             raise
         except (KeyError, TypeError, ValueError, AttributeError):
@@ -114,8 +135,8 @@ class FixedRunBudget:
         except (OSError, ValueError, TypeError, sqlite3.Error):
             raise IdentityDeferred("operator_budget_unavailable", None, blocked=True) from None
 
-    def wrap(self, callback):
-        def guarded(*args, **kwargs):
+    def wrap(self, callback: Callable[_P, _R]) -> Callable[_P, _R]:
+        def guarded(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             self.consume()
             return callback(*args, **kwargs)
 
@@ -125,18 +146,18 @@ class FixedRunBudget:
             if callable(hook):
                 setattr(guarded, name, self.wrap(hook))
         deadlines = [self.monotonic_deadline - 20]
-        if getattr(callback, "deadline", None) is not None:
-            deadlines.append(callback.deadline)
-        guarded.deadline = min(deadlines)
-        return guarded
+        deadline = getattr(callback, "deadline", None)
+        if deadline is not None:
+            deadlines.append(deadline)
+        return with_attributes(guarded, deadline=min(deadlines))
 
-    def callbacks(self, callbacks):
+    def callbacks(self, callbacks: Mapping[str, Callable[..., Any]]) -> dict[str, Callable[..., Any]]:
         wrapped = {
             name: self.wrap(value) if name in {"on_request", "pre_source_request"} else value
             for name, value in callbacks.items()
         }
 
-        post = getattr(self, "detail_post", None)
+        post = self.detail_post
         if post is not None and "source_observer" in wrapped:
             from trr_backend.ingestion.fixed_validation import _matches_native
             from trr_backend.ingestion.persistence import Conflict

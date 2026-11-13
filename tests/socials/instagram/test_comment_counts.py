@@ -84,6 +84,7 @@ def test_canonical_inventory_success_zero_and_unavailable_are_distinct(monkeypat
 
     monkeypatch.setattr(counts, "_query", query)
     inventory = counts.load_inventory(["a", "a", "b"])
+    assert inventory is not None
     assert inventory["a"]["instagram_saved_reply_count"] == 1
     assert inventory["b"]["instagram_saved_count"] == 0
     sql, params = captured[0]
@@ -128,14 +129,20 @@ def test_source_observation_timestamp_does_not_use_post_timestamp():
 def test_new_sql_filters_use_observation_presence_and_preserve_old_semantics():
     import trr_backend.socials.social_season_analytics_impl as repo
 
-    args = {"reported_comments_sql": "d.comments_count", "saved_comments_sql": "cc.saved_comments"}
-    assert repo._comments_only_profile_filter_where_sql(comment_filter="not_commentable", **args) == (
-        "greatest(coalesce(d.comments_count, 0), 0) = 0"
+    reported = "d.comments_count"
+    saved = "cc.saved_comments"
+    not_commentable = repo._comments_only_profile_filter_where_sql(
+        comment_filter="not_commentable", reported_comments_sql=reported, saved_comments_sql=saved
     )
-    unknown = repo._comments_only_profile_filter_where_sql(comment_filter="reported_unknown", **args)
+    assert not_commentable == "greatest(coalesce(d.comments_count, 0), 0) = 0"
+    unknown = repo._comments_only_profile_filter_where_sql(
+        comment_filter="reported_unknown", reported_comments_sql=reported, saved_comments_sql=saved
+    )
     assert unknown.endswith("is null")
     assert "comment_count_observations,post_reported_count" in unknown
-    difference = repo._comments_only_profile_filter_where_sql(comment_filter="count_difference", **args)
+    difference = repo._comments_only_profile_filter_where_sql(
+        comment_filter="count_difference", reported_comments_sql=reported, saved_comments_sql=saved
+    )
     assert "count(*)" in difference
     assert "<> 'fb_crosspost'" in difference
     for direction in ("asc", "desc"):
@@ -210,6 +217,7 @@ def test_catalog_refresh_preserves_prior_detail_observation_without_changing_leg
     payload = catalog._shared_catalog_instagram_post_payload(
         run_id=None, account_handle="bravotv", post=post, existing_row={"raw_data": prior}
     )
+    assert payload is not None
     assert payload["comments_count"] == 99
     contract = counts.build_comment_counts(payload)
     assert contract["post_reported_count"] == 6

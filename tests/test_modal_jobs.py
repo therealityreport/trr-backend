@@ -2062,7 +2062,7 @@ def test_remote_worker_import_ignores_deployment_scaling_guard(monkeypatch, moda
     # Keep the existing test Modal implementation, overriding only locality.
     for key, value in vars(sys.modules["modal"]).items():
         setattr(fake_modal, key, value)
-    fake_modal.is_local = lambda: False
+    monkeypatch.setattr(fake_modal, "is_local", lambda: False, raising=False)
     monkeypatch.setitem(sys.modules, "modal", fake_modal)
     monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "0")
     monkeypatch.setenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", "1")

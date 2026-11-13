@@ -7,6 +7,7 @@ from tests.ingestion.test_persistence import launch, target
 from trr_backend.ingestion.application import PostActivity
 from trr_backend.ingestion.domain import Conflict, Stage
 from trr_backend.ingestion.evidence import Evidence
+from trr_backend.ingestion.persistence import Store
 from trr_backend.ingestion.providers import InvalidSourceError
 
 database = database_fixture
@@ -107,14 +108,14 @@ def test_receipt_cannot_relabel_old_evidence_as_new(database):
 
 @pytest.mark.parametrize("stage", [Stage.LISTING, Stage.DETAILS])
 def test_native_count_provenance_is_exclusive_to_the_detail_boundary(stage):
-    class MemoryStore:
-        def acquire(self, **kwargs):
-            pass
+    class MemoryStore(Store):
+        def acquire(self, *args, **kwargs):
+            return {}
 
-        def retain_evidence(self, **kwargs):
+        def retain_evidence(self, *args, **kwargs):
             return "retained-native-payload"
 
-        def commit_target(self, **kwargs):
+        def commit_target(self, *args, **kwargs):
             return kwargs["write_canonical"](None)
 
     node = {

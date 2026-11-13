@@ -123,6 +123,7 @@ class PostActivity:
 
             # raw_data is the unwrapped retained native node. Scalar DTO counts
             # and serializer defaults are not evidence of a source observation.
+            assert parsed.post is not None  # Validated by validate_detail.
             source.update(detail_observation_metadata(parsed.post.raw_data, observed_at=parsed.observed_at))
 
         def write(conn):

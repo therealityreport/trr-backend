@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import ModuleType
+
+
+def _source_sha256(module: ModuleType) -> str:
+    source_path = module.__file__
+    if source_path is None:
+        raise ValueError(f"Module {module.__name__} has no source file")
+    return hashlib.sha256(Path(source_path).read_bytes()).hexdigest()
 
 
 def probe_public_conversation(tweet_id: str, *, max_pages: int = 2, max_items: int = 40) -> dict:
@@ -31,10 +39,7 @@ def probe_public_conversation(tweet_id: str, *, max_pages: int = 2, max_items: i
         **result,
         "state_free": True,
         "authentication_loader_calls": auth_calls,
-        "source_sha256": {
-            module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-            for module in (direct_scrape, public_mirror)
-        },
+        "source_sha256": {module.__name__: _source_sha256(module) for module in (direct_scrape, public_mirror)},
     }
 
 
@@ -45,7 +50,7 @@ def probe_public_search(query: str) -> dict:
     return {
         **result,
         "state_free": True,
-        "source_sha256": hashlib.sha256(Path(public_search.__file__).read_bytes()).hexdigest(),
+        "source_sha256": _source_sha256(public_search),
     }
 
 
@@ -84,7 +89,6 @@ def probe_public_research_search(query: str) -> dict:
         "state_free": True,
         "forbidden_calls": calls,
         "source_sha256": {
-            module.__name__: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-            for module in (anonymous_search, direct_scrape, public_search)
+            module.__name__: _source_sha256(module) for module in (anonymous_search, direct_scrape, public_search)
         },
     }

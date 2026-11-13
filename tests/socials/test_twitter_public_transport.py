@@ -67,7 +67,7 @@ def test_search_retains_first_page_when_next_read_expires(monkeypatch):
 
 
 def test_thread_passes_one_deadline_to_all_branches(monkeypatch):
-    from types import SimpleNamespace
+    from trr_backend.socials.twitter.scraper import Tweet
 
     deadlines = []
 
@@ -75,7 +75,27 @@ def test_thread_passes_one_deadline_to_all_branches(monkeypatch):
         deadlines.append(deadline)
         if len(deadlines) > 1:
             return public_mirror.PublicMirrorConversation(error="Public provider deadline", stop_reason="deadline")
-        post = SimpleNamespace(tweet_id="101", reply_to_tweet_id="100", replies=1)
+        post = Tweet(
+            tweet_id="101",
+            reply_to_tweet_id="100",
+            replies=1,
+            date_time="",
+            created_at=0,
+            text="",
+            hashtags=[],
+            mentions=[],
+            likes=0,
+            retweets=0,
+            quotes=0,
+            views=0,
+            url="",
+            username="",
+            display_name="",
+            user_verified=False,
+            is_reply=True,
+            is_retweet=False,
+            is_quote=False,
+        )
         return public_mirror.PublicMirrorConversation(tweets=[post], pages=[{}])
 
     monkeypatch.setattr(public_thread, "fetch_public_conversation", fetch)

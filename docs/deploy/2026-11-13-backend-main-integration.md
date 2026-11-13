@@ -59,11 +59,21 @@ accepted by this merge. In particular:
   and failed psql exits); no database connection was made.
 - All 49 changed Python files parse and pass Ruff. GitHub exposed formatting
   differences under its pinned Ruff 0.17.4; all changed files now pass that exact
-  check and formatter. AST equality verifies the formatting follow-up changes no behavior. Repository hygiene and environment
-  example checks pass. App direct-SQL inventory check passes; SQL ownership unchanged.
+  check and formatter. AST equality verifies the formatting follow-up changes no behavior.
+  Repository hygiene and environment example checks pass. App direct-SQL inventory check passes; SQL ownership unchanged.
 - Independent review of the complete committed batch and affected repairs found no
   remaining merge blocker. Deferred sealed-manifest corruption hardening has no
   identified normal execution path and is not treated as a passing live check.
+
+GitHub's initial merge run passed the API tests, Python 3.12 canary, secret scan,
+and Modal lock freshness. It exposed 53 Pyright errors in the integrated code and
+fixtures. The follow-up makes optional values explicit, preserves callable hook
+signatures, and uses valid typed test doubles. It also rejects non-text timestamps
+through the existing controlled error path. Focused follow-up tests passed:
+66 Twitter/policy tests, 62 Instagram tests, and 61 ingestion tests. Independent
+review of the follow-up found no actionable defects. Ruff 0.17.4 passes.
+Pyright 1.1.390 checks all 1,749 files with zero errors (88 existing warnings).
+Its final run used a 3 GB Node heap after the initial 2 GB limit was exhausted.
 
 Private verification logs and the preservation manifest are retained in
 `/Users/thomashulihan/Documents/Codex/2026-11-13/survey-profile-release/backend-integration/`.

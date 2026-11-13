@@ -2789,7 +2789,10 @@ def run_durable_instagram_details(job: Mapping[str, Any], *, worker_id: str) -> 
             def validate_detail(payload, source_id=target["source_id"]):
                 nonlocal parsed
                 node = _extract_instagram_post_detail_node(payload)
-                parsed = scraper._parse_post_node(node, scrape_config) if node else None  # noqa: SLF001
+                if not node:
+                    parsed = None
+                    raise ValueError("detail_response_missing")
+                parsed = scraper._parse_post_node(node, scrape_config)  # noqa: SLF001
                 if parsed is not None:
                     capture_detail_observations(parsed, node, observed_at=_now_utc())
                 if not parsed:
@@ -3230,9 +3233,10 @@ def _scrape_shared_instagram_post_details_refresh(
                     details_refresh_detail_fetch_attempts += 1
                     post_payload = scraper.fetch_post_info(shortcode, delay=detail_config.delay_seconds)
                     node = _extract_instagram_post_detail_node(post_payload)
-                    parsed_post = scraper._parse_post_node(node, detail_config) if node else None  # noqa: SLF001
-                    if parsed_post is not None:
-                        capture_detail_observations(parsed_post, node, observed_at=_now_utc())
+                    if node:
+                        parsed_post = scraper._parse_post_node(node, detail_config)  # noqa: SLF001
+                        if parsed_post is not None:
+                            capture_detail_observations(parsed_post, node, observed_at=_now_utc())
             if parsed_post is not None and legacy_inline_enrichment:
                 try:
                     _enrich_instagram_post_from_permalink(post=parsed_post, scraper=scraper, now_utc=now_utc)

@@ -43,7 +43,7 @@ def _parse(body: bytes, *, url: str) -> tuple[list[dict], str | None]:
         timestamp = date.get("datetime") if date else None
         if not re.fullmatch(r"[0-9]{2,20}", post_id) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", username):
             raise ValueError("Public search record identity invalid")
-        if text is None or not timestamp:
+        if text is None or not isinstance(timestamp, str) or not timestamp:
             raise ValueError("Public search record text or timestamp missing")
         datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         posts.append(

@@ -94,6 +94,7 @@ def _to_tweet(post: Any, *, root_id: str, role: str) -> Tweet:
         value = post.get(key)
         return max(0, value) if isinstance(value, int) and not isinstance(value, bool) else 0
 
+    display_name = author.get("name")
     return Tweet(
         tweet_id=post_id,
         date_time=date_time,
@@ -108,7 +109,7 @@ def _to_tweet(post: Any, *, root_id: str, role: str) -> Tweet:
         views=count("views"),
         url=f"https://x.com/{username}/status/{post_id}",
         username=username,
-        display_name=author.get("name") if isinstance(author.get("name"), str) else username,
+        display_name=display_name if isinstance(display_name, str) else username,
         user_verified=author.get("verified") is True,
         is_reply=parent_id is not None,
         is_retweet=False,
