@@ -8,18 +8,20 @@ hashtag and mention searches can preserve membership history.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
 from trr_backend.db import pg
 from trr_backend.socials.control_plane import _adapt_payload_json_values, _pg_upsert_many
+from trr_backend.socials.twitter.public_models import PublicPost
 from trr_backend.socials.twitter.scraper import Tweet
 
 logger = logging.getLogger(__name__)
 
 
 def upsert_standalone_tweets(
-    tweets: list[Tweet],
+    tweets: Sequence[Tweet | PublicPost],
     *,
     scrape_query: str,
     conn: Any | None = None,
@@ -28,19 +30,17 @@ def upsert_standalone_tweets(
     if not tweets:
         return []
 
-    now = datetime.now(UTC).isoformat()
-    payloads = [_tweet_to_payload(tweet, scrape_query=scrape_query, scraped_at=now) for tweet in tweets]
-    from trr_backend.socials.twitter.public_models import PublicPost
-
     if any(isinstance(tweet, PublicPost) for tweet in tweets):
         raise ValueError("Public observations require the verified public persistence path")
+    now = datetime.now(UTC).isoformat()
+    payloads = [_tweet_to_payload(tweet, scrape_query=scrape_query, scraped_at=now) for tweet in tweets]
     rows = _pg_upsert_many("twitter_tweets", payloads, conflict_col="tweet_id", conn=conn)
     logger.info("upsert_standalone_tweets: %d upserted for query %r", len(rows), scrape_query)
     return rows
 
 
 def persist_standalone_twitter_search(
-    tweets: list[Tweet],
+    tweets: Sequence[Tweet | PublicPost],
     *,
     raw_query: str,
     normalized_search_query: str,
@@ -99,8 +99,8 @@ def persist_standalone_twitter_search(
     }
 
 
-def _dedupe_tweets_by_id(tweets: list[Tweet]) -> list[Tweet]:
-    deduped: list[Tweet] = []
+def _dedupe_tweets_by_id(tweets: Sequence[Tweet | PublicPost]) -> list[Tweet | PublicPost]:
+    deduped: list[Tweet | PublicPost] = []
     seen_tweet_ids: set[str] = set()
     for tweet in tweets:
         tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
@@ -147,11 +147,9 @@ def _insert_scrape_query_memberships(
     return pg.execute_values_returning(sql, rows, conn=conn)
 
 
-def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> dict[str, Any]:
+def _tweet_to_payload(tweet: Tweet | PublicPost, *, scrape_query: str, scraped_at: str) -> dict[str, Any]:
     """Convert a Tweet dataclass to a social.twitter_tweets insert payload."""
     created_at_ts: str | None = None
-    from trr_backend.socials.twitter.public_models import PublicPost
-
     if isinstance(tweet, PublicPost):
         created_at_ts = tweet.date_time
     elif tweet.created_at is not None:
@@ -159,6 +157,12 @@ def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> di
             created_at_ts = datetime.fromtimestamp(tweet.created_at, tz=UTC).isoformat()
         except (OSError, OverflowError, ValueError):
             created_at_ts = None
+
+    context_role = tweet.twitter_context_role
+    if context_role is not None:
+        context_role = {"root": "reply_parent", "thread": "account_reply", "reply": "audience_reply"}.get(
+            context_role, context_role
+        )
 
     return {
         "tweet_id": tweet.tweet_id,
@@ -175,7 +179,11 @@ def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> di
         "quotes": tweet.quotes,
         "views": tweet.views,
         "bookmarks": getattr(tweet, "bookmarks", None),
-        "shares": getattr(tweet, "shares", None),
+        "shares": (
+            tweet.shares
+            if isinstance(tweet, PublicPost)
+            else int(getattr(tweet, "shares", 0) or 0) or int(getattr(tweet, "retweets", 0) or 0)
+        ),
         "is_reply": tweet.is_reply,
         "is_retweet": tweet.is_retweet,
         "is_quote": tweet.is_quote,
@@ -184,11 +192,7 @@ def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> di
         "thread_root_tweet_id": getattr(tweet, "thread_root_tweet_id", None),
         "thread_position": getattr(tweet, "thread_position", None),
         "is_thread_part": getattr(tweet, "is_thread_part", None),
-        "twitter_context_role": (
-            {"root": "reply_parent", "thread": "account_reply", "reply": "audience_reply"}.get(
-                getattr(tweet, "twitter_context_role", None), getattr(tweet, "twitter_context_role", None)
-            )
-        ),
+        "twitter_context_role": context_role,
         "created_at": created_at_ts,
         "scraped_at": scraped_at,
         "scrape_query": scrape_query,
@@ -280,7 +284,9 @@ def public_upsert_sql(columns: list[str]) -> str:
     )
 
 
-def upsert_public_tweets(tweets, *, scrape_query: str, conn, acceptance: dict) -> list[dict]:
+def upsert_public_tweets(
+    tweets: Sequence[Tweet | PublicPost], *, scrape_query: str, conn: Any, acceptance: dict[str, Any]
+) -> list[dict[str, Any]]:
     """Internal gated path: acceptance evidence is supplied by the owning release/job.
 
     The admin research API deliberately cannot enable this with a request flag.
@@ -289,8 +295,6 @@ def upsert_public_tweets(tweets, *, scrape_query: str, conn, acceptance: dict) -
     required = {"rhoslc_search", "bravotv_profile", "nullable_schema", "known_value_merge", "consumer_nulls"}
     if not isinstance(acceptance, dict) or not all(acceptance.get(key) is True for key in required):
         raise ValueError("Public persistence acceptance gates have not passed")
-    from trr_backend.socials.twitter.public_models import PublicPost
-
     if not all(isinstance(tweet, PublicPost) for tweet in tweets):
         raise ValueError("Expected nullable public observations")
     rows = []

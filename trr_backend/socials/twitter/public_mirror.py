@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 import requests
 
 if TYPE_CHECKING:
-    from trr_backend.socials.twitter.scraper import Tweet
+    from trr_backend.socials.twitter.public_models import PublicPost
 
 _ENDPOINT = "https://api.fxtwitter.com/2/conversation"
 _MAX_RESPONSE_BYTES = 2_000_000
@@ -26,7 +26,7 @@ _MAX_RESPONSE_BYTES = 2_000_000
 
 @dataclass
 class PublicMirrorConversation:
-    tweets: list[Tweet] = field(default_factory=list)
+    tweets: list[PublicPost] = field(default_factory=list)
     reply_ids: set[str] = field(default_factory=set)
     pages: list[dict[str, Any]] = field(default_factory=list)
     stop_reason: str = "max_pages"

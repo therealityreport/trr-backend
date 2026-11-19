@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from trr_backend.socials.twitter.diagnostics import safe_quote_fetch_metadata, safe_retrieval_metadata
 from trr_backend.socials.twitter.models import TwitterPersistenceSummary
+from trr_backend.socials.twitter.public_models import PublicPost
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,9 @@ def tweet_to_payload(tweet: Any) -> dict[str, Any]:
         "quotes": _read(tweet, "quotes", 0),
         "views": _read(tweet, "views", 0),
         "bookmarks": _read(tweet, "bookmarks", 0),
-        "shares": _read(tweet, "shares", None),
+        "shares": tweet.shares
+        if isinstance(tweet, PublicPost)
+        else _read(tweet, "shares", 0) or _read(tweet, "retweets", 0),
         "url": _read(tweet, "url"),
         "username": _read(tweet, "username"),
         "display_name": _read(tweet, "display_name"),
@@ -193,7 +196,7 @@ def fetch_tweet_replies(
             conversation = fetch_public_conversation(
                 _read(request, "tweet_id"), max_pages=mirror_max_pages, max_items=mirror_max_items
             )
-            replies = [
+            public_replies = [
                 tweet
                 for tweet in conversation.tweets
                 if tweet.tweet_id in conversation.reply_ids and tweet.tweet_id != _read(request, "tweet_id")
@@ -201,9 +204,10 @@ def fetch_tweet_replies(
             return {
                 "success": bool(conversation.pages),
                 "tweet_id": _read(request, "tweet_id"),
-                "replies_found": len(replies),
+                "replies_found": len(public_replies),
                 "replies": [
-                    {**tweet_to_payload(reply), "reply_to_tweet_id": reply.reply_to_tweet_id} for reply in replies
+                    {**tweet_to_payload(reply), "reply_to_tweet_id": reply.reply_to_tweet_id}
+                    for reply in public_replies
                 ],
                 "retrieval_meta": conversation.coverage(),
                 "complete": False,

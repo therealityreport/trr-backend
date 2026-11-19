@@ -58,7 +58,8 @@ def test_conversation_maps_thread_and_nested_parentage_and_deduplicates(monkeypa
     assert result.reply_ids == {"101", "103"}
     assert result.tweets[1].twitter_context_role == "thread"
     assert result.tweets[-1].likes == 5
-    assert result.tweets[-1].created_at > 0
+    created_at = result.tweets[-1].created_at
+    assert created_at is not None and created_at > 0
     assert urls[-1].endswith("?cursor=next+%2B%2F")
     assert [page["added"] for page in result.pages] == [3, 1]
     assert len(result.pages[0]["sha256"]) == 64

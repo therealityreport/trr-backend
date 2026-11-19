@@ -26,8 +26,8 @@ def preview(
     *,
     capability: str = "search",
     sort: str = "latest",
-    date_start=None,
-    date_end=None,
+    date_start: datetime | str | None = None,
+    date_end: datetime | str | None = None,
     author: str | None = None,
     language: str | None = None,
     media_only: bool = False,
@@ -62,10 +62,11 @@ def preview(
                 op, value = word.split(":", 1)
                 if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
                     raise ValueError("Invalid query date")
-                value = timestamp(value + "T00:00:00Z")
+                bound = datetime.fromisoformat(value).replace(tzinfo=UTC)
                 key = "start" if op == "since" else "end"
-                old = timestamp(dates[key].isoformat() if isinstance(dates[key], datetime) else dates[key])
-                dates[key] = (max if key == "start" else min)(old, value) if old else value
+                current = dates[key]
+                old = timestamp(current.isoformat() if isinstance(current, datetime) else current)
+                dates[key] = (max if key == "start" else min)(old, bound) if old is not None else bound
             elif re.fullmatch(r"#\w+", word):
                 filters["hashtags"].append(word[1:].casefold())
             elif ":" in word:

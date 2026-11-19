@@ -1909,7 +1909,10 @@ def probe_twitter_public_search(query: str, provider: str = "lurkbird", capabili
     """One explicit search page, at most ten records; never scheduled."""
     from trr_backend.socials.twitter.public_probe import probe_public_research_search
 
-    return {**probe_public_research_search(query, provider=provider, capability=capability), "execution_backend": "modal"}
+    return {
+        **probe_public_research_search(query, provider=provider, capability=capability),
+        "execution_backend": "modal",
+    }
 
 
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:

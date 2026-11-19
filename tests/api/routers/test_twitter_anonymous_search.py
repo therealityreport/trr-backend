@@ -201,14 +201,18 @@ def test_fxtwitter_date_and_persistence_contract():
 
     from api.routers.socials.platform_scrape import TwitterSearchRequest
 
-    request = TwitterSearchRequest(
-        mode="anonymous_research",
-        provider="fxtwitter",
-        query="from:BravoTV #RHOSLC",
-        date_start="2026-11-01T00:00:00Z",
-        date_end="2026-11-13T00:00:00Z",
+    request = TwitterSearchRequest.model_validate(
+        {
+            "mode": "anonymous_research",
+            "provider": "fxtwitter",
+            "query": "from:BravoTV #RHOSLC",
+            "date_start": "2026-11-01T00:00:00Z",
+            "date_end": "2026-11-13T00:00:00Z",
+        }
     )
     assert request.provider == "fxtwitter"
+    assert request.date_start is not None and request.date_start.isoformat() == "2026-11-01T00:00:00+00:00"
+    assert request.date_end is not None and request.date_end.isoformat() == "2026-11-13T00:00:00+00:00"
     with pytest.raises(ValidationError):
         TwitterSearchRequest(mode="anonymous_research", provider="fxtwitter", query="#RHOSLC", persist=True)
 
@@ -220,11 +224,18 @@ def test_public_options_cannot_enter_standard_auth_and_unknown_options_rejected(
 
     for fields in ({"capability": "profile"}, {"verify_parents": True}):
         with pytest.raises(ValidationError):
-            TwitterSearchRequest(
-                query="@BravoTV", date_start="2026-11-01T00:00:00Z", date_end="2026-11-13T00:00:00Z", **fields
+            TwitterSearchRequest.model_validate(
+                {
+                    "query": "@BravoTV",
+                    "date_start": "2026-11-01T00:00:00Z",
+                    "date_end": "2026-11-13T00:00:00Z",
+                    **fields,
+                }
             )
     with pytest.raises(ValidationError):
-        TwitterSearchRequest(mode="anonymous_research", provider="fxtwitter", query="#RHOSLC", unknown_option=True)
+        TwitterSearchRequest.model_validate(
+            {"mode": "anonymous_research", "provider": "fxtwitter", "query": "#RHOSLC", "unknown_option": True}
+        )
 
 
 def test_parent_verification_does_not_continue_after_rate_limit(monkeypatch):

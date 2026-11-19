@@ -144,8 +144,9 @@ def test_tweet_to_payload_writes_bookmarks_shares_and_thread_fields():
     assert payload["twitter_context_role"] == "audience_reply"
 
 
-def test_tweet_to_payload_preserves_zero_shares_without_deriving_retweets():
+def test_legacy_payloads_fall_back_to_retweets_for_shares():
     from trr_backend.repositories.twitter_standalone import _tweet_to_payload
+    from trr_backend.socials.twitter.direct_scrape import tweet_to_payload
 
     tweet = _make_tweet("851")
     tweet.retweets = 7
@@ -153,7 +154,8 @@ def test_tweet_to_payload_preserves_zero_shares_without_deriving_retweets():
 
     payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
 
-    assert payload["shares"] == 0
+    assert payload["shares"] == 7
+    assert tweet_to_payload(tweet)["shares"] == 7
 
 
 def test_persist_search_records_run_and_memberships():
@@ -341,12 +343,21 @@ def test_public_unknowns_preserved_and_legacy_write_path_rejected():
         upsert_public_tweets,
         upsert_standalone_tweets,
     )
+    from trr_backend.socials.twitter.direct_scrape import tweet_to_payload
     from trr_backend.socials.twitter.public_models import PublicPost
 
     post = PublicPost(tweet_id="123", text="#RHOSLC", username="BravoTV", url="https://x.com/BravoTV/status/123")
     payload = _tweet_to_payload(post, scrape_query="#RHOSLC", scraped_at="2026-11-13T00:00:00Z")
     for key in ("likes", "retweets", "quotes", "views", "bookmarks", "shares", "created_at", "user_verified"):
         assert payload[key] is None
+
+    post.retweets = 7
+    assert _tweet_to_payload(post, scrape_query="#RHOSLC", scraped_at="2026-11-13T00:00:00Z")["shares"] is None
+    assert tweet_to_payload(post)["shares"] is None
+    post.shares = 0
+    assert _tweet_to_payload(post, scrape_query="#RHOSLC", scraped_at="2026-11-13T00:00:00Z")["shares"] == 0
+    assert tweet_to_payload(post)["shares"] == 0
+
     with pytest.raises(ValueError, match="verified public"):
         upsert_standalone_tweets([post], scrape_query="#RHOSLC")
     with pytest.raises(ValueError, match="gates"):
