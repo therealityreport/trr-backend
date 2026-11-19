@@ -33,7 +33,7 @@ def tweet_to_payload(tweet: Any) -> dict[str, Any]:
         "quotes": _read(tweet, "quotes", 0),
         "views": _read(tweet, "views", 0),
         "bookmarks": _read(tweet, "bookmarks", 0),
-        "shares": _read(tweet, "shares", 0) or _read(tweet, "retweets", 0),
+        "shares": _read(tweet, "shares", None),
         "url": _read(tweet, "url"),
         "username": _read(tweet, "username"),
         "display_name": _read(tweet, "display_name"),
@@ -55,6 +55,7 @@ def search_twitter(
     *,
     load_auth: Callable[[], tuple[Any, Any, Any]],
     persist_search: Callable[..., dict[str, Any]],
+    cancelled: Callable[[], bool] | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Run direct Twitter/X search and return the current route response shape."""
@@ -63,7 +64,7 @@ def search_twitter(
     if _read(request, "mode") == "anonymous_research":
         from trr_backend.socials.twitter.anonymous_search import search_anonymous_twitter
 
-        return search_anonymous_twitter(request)
+        return search_anonymous_twitter(request, cancelled=cancelled)
 
     import trr_backend.socials.twitter.scraper as twitter_module
 

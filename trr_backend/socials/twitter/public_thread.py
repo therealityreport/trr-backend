@@ -46,7 +46,7 @@ def expand_public_thread(tweet_id: str, *, provider: str, max_requests: int = 5,
             if post.tweet_id not in posts and len(posts) < max_posts:
                 posts[post.tweet_id] = post
                 added += 1
-            if post.tweet_id in posts and post.replies > 0 and post.tweet_id not in visited:
+            if post.tweet_id in posts and (post.replies or 0) > 0 and post.tweet_id not in visited:
                 if post.tweet_id not in pending:
                     pending.append(post.tweet_id)
         branches.append(
@@ -79,7 +79,7 @@ def expand_public_thread(tweet_id: str, *, provider: str, max_requests: int = 5,
         "thread_completeness": "unknown",
         "upstream_authentication": "unknown",
         "authentication_provided": False,
-        "optional_fields": "provider-reported; absent metrics default to zero",
+        "optional_fields": "provider-reported; absent metrics remain null",
         "parentage": "provider-reported; only selected relationships independently verified",
         "coverage": "Known branches only; omitted and undiscovered branches may exist",
     }

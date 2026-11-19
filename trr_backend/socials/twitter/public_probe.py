@@ -54,11 +54,19 @@ def probe_public_search(query: str) -> dict:
     }
 
 
-def probe_public_research_search(query: str) -> dict:
+def probe_public_research_search(query: str, *, provider: str = "lurkbird", capability: str = "search") -> dict:
     """Exercise the UI-facing dispatcher with forbidden auth and persistence."""
     from types import SimpleNamespace
 
-    from trr_backend.socials.twitter import anonymous_search, direct_scrape, public_search
+    from trr_backend.socials.twitter import (
+        anonymous_search,
+        direct_scrape,
+        public_collect,
+        public_models,
+        public_search,
+        public_transport,
+        public_verification,
+    )
 
     calls = {"auth": 0, "persist": 0}
 
@@ -73,7 +81,8 @@ def probe_public_research_search(query: str) -> dict:
     result = direct_scrape.search_twitter(
         SimpleNamespace(
             mode="anonymous_research",
-            provider="lurkbird",
+            provider=provider,
+            capability=capability,
             query=query,
             sort="latest",
             max_pages=1,
@@ -89,6 +98,15 @@ def probe_public_research_search(query: str) -> dict:
         "state_free": True,
         "forbidden_calls": calls,
         "source_sha256": {
-            module.__name__: _source_sha256(module) for module in (anonymous_search, direct_scrape, public_search)
+            module.__name__: _source_sha256(module)
+            for module in (
+                anonymous_search,
+                direct_scrape,
+                public_search,
+                public_collect,
+                public_models,
+                public_transport,
+                public_verification,
+            )
         },
     }

@@ -10,7 +10,7 @@ from trr_backend.socials.twitter import public_mirror, public_search, public_thr
 URL = "https://lurkbird.com/search/NASA/?product=latest"
 
 
-@pytest.mark.parametrize("behavior", ["success", "failure", "timeout"])
+@pytest.mark.parametrize("behavior", ["success", "failure", "timeout", "cancel"])
 def test_owned_worker_cleanup_and_clean_environment(monkeypatch, behavior):
     original = subprocess.Popen
     children = []
@@ -19,6 +19,7 @@ def test_owned_worker_cleanup_and_clean_environment(monkeypatch, behavior):
         "success": 'import json; print(json.dumps({"body":"' + base64.b64encode(b"public").decode() + '"}))',
         "failure": "raise SystemExit(1)",
         "timeout": "import time; time.sleep(20)",
+        "cancel": "import time; time.sleep(20)",
     }[behavior]
 
     def spawn(command, **kwargs):
@@ -32,6 +33,11 @@ def test_owned_worker_cleanup_and_clean_environment(monkeypatch, behavior):
     try:
         if behavior == "success":
             assert public_transport.fetch(URL, deadline=time.monotonic() + 2) == b"public"
+        elif behavior == "cancel":
+            start = time.monotonic()
+            with pytest.raises(ValueError, match="cancelled"):
+                public_transport.fetch(URL, deadline=start + 10, cancelled=lambda: time.monotonic() - start > 0.1)
+            assert time.monotonic() - start < 2
         else:
             with pytest.raises(ValueError, match="deadline" if behavior == "timeout" else "worker failed"):
                 public_transport.fetch(URL, deadline=time.monotonic() + 0.15)

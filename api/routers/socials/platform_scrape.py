@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from ._shared import *
 from ._shared import _run_admin_repo_call  # explicit: star exports via dynamic __all__ are invisible to Pyright
@@ -89,7 +91,9 @@ class TwitterSearchRequest(BaseModel):
     date_start: datetime | None = Field(default=None, description="Start date; required for standard search")
     date_end: datetime | None = Field(default=None, description="End date; required for standard search")
     mode: Literal["anonymous_research"] | None = None
-    provider: Literal["lurkbird"] | None = None
+    provider: Literal["lurkbird", "fxtwitter"] | None = None
+    capability: Literal["search", "profile", "list", "status", "conversation", "thread"] = "search"
+    verify_parents: bool = False
     sort: Literal["latest", "top"] = "latest"
     max_items: int = Field(default=20, ge=1, le=40, description="Anonymous research post limit")
     include_replies: bool = Field(default=False, description="Include reply tweets in results")
@@ -110,16 +114,25 @@ class TwitterSearchRequest(BaseModel):
         description="Label stored on persisted rows; defaults to query value when omitted",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_unknown_public_options(cls, value):
+        if isinstance(value, dict) and value.get("mode") == "anonymous_research":
+            unknown = set(value) - set(cls.model_fields)
+            if unknown:
+                raise ValueError("Unsupported public options: " + ", ".join(sorted(unknown)))
+        return value
+
     @model_validator(mode="after")
     def validate_search_mode(self) -> TwitterSearchRequest:
         if self.mode != "anonymous_research":
             if self.date_start is None or self.date_end is None:
                 raise ValueError("date_start and date_end are required for standard search")
-            if self.provider is not None:
-                raise ValueError("provider requires anonymous_research mode")
+            if self.provider is not None or self.capability != "search" or self.verify_parents:
+                raise ValueError("Public provider/capability/verification requires anonymous_research mode")
             return self
-        if self.provider != "lurkbird":
-            raise ValueError("Anonymous research requires provider='lurkbird'")
+        if self.provider not in {"lurkbird", "fxtwitter"}:
+            raise ValueError("Anonymous research requires an explicit public provider")
         if not self.query.strip() or len(self.query) > 300:
             raise ValueError("Anonymous research query must contain 1-300 characters")
         if self.max_pages is not None and self.max_pages > 2:
@@ -139,6 +152,19 @@ class TwitterSearchRequest(BaseModel):
                 "scrape_query",
             }
         )
+        if self.provider == "fxtwitter":
+            unsupported -= {"date_start", "date_end"}
+            from trr_backend.socials.twitter.public_collect import preview
+
+            preview(
+                self.query,
+                capability=self.capability,
+                sort=self.sort,
+                date_start=self.date_start,
+                date_end=self.date_end,
+            )
+        elif self.capability != "search" or self.verify_parents:
+            raise ValueError("Lurkbird supports search only without parent verification")
         if unsupported:
             raise ValueError("Unsupported anonymous research options: " + ", ".join(sorted(unsupported)))
         return self
@@ -148,7 +174,7 @@ class TweetResponse(BaseModel):
     """Single tweet in response."""
 
     tweet_id: str
-    date_time: str
+    date_time: str | None
     text: str
     hashtags: list[str]
     mentions: list[str]
@@ -157,21 +183,29 @@ class TweetResponse(BaseModel):
     replies: int | None
     quotes: int | None
     views: int | None
-    bookmarks: int | None = 0
-    shares: int | None = 0
+    bookmarks: int | None = None
+    shares: int | None = None
     url: str
     username: str
-    display_name: str
+    display_name: str | None
     user_verified: bool | None
     is_reply: bool | None
     is_retweet: bool | None
     is_quote: bool | None
     thread_root_tweet_id: str | None = None
     thread_position: int | None = None
-    is_thread_part: bool = False
+    is_thread_part: bool | None = None
     twitter_context_role: str | None = None
     media_urls: list[str]
     hosted_media_urls: list[str] = Field(default_factory=list)
+    reply_to_tweet_id: str | None = None
+    quoted_tweet_id: str | None = None
+    user_id: str | None = None
+    long_text: bool | None = None
+    media: list[dict] = Field(default_factory=list)
+    evidence: dict = Field(default_factory=dict)
+    reposted_by: Any = None
+    quote: dict | None = None
 
 
 class TwitterSearchResponse(BaseModel):
@@ -243,8 +277,8 @@ def _tweet_to_response(tweet: Any) -> TweetResponse:
         replies=tweet.replies,
         quotes=tweet.quotes,
         views=tweet.views,
-        bookmarks=getattr(tweet, "bookmarks", 0) or 0,
-        shares=getattr(tweet, "shares", 0) or getattr(tweet, "retweets", 0) or 0,
+        bookmarks=getattr(tweet, "bookmarks", None),
+        shares=getattr(tweet, "shares", None),
         url=tweet.url,
         username=tweet.username,
         display_name=tweet.display_name,
@@ -586,6 +620,7 @@ async def preview_tiktok_profile(
 async def search_twitter(
     request: TwitterSearchRequest,
     user: InternalAdminUser,
+    http_request: Request,
 ) -> TwitterSearchResponse:
     """
     Search Twitter/X for tweets matching a query (hashtag or phrase).
@@ -608,13 +643,30 @@ async def search_twitter(
         twikit_creds = _load_twikit_credentials(twitter_cookies)
         return twitter_cookies, twitter_bearer, twikit_creds
 
-    result = await _run_admin_repo_call(
-        run_twitter_search,
-        request,
-        load_auth=_load_auth,
-        persist_search=persist_standalone_twitter_search,
-        logger=logger,
-    )
+    cancellation = threading.Event()
+
+    async def watch_disconnect():
+        while not cancellation.is_set():
+            if await http_request.is_disconnected():
+                cancellation.set()
+                return
+            await asyncio.sleep(0.2)
+
+    watcher = asyncio.create_task(watch_disconnect()) if request.mode == "anonymous_research" else None
+    try:
+        result = await _run_admin_repo_call(
+            run_twitter_search,
+            request,
+            load_auth=_load_auth,
+            persist_search=persist_standalone_twitter_search,
+            logger=logger,
+            **({"cancelled": cancellation.is_set} if request.mode == "anonymous_research" else {}),
+        )
+    finally:
+        cancellation.set()
+        if watcher:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
     return TwitterSearchResponse(**result)
 
 

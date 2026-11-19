@@ -1902,14 +1902,14 @@ def probe_twitter_public_conversation(tweet_id: str, max_pages: int = 2, max_ite
     image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
     secrets=[],
     retries=0,
-    timeout=60,
+    timeout=150,
     max_containers=1,
 )
-def probe_twitter_public_search(query: str) -> dict:
+def probe_twitter_public_search(query: str, provider: str = "lurkbird", capability: str = "search") -> dict:
     """One explicit search page, at most ten records; never scheduled."""
     from trr_backend.socials.twitter.public_probe import probe_public_research_search
 
-    return {**probe_public_research_search(query), "execution_backend": "modal"}
+    return {**probe_public_research_search(query, provider=provider, capability=capability), "execution_backend": "modal"}
 
 
 def _execute_social_job(job_id: str, *, worker_prefix: str, dispatch_token: str | None = None) -> dict[str, object]:

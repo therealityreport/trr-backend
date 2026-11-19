@@ -5,11 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 
@@ -18,10 +19,28 @@ MAX_BYTES = 2_000_000
 
 def _validate(url: str) -> None:
     parsed = urlsplit(url)
-    allowed = (parsed.netloc == "lurkbird.com" and parsed.path.startswith("/search/")) or (
-        parsed.netloc == "api.fxtwitter.com" and parsed.path.startswith("/2/conversation/")
-    )
-    if parsed.scheme != "https" or not allowed or parsed.fragment or len(url) > 10000:
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    allowed = parsed.netloc == "lurkbird.com" and parsed.path.startswith("/search/")
+    if parsed.netloc == "api.fxtwitter.com":
+        if parsed.path == "/2/search":
+            allowed = set(params) <= {"q", "feed", "cursor"} and bool(params.get("q"))
+        elif re.fullmatch(r"/2/profile/(?:[A-Za-z0-9_]{1,15}|id:[0-9]{2,20})/statuses", parsed.path):
+            allowed = set(params) <= {"cursor"}
+        elif re.fullmatch(r"/2/(status|thread|conversation)/[0-9]{2,20}", parsed.path):
+            allowed = set(params) <= {"cursor"}
+    if parsed.netloc == "cdn.syndication.twimg.com" and parsed.path == "/tweet-result":
+        allowed = set(params) <= {"id", "lang", "token"} and bool(
+            re.fullmatch(r"[0-9]{2,20}", params.get("id", [""])[0])
+        )
+    if (
+        parsed.scheme != "https"
+        or not allowed
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+        or len(url) > 10000
+        or any(len(values) != 1 for values in params.values())
+    ):
         raise ValueError("Invalid public provider URL")
 
 
@@ -46,7 +65,7 @@ def _read(url: str, timeout: float) -> bytes:
             return bytes(body)
 
 
-def fetch(url: str, *, deadline: float) -> bytes:
+def fetch(url: str, *, deadline: float, cancelled=None) -> bytes:
     """Bound DNS, headers and body together; kill and reap only our worker."""
     _validate(url)
     remaining = min(20.0, deadline - time.monotonic())
@@ -62,7 +81,23 @@ def fetch(url: str, *, deadline: float) -> bytes:
         env=worker_env,
     ) as worker:
         try:
-            output, _ = worker.communicate(json.dumps({"url": url, "timeout": remaining}).encode(), timeout=remaining)
+            payload = json.dumps({"url": url, "timeout": remaining}).encode()
+            request_deadline = min(deadline, time.monotonic() + remaining)
+            while True:
+                if cancelled and cancelled():
+                    worker.kill()
+                    worker.communicate()
+                    raise ValueError("Public collection cancelled")
+                budget = request_deadline - time.monotonic()
+                if budget <= 0:
+                    raise subprocess.TimeoutExpired("public provider", remaining)
+                try:
+                    output, _ = worker.communicate(payload, timeout=min(0.2, budget) if cancelled else budget)
+                    break
+                except subprocess.TimeoutExpired:
+                    payload = None
+                    if not cancelled:
+                        raise
         except subprocess.TimeoutExpired:
             worker.kill()
             worker.communicate()
