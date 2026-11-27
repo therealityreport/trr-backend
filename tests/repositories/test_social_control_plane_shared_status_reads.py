@@ -117,20 +117,16 @@ def test_shared_status_reads_provider_observes_late_legacy_monkeypatch(
         assert shared_status_reads.legacy._get_social_hot_path_cache is replacement
 
 
-def test_shared_status_reads_provider_assignment_writes_through(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_shared_status_reads_provider_assignment_writes_through() -> None:
     original = legacy_core._get_social_hot_path_cache
 
     def replacement(_key: object) -> str:
         return "write-through-provider-value"
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(
-            shared_status_reads.legacy,
-            "_get_social_hot_path_cache",
-            replacement,
-        )
+    try:
+        shared_status_reads.legacy._get_social_hot_path_cache = replacement
         assert legacy_core._get_social_hot_path_cache is replacement
+    finally:
+        shared_status_reads.legacy._get_social_hot_path_cache = original
 
     assert legacy_core._get_social_hot_path_cache is original

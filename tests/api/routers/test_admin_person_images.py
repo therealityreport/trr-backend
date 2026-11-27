@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -61,6 +62,18 @@ def _mock_media_link_lookup(mock_db: MagicMock, row: dict | None, *, error: obje
     mock_response.error = error
     query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
     query.execute.return_value = mock_response
+
+
+@pytest.fixture
+def fast_stream_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the image router's two-second worker polls in payload tests only."""
+
+    async def sleep(delay: float) -> None:
+        await asyncio.sleep(0.01 if delay == 2 else delay)
+
+    router_asyncio = SimpleNamespace(**vars(asyncio))
+    router_asyncio.sleep = sleep
+    monkeypatch.setattr(admin_person_images, "asyncio", router_asyncio)
 
 
 @pytest.fixture
@@ -4797,6 +4810,7 @@ def test_refresh_stream_emits_terminal_error_when_getty_prefetch_fails(client, m
     assert "Getty blocked" in normalized_payload
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -4825,6 +4839,7 @@ def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, m
     assert "Reprocess stream failed" in normalized_payload
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_reprocess_stream_force_tagging_recount_true_passes_force_recount(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -4869,6 +4884,7 @@ def test_reprocess_stream_force_tagging_recount_true_passes_force_recount(client
     assert media_mock.call_args.kwargs["force_recount"] is True
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_reprocess_stream_tagging_is_always_full_fix_even_when_flag_false(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -4913,6 +4929,7 @@ def test_reprocess_stream_tagging_is_always_full_fix_even_when_flag_false(client
     assert media_mock.call_args.kwargs["force_recount"] is True
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_reprocess_stream_passes_owner_reference_pool_to_tagging_calls(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -4975,6 +4992,7 @@ def test_reprocess_stream_passes_owner_reference_pool_to_tagging_calls(client, m
     assert callable(media_mock.call_args.kwargs["owner_reference_sync_cb"])
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_reprocess_stream_forwards_scoped_targets_to_stage_helpers(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -5193,6 +5211,7 @@ def test_refresh_stream_resizing_heartbeat_includes_operation_progress(client, m
     assert saw_progress_heartbeat is True
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_refresh_stream_sync_imdb_progress_includes_diagnostics(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -5359,6 +5378,7 @@ def test_mirror_person_media_assets_reports_progress_callbacks() -> None:
     assert progress_updates == [(1, 2), (2, 2)]
 
 
+@pytest.mark.usefixtures("fast_stream_poll")
 def test_refresh_stream_includes_tmdb_profile_failure_fields_in_complete_payload(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())

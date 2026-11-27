@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from tests.socials.claimed_job import ClaimedJob
 from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
@@ -465,7 +466,7 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
     def fail_proxy_selector(**_kwargs):
         raise AssertionError("public comments mode must not select Decodo/proxy")
 
-    finish_payloads: list[dict[str, Any]] = []
+    claim = ClaimedJob("test-worker")
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", fail_auth_resolver)
     monkeypatch.setattr(jr, "select_comments_proxy", fail_proxy_selector)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", FakeFetcher)
@@ -538,7 +539,9 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
             new_job_progress_state=lambda: {},
             touch_job_heartbeat=lambda *_args, **_kwargs: True,
             emit_job_progress=lambda **_kwargs: None,
-            finish_job=lambda *args, **kwargs: finish_payloads.append({"args": args, "kwargs": kwargs}),
+            job_claim_write_scope=claim.write_scope,
+            finish_job=claim.finish,
+            finish_job_followups=claim.finish_followups,
             finalize_run_status=lambda *_args, **_kwargs: {},
             metadata_dict=lambda value: dict(value or {}),
             retry_backoff_seconds=lambda _attempt: 0,
@@ -546,11 +549,8 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
     )
 
     jr.run_instagram_comments_scrapling_job(
-        {
-            "id": "job-1",
-            "run_id": "run-1",
-            "status": "queued",
-            "config": {
+        claim.row(
+            {
                 "account": "bravotv",
                 "stage": "comments_scrapling",
                 "mode": "profile",
@@ -558,7 +558,7 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
                 "source_scope": "bravo",
                 "target_source_ids": ["ABC12345"],
             },
-        },
+        ),
         worker_id="test-worker",
     )
 
@@ -566,8 +566,8 @@ def test_instagram_public_first_comments_job_skips_auth_resolver_and_proxy_selec
     assert captured["fetcher_kwargs"]["proxy_config"] is None
     assert captured["fetch_kwargs"]["load_strategy"] == "public_relay"
     assert captured["fetch_kwargs"].get("reply_only") is None
-    assert finish_payloads
-    metadata = finish_payloads[-1]["kwargs"]["metadata"]
+    assert claim.finished["status"] == "completed"
+    metadata = claim.finished["metadata"]
     assert metadata["comments_load_strategy"] == "public_relay"
     assert metadata["comments_strategy"]["auth_state"] == "public"
     assert metadata["comments_strategy"]["proxy_state"] == "none"

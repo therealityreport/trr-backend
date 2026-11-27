@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from trr_backend.socials import profile_dashboard
+from trr_backend.socials import profile_dashboard, social_season_analytics_impl
 from trr_backend.socials.pipelines.account_catalog import launch as catalog_launch
 from trr_backend.socials.pipelines.account_catalog import progress as catalog_progress
 
@@ -101,13 +101,13 @@ def test_catalog_progress_returns_failed_zero_job_launch_payload(monkeypatch: py
         yield object()
 
     monkeypatch.setattr(catalog_progress.pg, "db_read_connection", fake_read_connection)
-    monkeypatch.setattr(catalog_progress._core, "_load_social_account_catalog_run_row", lambda **_kwargs: run_row)
-    monkeypatch.setattr(catalog_progress._core, "_load_social_account_catalog_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_season_analytics_impl, "_load_social_account_catalog_run_row", lambda **_kwargs: run_row)
+    monkeypatch.setattr(social_season_analytics_impl, "_load_social_account_catalog_jobs", lambda **_kwargs: [])
 
     def fail_recovery(**_kwargs):
         raise AssertionError("failed zero-job launch must not be treated as recoverable run_not_found")
 
-    monkeypatch.setattr(catalog_progress._core, "recover_pending_social_account_catalog_launch", fail_recovery)
+    monkeypatch.setattr(social_season_analytics_impl, "recover_pending_social_account_catalog_launch", fail_recovery)
 
     payload = catalog_progress.get_social_account_catalog_run_progress(
         "instagram",

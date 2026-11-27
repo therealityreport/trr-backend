@@ -233,7 +233,7 @@ def test_set_run_status_clears_terminal_timestamps_when_reopened(
 def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: True)
 
     def _fake_fetch_one(sql: str, params: list[object]):  # noqa: ARG001
         normalized = " ".join(sql.lower().split())
@@ -349,7 +349,7 @@ def test_preserve_protected_run_summary_fields_skips_missing_and_null() -> None:
 
 
 def test_update_run_summary_incremental_preserves_audit_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: True)
     captured: dict[str, Any] = {}
 
     def _fake_fetch_one(sql: str, params: list[Any]):  # noqa: ARG001
@@ -397,7 +397,7 @@ def test_update_run_summary_incremental_preserves_audit_fields(monkeypatch: pyte
 
 
 def test_update_run_summary_force_recompute_preserves_audit_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: True)
     existing_summary = {
         "total_jobs": 2,
         "cancelled_by": "comments_guarded_restart",
@@ -510,13 +510,13 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
     )
     monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
-    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(social_repo, "_resolve_pipeline_ingest_mode", lambda value: value)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_catalog_fetch_has_terminal_error",
         lambda *_args, **_kwargs: False,
     )
-    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
 
     run_lifecycle._finalize_run_status("run-1")
 
@@ -784,13 +784,13 @@ def test_recover_catalog_run_deadline_exceeded_jobs_fails_queued_jobs_and_finali
         raise AssertionError(f"unexpected SQL: {normalized}")
 
     monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_all", fake_fetch_all)
-    monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(social_repo, "_now_utc", lambda: now)
     monkeypatch.setattr(
         run_lifecycle,
         "_finalize_run_status",
         lambda _run_id, force_recompute=False: finalized.append(f"{_run_id}:{force_recompute}") or {},
     )
-    monkeypatch.setattr(run_lifecycle.legacy, "_invalidate_queue_status_cache", lambda: invalidated.append("yes"))
+    monkeypatch.setattr(social_repo, "_invalidate_queue_status_cache", lambda: invalidated.append("yes"))
 
     result = run_lifecycle.recover_catalog_run_deadline_exceeded_jobs(limit=25)
 
@@ -884,14 +884,16 @@ def test_recover_and_dispatch_runs_catalog_deadline_sweep_before_dispatch(
     monkeypatch.setattr(
         dispatch_runtime,
         "dispatch_due_social_jobs",
-        lambda **_kwargs: events.append("dispatch")
-        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+        lambda **_kwargs: (
+            events.append("dispatch") or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None}
+        ),
     )
     monkeypatch.setattr(
         dispatch_runtime.legacy,
         "dispatch_due_social_jobs",
-        lambda **_kwargs: events.append("legacy_dispatch")
-        or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None},
+        lambda **_kwargs: (
+            events.append("legacy_dispatch") or {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": None}
+        ),
     )
 
     result = dispatch_runtime.recover_and_dispatch_due_social_jobs(limit=1)
@@ -944,13 +946,13 @@ def test_finalize_run_status_force_recomputes_before_failed_terminal_status(
     )
     monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda _run_id, status, **_kwargs: statuses.append(status))
     monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
-    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(social_repo, "_resolve_pipeline_ingest_mode", lambda value: value)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_catalog_fetch_has_terminal_error",
         lambda *_args, **_kwargs: False,
     )
-    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
 
     run_lifecycle._finalize_run_status("run-1")
 
@@ -1039,18 +1041,18 @@ def test_finalize_run_status_runs_followup_after_lock_release(
         lambda *_args, **_kwargs: {"running_jobs": 0, "queued_jobs": 0, "cancelling_jobs": 0},
     )
     monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(social_repo, "_resolve_pipeline_ingest_mode", lambda value: value)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch",
         lambda *_args, **_kwargs: 0,
     )
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_catalog_fetch_has_terminal_error",
         lambda *_args, **_kwargs: False,
     )
-    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
 
     followup_conns: list[object] = []
 
@@ -1134,18 +1136,18 @@ def test_finalize_run_status_cancelling_run_without_open_jobs_becomes_cancelled(
     )
     monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda _run_id, status, **_kwargs: statuses.append(status))
     monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
-    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(social_repo, "_resolve_pipeline_ingest_mode", lambda value: value)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch",
         lambda *_args, **_kwargs: 0,
     )
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_catalog_fetch_has_terminal_error",
         lambda *_args, **_kwargs: False,
     )
-    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
 
     payload = run_lifecycle._finalize_run_status("run-1")
 

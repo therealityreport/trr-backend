@@ -80,6 +80,64 @@ def job_claim_write_scope(job_id: str, *, claim_token: str | None = None, worker
     return legacy._job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id)
 
 
+def enqueue_job(
+    *,
+    run_id: str,
+    platform: str,
+    source_scope: str,
+    job_type: str,
+    stage: str,
+    config: dict[str, Any],
+    initiated_by: str,
+    priority: int,
+    max_attempts: int,
+) -> str:
+    """Create an unclaimed follow-up using the current transaction."""
+    return legacy._create_job(
+        None,
+        run_id=run_id,
+        platform=platform,
+        source_scope=source_scope,
+        job_type=job_type,
+        stage=stage,
+        config=config,
+        initiated_by=initiated_by,
+        status="queued",
+        priority=priority,
+        max_attempts=max_attempts,
+    )
+
+
+def fail_job_from_snapshot(
+    job_id: str,
+    *,
+    expected_status: str,
+    expected_claim_token: str | None,
+    items_found: int,
+    error_message: str,
+    metadata: dict[str, Any],
+    last_error_code: str,
+    last_error_class: str,
+) -> bool:
+    """Fail the job only if its observed status and claim still match."""
+    return legacy._transition_job_state(
+        job_id,
+        expected_status=expected_status,
+        expected_claim_token=expected_claim_token,
+        status="failed",
+        items_found=items_found,
+        error_message=error_message,
+        metadata=metadata,
+        last_error_code=last_error_code,
+        last_error_class=last_error_class,
+    )
+
+
+def load_current_job_row(job_id: str) -> dict[str, Any]:
+    """Return the current persisted state after a worker loses its claim."""
+    return legacy._load_current_job_row(job_id)
+
+
 def touch_job_heartbeat(job_id: str, *, worker_id: str | None = None, claim_token: str | None = None) -> bool:
     kwargs: dict[str, Any] = {"worker_id": worker_id}
     if claim_token is not None:

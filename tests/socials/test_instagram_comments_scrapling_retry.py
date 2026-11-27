@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +34,14 @@ from trr_backend.socials.instagram.constants import resolve_comment_sort_order
 from trr_backend.socials.instagram.scraper import InstagramComment
 
 _FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "instagram" / "scrapling"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_rate_limit_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each test owns its pacing timestamps, including tests that set a synthetic clock.
+    from trr_backend.socials.instagram.comments_scrapling import fetcher
+
+    monkeypatch.setattr(fetcher, "tempfile", SimpleNamespace(gettempdir=lambda: str(tmp_path)))
 
 
 @pytest.fixture(autouse=True)
@@ -3289,6 +3298,7 @@ def test_sync_response_cookies_updates_parser_headers() -> None:
 
 def test_pace_api_requests_honors_comment_delay() -> None:
     fetcher = _build_fetcher()
+    fetcher._global_api_delay_seconds = 0
     fetcher._api_delay_seconds = 0.25
     fetcher._last_api_request_started_at = 10.0
     sleep_mock = AsyncMock()
@@ -4607,6 +4617,50 @@ def test_auto_auth_fallback_target_selection_is_flagged_and_gap_gated(
     assert targets == ["BIG"]
 
 
+def test_auto_auth_fallback_reuses_existing_children_and_queues_unclaimed_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials import social_season_analytics_impl as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    def find_child(sql, params):
+        assert "comments_auth_fallback_source_job_id" in sql
+        run_id, source_id, target, stage = params
+        assert (run_id, source_id, stage) == ("run-1", "source-job", "comments_scrapling")
+        return {"id": "existing-child"} if target == "EXISTING" else None
+
+    created: list[dict[str, Any]] = []
+
+    def create_job(context, **job):
+        assert context is None
+        created.append(job)
+        return "new-child"
+
+    monkeypatch.setattr(jr.pg, "fetch_one", find_child)
+    monkeypatch.setattr(repo, "_create_job", create_job)
+    outcome = jr._enqueue_auto_auth_fallback_targets(
+        repo=repo,
+        source_job={
+            "run_id": "run-1",
+            "id": "source-job",
+            "priority": 42,
+            "max_attempts": 3,
+            "config": {"claim_token": "source-claim", "required_runtime_version": "old-stamp"},
+        },
+        account_handle="thetraitorsus",
+        source_ids=["EXISTING", "NEW", "NEW"],
+    )
+
+    assert outcome["created_job_ids"] == ["new-child"]
+    assert outcome["enqueue"]["result"]["job_ids"] == ["existing-child", "new-child"]
+    (child,) = created
+    assert child["run_id"] == "run-1"
+    assert child["status"] == "queued"
+    assert (child["priority"], child["max_attempts"]) == (42, 3)
+    assert child["config"]["target_source_ids"] == ["NEW"]
+    assert child["config"]["comments_auth_fallback_source_claim_token"] == "source-claim"
+    assert "claim_token" not in child["config"]
+    assert "required_runtime_version" not in child["config"]
+
+
 def test_auto_auth_fallback_enqueue_payload_coercion_is_defined() -> None:
     """Regression: the public-comments auto-auth fallback completion branch
     referenced an undefined ``_metadata_dict``, raising NameError and failing
@@ -4845,17 +4899,16 @@ def test_incomplete_retry_stall_does_not_stop_transient_reasons() -> None:
 def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from trr_backend.socials import social_season_analytics_impl
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     finish_calls: list[dict[str, Any]] = []
 
-    class _FakeRepo:
-        # Sibling aborts are a compare-and-set on status and claim (Plan 055).
-        @staticmethod
-        def _transition_job_state(job_id: str, **kwargs: Any) -> bool:
-            finish_calls.append({"job_id": job_id, **kwargs})
-            return True
+    def transition(job_id: str, **kwargs: Any) -> bool:
+        finish_calls.append({"job_id": job_id, **kwargs})
+        return job_id != "sibling-2"
 
+    monkeypatch.setattr(social_season_analytics_impl, "_transition_job_state", transition)
     monkeypatch.setattr(
         jr.pg,
         "fetch_all",
@@ -4870,7 +4923,6 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
     monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"failed_count": 1})
 
     aborted = jr._abort_queued_sibling_shards_after_run_fatal_error(
-        repo=_FakeRepo,
         run_id="11111111-1111-1111-1111-111111111111",
         failed_job_id="22222222-2222-2222-2222-222222222222",
         stage="comments_scrapling",
@@ -4882,7 +4934,7 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
         error_message="Instagram auth failed while fetching comments for DUvvcUSFmI0.",
     )
 
-    assert aborted == 2
+    assert aborted == 1
     assert [call["job_id"] for call in finish_calls] == ["sibling-1", "sibling-2"]
     assert {call["status"] for call in finish_calls} == {"failed"}
     assert {call["last_error_code"] for call in finish_calls} == {"instagram_comments_auth_failed"}
@@ -4895,14 +4947,13 @@ def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
 def test_job_runner_defers_sibling_abort_below_blast_radius_threshold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from trr_backend.socials import social_season_analytics_impl
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
-    finish_calls: list[dict[str, Any]] = []
+    def unexpected_transition(*_args: Any, **_kwargs: Any) -> bool:
+        pytest.fail("must keep queued siblings after the first run-fatal failure")
 
-    class _FakeRepo:
-        @staticmethod
-        def _finish_job(job_id: str, **kwargs: Any) -> None:
-            finish_calls.append({"job_id": job_id, **kwargs})
+    monkeypatch.setattr(social_season_analytics_impl, "_transition_job_state", unexpected_transition)
 
     # No other shard has failed run-fatally yet, so this is the FIRST failure
     # (effective failed = 1 < default threshold 2) -> the abort is deferred and the
@@ -4915,7 +4966,6 @@ def test_job_runner_defers_sibling_abort_below_blast_radius_threshold(
     monkeypatch.setattr(jr.pg, "fetch_all", _unexpected_fetch_all)
 
     aborted = jr._abort_queued_sibling_shards_after_run_fatal_error(
-        repo=_FakeRepo,
         run_id="11111111-1111-1111-1111-111111111111",
         failed_job_id="22222222-2222-2222-2222-222222222222",
         stage="comments_scrapling",
@@ -4928,7 +4978,6 @@ def test_job_runner_defers_sibling_abort_below_blast_radius_threshold(
     )
 
     assert aborted == 0
-    assert finish_calls == []
 
 
 def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:

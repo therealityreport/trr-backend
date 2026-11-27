@@ -14,7 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.modal.deploy_backend import pinned_modal_env  # noqa: E402
+from scripts.modal.deploy_backend import pinned_modal_env, verify_required_workspace  # noqa: E402
+from trr_backend.modal_dispatch import get_trr_modal_function_handle  # noqa: E402
 from trr_backend.modal_runtime_config import (  # noqa: E402
     MAINTENANCE_CRON_ENV,
     validate_maintenance_deployment,
@@ -64,10 +65,10 @@ def main() -> int:
     args = parser.parse_args()
     os.environ.update(pinned_modal_env())
     expected = validate_maintenance_deployment(os.environ)
-    # Import only after pinning the profile: Modal resolves its profile on import.
-    import modal
-
-    probe = modal.Function.from_name("trr-backend-jobs", "probe_modal_maintenance_config", environment_name=args.env)
+    verify_required_workspace()
+    probe = get_trr_modal_function_handle(
+        "probe_modal_maintenance_config", app_name="trr-backend-jobs", environment_name=args.env
+    )
     call = probe.spawn()
     try:
         runtime = call.get(timeout=60)

@@ -111,8 +111,12 @@ def test_get_post_comments_instagram_filters_missing_comments_and_includes_media
     )
 
     def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        if "as instagram_saved_count" in sql:
+            assert params == [["abc123"]]
+            return [{"shortcode": "abc123", "instagram_saved_count": 1}]
+        assert "from social.instagram_comments c" in sql
+        assert params == ["ig-db-1"]
         captured["sql"] = sql
-        captured["params"] = params
         return [
             {
                 "id": "ig-comment-1",
@@ -135,6 +139,7 @@ def test_get_post_comments_instagram_filters_missing_comments_and_includes_media
     payload = social_repo.get_post_comments("season-1", platform="instagram", source_id="abc123")
 
     assert "coalesce(c.is_missing, false) = false" in str(captured["sql"]).lower()
+    assert payload["comment_counts"]["instagram_saved_count"] == 1
     assert payload["comments"][0]["media_urls"] == ["https://instagram.example/comment.jpg"]
     assert payload["comments"][0]["hosted_media_urls"] == ["https://cdn.example/comment.jpg"]
     assert payload["comments"][0]["media_mirror_status"] == "mirrored"
@@ -270,6 +275,8 @@ def test_run_tiktok_comment_media_mirror_stage_skips_when_already_hosted(monkeyp
 def test_run_platform_media_mirror_stage_threads_uses_persisted_raw_data_when_config_payload_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    heartbeats: list[str] = []
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", heartbeats.append)
     raw_data_seen: list[dict[str, object]] = []
     mirrored_inputs: list[dict[str, object]] = []
 
@@ -362,6 +369,7 @@ def test_run_platform_media_mirror_stage_threads_uses_persisted_raw_data_when_co
         config={"post_id": "threads-post-db-1", "_attempt_count": 1, "week_index": 1},
     )
 
+    assert set(heartbeats) == {"job-threads-1"}
     assert posts == 1
     assert mirrored == 2
     assert raw_data_seen == [{"media": "persisted"}]
@@ -776,6 +784,8 @@ def test_effective_media_selection_allows_unknown_legacy_hosted_media(monkeypatc
 def test_run_platform_media_mirror_stage_clears_bad_hosted_media_after_failed_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    heartbeats: list[str] = []
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", heartbeats.append)
     monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
     social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     try:
@@ -833,6 +843,7 @@ def test_run_platform_media_mirror_stage_clears_bad_hosted_media_after_failed_re
             config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
         )
 
+        assert set(heartbeats) == {"job-bad-hosted-repair"}
         assert posts == 1
         assert mirrored == 0
         assert metadata["mirror"]["status"] == "failed"
@@ -861,6 +872,8 @@ def test_run_platform_stage_retires_youtube_comment_media_lane() -> None:
 
 
 def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    heartbeats: list[str] = []
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", heartbeats.append)
     captured_sql: list[str] = []
     captured_asset_meta_updates: list[dict[str, object]] = []
 
@@ -919,6 +932,7 @@ def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkey
         config={"post_id": "ig-post-db-1", "_attempt_count": 1, "week_index": 1},
     )
 
+    assert set(heartbeats) == {"job-instagram-asset-manifest"}
     assert "asset_manifest" in captured_sql[0].lower()
     assert captured_asset_meta_updates
 

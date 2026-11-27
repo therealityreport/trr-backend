@@ -523,6 +523,14 @@ def test_observed_inventory_gap_all_media_and_whole_bytes_pass_without_acceptanc
 
     from scripts.ingestion.january_audit import offline_media
     from scripts.ingestion.january_audit.offline_hosted import Body, Response
+    from trr_backend.ingestion import evidence as retained_evidence
+
+    class PostExpiryClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp((offline_media.AT + retained_evidence.RETENTION).timestamp(), tz)
+
+    monkeypatch.setattr(retained_evidence, "datetime", PostExpiryClock)
 
     def encoded(fmt):
         value = io.BytesIO()

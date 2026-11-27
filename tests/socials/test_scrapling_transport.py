@@ -55,6 +55,9 @@ def test_build_async_stealthy_session_uses_public_export(monkeypatch: pytest.Mon
     from trr_backend.socials.scrapling_transport import build_async_stealthy_session
 
     mock_fetchers = ModuleType("scrapling.fetchers")
+    mock_scrapling = ModuleType("scrapling")
+    cast(Any, mock_scrapling).fetchers = mock_fetchers
+    monkeypatch.setitem(sys.modules, "scrapling", mock_scrapling)
     session_cls = MagicMock(return_value="session")
     cast(Any, mock_fetchers).AsyncStealthySession = session_cls
     monkeypatch.setitem(sys.modules, "scrapling.fetchers", mock_fetchers)

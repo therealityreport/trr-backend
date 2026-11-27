@@ -270,8 +270,10 @@ def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
         monkeypatch.setattr(
             jr,
             "_completion_residual_gap_targets_from_health",
-            lambda **_kwargs: [{"shortcode": "A", "parent_capture_gap": 5}]
-            + ([{"shortcode": "B", "parent_capture_gap": 5}] if capture_case == "uncovered" else []),
+            lambda **_kwargs: (
+                [{"shortcode": "A", "parent_capture_gap": 5}]
+                + ([{"shortcode": "B", "parent_capture_gap": 5}] if capture_case == "uncovered" else [])
+            ),
         )
 
         def enqueue(**_kwargs: Any) -> dict[str, Any]:
@@ -288,9 +290,11 @@ def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
         monkeypatch.setattr(
             jr.pg,
             "fetch_all",
-            lambda sql, *_args, **_kwargs: []
-            if capture_case == "terminal_child" or "id = any" not in sql
-            else [{"id": "child-A", "config": {"target_source_ids": ["A"], "comments_public_recovery": True}}],
+            lambda sql, *_args, **_kwargs: (
+                []
+                if capture_case == "terminal_child" or "id = any" not in sql
+                else [{"id": "child-A", "config": {"target_source_ids": ["A"], "comments_public_recovery": True}}]
+            ),
         )
         monkeypatch.setattr(jr, "_ramp_public_comments_worker_cap", lambda **_kwargs: None)
         monkeypatch.setattr(jr, "_dispatch_due_social_jobs", lambda **_kwargs: {"dispatched_job_ids": []})
@@ -323,6 +327,40 @@ def test_comments_concurrency_one_preserves_serial_fetch_then_persist_order(
     assert max(active_samples) == 1
     assert events.index("fetch-end:A") < events.index("persist:A") < events.index("fetch-start:B")
     assert events.index("fetch-end:B") < events.index("persist:B")
+
+
+def test_comments_completion_returns_current_job_when_claim_is_superseded(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials import social_season_analytics_impl as repo
+    from trr_backend.socials.control_plane import run_lifecycle
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    events: list[str] = []
+    finish_calls: list[dict[str, Any]] = []
+    _patch_runner(
+        monkeypatch,
+        jr,
+        repo,
+        fetcher=_OverlapFetcher(events, [], delay_seconds=0),
+        finish_calls=finish_calls,
+        progress_calls=[],
+        events=events,
+    )
+    successor = {"id": "job-1", "status": "running", "metadata": {"generation": 2}}
+
+    def claim_scope(job_id, *, claim_token, worker_id):
+        assert (job_id, claim_token, worker_id) == ("job-1", "acquired-token", "worker-1")
+        return nullcontext(False)
+
+    def load_job(job_id):
+        assert job_id == "job-1"
+        return successor
+
+    monkeypatch.setattr(jr.lifecycle, "job_claim_write_scope", claim_scope)
+    monkeypatch.setattr(jr.lifecycle, "load_current_job_row", run_lifecycle.load_current_job_row, raising=False)
+    monkeypatch.setattr(repo, "_load_current_job_row", load_job)
+
+    assert _run_job(jr, repo, ["A"]) is successor
+    assert finish_calls == []
 
 
 def test_comments_concurrency_overlaps_fetches_and_serializes_progress(

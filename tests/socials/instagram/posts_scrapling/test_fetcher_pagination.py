@@ -90,6 +90,7 @@ def test_fetch_posts_page_extracts_edges_on_first_doc_id_success(monkeypatch, _n
 def test_fetch_posts_page_rotates_doc_id_on_empty_connection(monkeypatch, _no_sleep):
     """If the first doc_id returns valid response but no connection data,
     try the next doc_id."""
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS", "101,202")
     fetcher = _make_fetcher(monkeypatch)
     call_count = {"n": 0}
 

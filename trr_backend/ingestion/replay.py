@@ -574,8 +574,10 @@ def _references(value: Any) -> None:
         raise InvalidSourceError("Media inventory URL references are invalid")
 
 
-def _media(evidence: Evidence, *, target_key: str, parser_version: str, pinned: bool) -> MediaReplay:
-    payload = evidence.read(pinned=pinned)
+def _media(
+    evidence: Evidence, *, target_key: str, parser_version: str, pinned: bool, now: datetime | None = None
+) -> MediaReplay:
+    payload = evidence.read(now=now, pinned=pinned)
     if payload.get("shortcode") != target_key or evidence.source_identity != f"instagram:media:{target_key}":
         raise InvalidSourceError("Media inventory identity does not match its retained target")
     unavailable = payload.get("status")

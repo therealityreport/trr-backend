@@ -37,10 +37,10 @@ def test_ci_enforces_the_selected_v4_backend_contract() -> None:
     changed_files = _step_run(lint, "Determine changed Python files")
     assert "git diff --name-only --diff-filter=ACMR" in changed_files
     assert _step_run(lint, "Ruff check (changed files only)") == (
-        "printf '%s' \"$CHANGED_PY_FILES\" | xargs -r uvx ruff@0.14.4 check"
+        "printf '%s' \"$CHANGED_PY_FILES\" | xargs -r uvx ruff@0.17.4 check"
     )
     assert _step_run(lint, "Ruff format check (changed files only)") == (
-        "printf '%s' \"$CHANGED_PY_FILES\" | xargs -r uvx ruff@0.14.4 format --check"
+        "printf '%s' \"$CHANGED_PY_FILES\" | xargs -r uvx ruff@0.17.4 format --check"
     )
 
     modal_locks = jobs["modal-locks"]
@@ -53,5 +53,10 @@ def test_ci_enforces_the_selected_v4_backend_contract() -> None:
     full_pytest = jobs["test-full"]
     assert full_pytest["name"] == "Full pytest (non-blocking)"
     assert full_pytest["continue-on-error"] is True
+
+    assert _step_run(full_pytest, "Run full suite (excluding browser/vision/live)") == (
+        'python -m pytest tests -q --durations=20 -m "not browser and not vision and not live"'
+    )
+    assert _step_run(jobs["test"], "Run API tests") == "python -m pytest tests/api -q --durations=20"
 
     assert "test-vision" not in jobs

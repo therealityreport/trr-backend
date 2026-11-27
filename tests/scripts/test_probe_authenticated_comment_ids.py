@@ -49,6 +49,11 @@ def fake_modal(monkeypatch, tmp_path, *, fail_get=False, fail_spawn=False):
         return SimpleNamespace(spawn=spawn)
 
     monkeypatch.setattr(driver, "_require_target", lambda: None)
+    monkeypatch.setenv("MODAL_PROFILE", "admin-56995")
+    monkeypatch.setenv("MODAL_WORKSPACE", "admin-56995")
+    monkeypatch.setenv("MODAL_ENVIRONMENT", "main")
+    monkeypatch.setenv("TRR_MODAL_APP_NAME", "trr-backend-jobs")
+    monkeypatch.setenv("TRR_MODAL_APP_REF", "trr_backend.modal_jobs")
     monkeypatch.setattr(modal.Function, "from_name", lookup)
     monkeypatch.setattr(modal.FunctionCall, "from_id", lambda identity: call if identity == "fc-test" else None)
     return calls

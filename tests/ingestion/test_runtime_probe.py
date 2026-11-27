@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import multiprocessing
 import os
 import signal
 import subprocess
@@ -440,12 +441,18 @@ def test_preloaded_foreign_app_module_is_rejected_instead_of_discarded(monkeypat
 
 
 @pytest.mark.parametrize("family", ["application", "session_control"])
-def test_configuration_checks_both_complete_candidate_families_before_observer(monkeypatch, metadata, family):
+def test_configuration_checks_both_complete_candidate_families_before_observer(metadata, family):
+    # The deployed probe starts in a fresh interpreter and verifies every imported module's origin.
+    with multiprocessing.get_context("spawn").Pool(1) as pool:
+        pool.apply_async(_check_candidate_family, (metadata[0], family)).get(timeout=30)
+
+
+def _check_candidate_family(expected, family):
+    from tests.conftest import block_external_connections
     from trr_backend.db import connection
     from trr_backend.ingestion import composition
     from trr_backend.ingestion.workflows import RuntimeConfig
 
-    expected = metadata[0]
     good = f"postgresql://postgres:private@db.{probe.PROJECT_REF}.supabase.co:5432/postgres"
     foreign = "postgresql://postgres:private@db.other.supabase.co:5432/postgres?sslmode=require"
     config = RuntimeConfig(
@@ -454,22 +461,24 @@ def test_configuration_checks_both_complete_candidate_families_before_observer(m
         ),
         workflow_version=expected["workflow_version"],
     )
-    monkeypatch.setattr(composition, "runtime_config", lambda: config)
-    monkeypatch.setattr(probe, "version", lambda name: "3.3.0")
-    monkeypatch.setenv("PGSSLMODE", "require")
-    calls = []
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        block_external_connections(monkeypatch, set())
+        monkeypatch.setattr(composition, "runtime_config", lambda: config)
+        monkeypatch.setattr(probe, "version", lambda name: "3.3.0")
+        monkeypatch.setenv("PGSSLMODE", "require")
+        calls = []
 
-    def candidates(name):
-        calls.append(name)
-        return ({"url": good}, {"url": foreign}) if family == name else ({"url": good},)
+        def candidates(name):
+            calls.append(name)
+            return ({"url": good}, {"url": foreign}) if family == name else ({"url": good},)
 
-    monkeypatch.setattr(connection, "resolve_database_url_candidate_details", lambda: candidates("application"))
-    monkeypatch.setattr(
-        connection, "resolve_session_database_url_candidate_details", lambda: candidates("session_control")
-    )
-    with pytest.raises(probe.ProbeError, match="SESSION_DSN_MISMATCH"):
-        probe.configuration(expected)
-    assert "application" in calls and (family != "session_control" or "session_control" in calls)
+        monkeypatch.setattr(connection, "resolve_database_url_candidate_details", lambda: candidates("application"))
+        monkeypatch.setattr(
+            connection, "resolve_session_database_url_candidate_details", lambda: candidates("session_control")
+        )
+        with pytest.raises(probe.ProbeError, match="SESSION_DSN_MISMATCH"):
+            probe.configuration(expected)
+        assert "application" in calls and (family != "session_control" or "session_control" in calls)
 
 
 def test_helper_rejection_carries_bounded_lifecycle_observations_only(metadata):

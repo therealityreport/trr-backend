@@ -306,7 +306,7 @@ class Offline(unittest.TestCase):
         path = self.path / "clip.mp4"
         subprocess.run(
             [
-                "/opt/homebrew/bin/ffmpeg",
+                "ffmpeg",
                 "-nostdin",
                 "-v",
                 "error",

@@ -377,10 +377,14 @@ if os.environ.get("TRR_FETCHER_EVAL_MODAL") == "1":
         print(json.dumps(probe.remote(), sort_keys=True))
 
 
-if __name__ == "__main__" and "--run" in sys.argv:
+def _run_modal_evaluation() -> None:
     from scripts.modal.deploy_backend import pinned_modal_env, verify_required_workspace
 
     env = pinned_modal_env()
     verify_required_workspace(env=env)
     env["TRR_FETCHER_EVAL_MODAL"] = "1"
     subprocess.run([sys.executable, "-m", "modal", "run", "--env", "main", __file__], env=env, cwd=ROOT, check=True)
+
+
+if __name__ == "__main__" and "--run" in sys.argv:
+    _run_modal_evaluation()

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.socials.claimed_job import ClaimedJob
 from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsFetchResult
 from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
 from trr_backend.socials.instagram.scraper import InstagramComment
@@ -81,7 +82,7 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     fetch_calls: list[dict[str, Any]] = []
-    finish_calls: list[dict[str, Any]] = []
+    claim = ClaimedJob("worker-1")
     persisted_parent = _comment(comment_id="parent-1", reply_count=2)
 
     class _FakeLifecycle:
@@ -105,9 +106,9 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
         def emit_job_progress(**_kwargs: Any) -> bool:
             return True
 
-        @staticmethod
-        def finish_job(job_id: str, **kwargs: Any) -> None:
-            finish_calls.append({"job_id": job_id, **kwargs})
+        job_claim_write_scope = staticmethod(claim.write_scope)
+        finish_job = staticmethod(claim.finish)
+        finish_job_followups = staticmethod(claim.finish_followups)
 
         @staticmethod
         def finalize_run_status(_run_id: str, **_kwargs: Any) -> dict[str, Any]:
@@ -153,7 +154,7 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
         if "select status from social.scrape_runs" in normalized:
             return {"status": "running"}
         if "from social.scrape_jobs" in normalized and "select id::text" in normalized:
-            return finish_calls[-1] if finish_calls else {"id": "job-1", "status": "completed"}
+            return claim.finished or {"id": "job-1", "status": "completed"}
         if "from social.scrape_jobs" in normalized:
             return {"status": "running", "worker_id": "worker-1", "claimed_at": "2026-05-06T00:00:00+00:00"}
         return {}
@@ -193,11 +194,8 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
     )
 
     payload = jr.run_instagram_comments_scrapling_job(
-        {
-            "id": "job-1",
-            "run_id": "run-1",
-            "status": "running",
-            "config": {
+        claim.row(
+            {
                 "account": "thetraitorsus",
                 "stage": repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
                 "target_source_ids": ["SHORT1"],
@@ -211,7 +209,7 @@ def test_incomplete_fill_uses_reply_only_when_persisted_reply_gap_exists(
                 # persisted-reply-gap reply-only retry is actually exercised.
                 "comments_load_strategy": "instagram_comments_endpoint_cursor",
             },
-        },
+        ),
         worker_id="worker-1",
     )
 
@@ -228,7 +226,7 @@ def test_reported_gap_without_fetch_failure_is_retryable(
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
 
     fetch_calls: list[dict[str, Any]] = []
-    finish_calls: list[dict[str, Any]] = []
+    claim = ClaimedJob("worker-1")
     fetched_parent = _comment(comment_id="parent-1")
 
     class _FakeLifecycle:
@@ -252,9 +250,9 @@ def test_reported_gap_without_fetch_failure_is_retryable(
         def emit_job_progress(**_kwargs: Any) -> bool:
             return True
 
-        @staticmethod
-        def finish_job(job_id: str, **kwargs: Any) -> None:
-            finish_calls.append({"job_id": job_id, **kwargs})
+        job_claim_write_scope = staticmethod(claim.write_scope)
+        finish_job = staticmethod(claim.finish)
+        finish_job_followups = staticmethod(claim.finish_followups)
 
         @staticmethod
         def finalize_run_status(_run_id: str, **_kwargs: Any) -> dict[str, Any]:
@@ -303,7 +301,7 @@ def test_reported_gap_without_fetch_failure_is_retryable(
         if "select status from social.scrape_runs" in normalized:
             return {"status": "running"}
         if "from social.scrape_jobs" in normalized and "select id::text" in normalized:
-            return finish_calls[-1] if finish_calls else {"id": "job-1", "status": "retrying"}
+            return claim.finished or {"id": "job-1", "status": "retrying"}
         if "from social.scrape_jobs" in normalized:
             return {"status": "running", "worker_id": "worker-1", "claimed_at": "2026-05-06T00:00:00+00:00"}
         return {}
@@ -342,25 +340,22 @@ def test_reported_gap_without_fetch_failure_is_retryable(
     )
 
     payload = jr.run_instagram_comments_scrapling_job(
-        {
-            "id": "job-1",
-            "run_id": "run-1",
-            "status": "running",
-            "attempt_count": 1,
-            "max_attempts": 2,
-            "config": {
+        claim.row(
+            {
                 "account": "thetraitorsus",
                 "stage": repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
                 "target_source_ids": ["SHORT1"],
                 "fetch_replies": True,
                 "instagram_scrape_mode": "authenticated",
             },
-        },
+            attempt_count=1,
+            max_attempts=2,
+        ),
         worker_id="worker-1",
     )
 
     assert payload["status"] == "retrying"
     assert fetch_calls
-    metadata = finish_calls[-1]["metadata"]
+    metadata = claim.finished["metadata"]
     assert metadata["incomplete_fetch_reasons"] == {"SHORT1": "hidden_comments_unresolved"}
     assert metadata["post_fetch_failures"]["fetch_reasons"] == {"SHORT1": "hidden_comments_unresolved"}
