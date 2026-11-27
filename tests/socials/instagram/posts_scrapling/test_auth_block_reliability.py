@@ -18,6 +18,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.socials.claimed_job import ClaimedJob
+
 
 @pytest.fixture(autouse=True)
 def _pin_authenticated_scrape_mode(monkeypatch):
@@ -213,7 +215,7 @@ def test_rotate_session_without_provider_only_swaps_proxy(_mock_scrapling) -> No
 # ---------------------------------------------------------------------------
 
 
-def _patch_repo(monkeypatch: pytest.MonkeyPatch, captured_finish: dict[str, Any]) -> None:
+def _patch_repo(monkeypatch: pytest.MonkeyPatch, claim: ClaimedJob) -> None:
     from trr_backend.repositories import social_season_analytics as repo
 
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
@@ -226,13 +228,8 @@ def _patch_repo(monkeypatch: pytest.MonkeyPatch, captured_finish: dict[str, Any]
     monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_k: {})
     monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {})
 
-    def _fake_finish_job(job_id, *, status, items_found, error_message=None, metadata=None, **kwargs):  # noqa: ANN001
-        captured_finish["status"] = status
-        captured_finish["error_message"] = error_message
-        captured_finish["metadata"] = metadata
-        captured_finish.update(kwargs)
-
-    monkeypatch.setattr(repo, "_finish_job", _fake_finish_job)
+    monkeypatch.setattr(repo, "_job_claim_write_scope", claim.write_scope)
+    monkeypatch.setattr(repo, "_finish_job", claim.finish)
 
 
 def _patch_session_and_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,8 +307,8 @@ def test_auth_block_rotates_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> No
         async def aclose(self) -> None:
             return None
 
-    captured: dict[str, Any] = {}
-    _patch_repo(monkeypatch, captured)
+    claim = ClaimedJob("w1")
+    _patch_repo(monkeypatch, claim)
     _patch_session_and_proxy(monkeypatch)
     # Authenticated mode defaults to a rotate-on-block budget of 0; allow exactly
     # one bounded rotate-on-block retry so the retried cursor can succeed.
@@ -322,10 +319,10 @@ def test_auth_block_rotates_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(auth_cooldown, "record_auth_block", lambda *a, **k: recorded.append(a) or None)
     monkeypatch.setattr(auth_cooldown, "clear_cooldown", lambda *a, **k: True)
 
-    job = {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus", "stage": "posts_scrapling"}}
+    job = claim.row({"account": "thetraitorsus", "stage": "posts_scrapling"})
     jr.run_instagram_posts_scrapling_job(job, worker_id="w1")
 
-    assert captured["status"] == "completed"
+    assert claim.finished["status"] == "completed"
     assert rotations == ["rotate_on_block"]  # one A2 sticky-session swap
     assert recorded == []  # success after rotate => no cooldown recorded
 
@@ -373,8 +370,8 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
         async def aclose(self) -> None:
             return None
 
-    captured: dict[str, Any] = {}
-    _patch_repo(monkeypatch, captured)
+    claim = ClaimedJob("w1")
+    _patch_repo(monkeypatch, claim)
     _patch_session_and_proxy(monkeypatch)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_ROTATE_ON_BLOCK_MAX_RETRIES", "2")
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
@@ -385,13 +382,11 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
         lambda *a, **k: recorded.append(a) or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "auth"}),
     )
 
-    job = {
-        "id": "job-1",
-        "run_id": "run-1",
-        "config": {"account": "thetraitorsus", "stage": "posts_scrapling"},
-        "attempt_count": 1,
-        "max_attempts": 1,
-    }
+    job = claim.row(
+        {"account": "thetraitorsus", "stage": "posts_scrapling"},
+        attempt_count=1,
+        max_attempts=1,
+    )
     jr.run_instagram_posts_scrapling_job(job, worker_id="w1")
 
     # 3 fetch attempts: the initial + 2 bounded rotate-on-block retries.
@@ -404,8 +399,8 @@ def test_auth_block_records_cooldown_when_budget_exhausted(monkeypatch: pytest.M
     # Budget exhausted => cooldown recorded once, job fails non-retryably.
     assert len(recorded) == 1
     assert recorded[0][0] == "instagram"
-    assert captured["status"] == "failed"
-    assert captured["metadata"]["error_code"] == "instagram_posts_auth_failed"
+    assert claim.finished["status"] == "failed"
+    assert claim.finished["metadata"]["error_code"] == "instagram_posts_auth_failed"
 
 
 def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,8 +443,8 @@ def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytes
         async def aclose(self) -> None:
             return None
 
-    captured: dict[str, Any] = {}
-    _patch_repo(monkeypatch, captured)
+    claim = ClaimedJob("w1")
+    _patch_repo(monkeypatch, claim)
     _patch_session_and_proxy(monkeypatch)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
     monkeypatch.setattr(jr, "_raise_if_auth_cooldown_active", lambda **_k: None)
@@ -459,13 +454,13 @@ def test_checkpoint_block_skips_rotation_and_records_cooldown(monkeypatch: pytes
         lambda *a, **k: recorded.append(a) or SimpleNamespace(to_metadata=lambda: {"blocker_kind": "checkpoint"}),
     )
 
-    job = {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus", "stage": "posts_scrapling"}}
+    job = claim.row({"account": "thetraitorsus", "stage": "posts_scrapling"})
     jr.run_instagram_posts_scrapling_job(job, worker_id="w1")
 
     assert rotations == []  # no rotation on checkpoint
     assert len(recorded) == 1
-    assert captured["status"] == "failed"
-    assert captured["metadata"]["error_code"] == "instagram_posts_checkpoint_required"
+    assert claim.finished["status"] == "failed"
+    assert claim.finished["metadata"]["error_code"] == "instagram_posts_checkpoint_required"
 
 
 def test_active_cooldown_soft_stops_and_requeues(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -488,8 +483,8 @@ def test_active_cooldown_soft_stops_and_requeues(monkeypatch: pytest.MonkeyPatch
         async def aclose(self) -> None:
             return None
 
-    captured: dict[str, Any] = {}
-    _patch_repo(monkeypatch, captured)
+    claim = ClaimedJob("w1")
+    _patch_repo(monkeypatch, claim)
     _patch_session_and_proxy(monkeypatch)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
     monkeypatch.setattr(
@@ -504,12 +499,12 @@ def test_active_cooldown_soft_stops_and_requeues(monkeypatch: pytest.MonkeyPatch
         ),
     )
 
-    job = {"id": "job-1", "run_id": "run-1", "config": {"account": "thetraitorsus", "stage": "posts_scrapling"}}
+    job = claim.row({"account": "thetraitorsus", "stage": "posts_scrapling"})
     jr.run_instagram_posts_scrapling_job(job, worker_id="w1")
 
-    assert captured["status"] == "retrying"
-    assert captured["metadata"]["auth_cooldown_active"] is True
-    assert captured["next_available_at"] == cooldown_until
+    assert claim.finished["status"] == "retrying"
+    assert claim.finished["metadata"]["auth_cooldown_active"] is True
+    assert claim.finished["next_available_at"] == cooldown_until
 
 
 def test_dispatch_guard_defers_spawn_while_cooldown_active(monkeypatch: pytest.MonkeyPatch) -> None:
