@@ -123,11 +123,17 @@ def _isolate_non_live_tests(
     for name in _DATABASE_CONNECTION_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
 
-    from trr_backend.db import connection, pg
+    from trr_backend.db import connection
 
     connection.resolve_database_url.cache_clear()
     connection.resolve_database_url_candidates.cache_clear()
     connection.resolve_database_url_candidate_details.cache_clear()
+    block_external_connections(monkeypatch, _isolated_postgres_endpoints)
+
+
+def block_external_connections(monkeypatch: pytest.MonkeyPatch, registered_endpoints) -> None:
+    from trr_backend.db import connection, pg
+
     monkeypatch.setattr(socket, "create_connection", _blocked_non_live_access)
     monkeypatch.setattr(socket.socket, "connect", _blocked_non_live_access)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked_non_live_access)
@@ -135,6 +141,6 @@ def _isolate_non_live_tests(
     monkeypatch.setattr(
         connection.psycopg2,
         "connect",
-        lambda *args, **kwargs: _connect_to_registered_postgres(connect, _isolated_postgres_endpoints, *args, **kwargs),
+        lambda *args, **kwargs: _connect_to_registered_postgres(connect, registered_endpoints, *args, **kwargs),
     )
     monkeypatch.setattr(pg, "ThreadedConnectionPool", _blocked_non_live_access)

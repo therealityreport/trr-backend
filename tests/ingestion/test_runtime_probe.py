@@ -448,6 +448,7 @@ def test_configuration_checks_both_complete_candidate_families_before_observer(m
 
 
 def _check_candidate_family(expected, family):
+    from tests.conftest import block_external_connections
     from trr_backend.db import connection
     from trr_backend.ingestion import composition
     from trr_backend.ingestion.workflows import RuntimeConfig
@@ -461,6 +462,7 @@ def _check_candidate_family(expected, family):
         workflow_version=expected["workflow_version"],
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
+        block_external_connections(monkeypatch, set())
         monkeypatch.setattr(composition, "runtime_config", lambda: config)
         monkeypatch.setattr(probe, "version", lambda name: "3.3.0")
         monkeypatch.setenv("PGSSLMODE", "require")
