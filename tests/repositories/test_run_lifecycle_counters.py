@@ -43,7 +43,7 @@ def _finish_counter_capture(
     cur = object()
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(run_lifecycle.legacy, "_run_counter_columns_ready", lambda: True)
+    monkeypatch.setattr(social_impl, "_run_counter_columns_ready", lambda: True)
     monkeypatch.setattr(run_lifecycle.legacy.pg, "db_connection", lambda: _ctx(conn))
     monkeypatch.setattr(run_lifecycle.legacy.pg, "db_cursor", lambda *, conn=None: _ctx(cur))
 

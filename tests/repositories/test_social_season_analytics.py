@@ -548,7 +548,7 @@ def _patch_shared_catalog_fetch_terminal_error(monkeypatch: pytest.MonkeyPatch, 
     from trr_backend.socials.control_plane import run_lifecycle
 
     if "_shared_catalog_fetch_has_terminal_error" in vars(run_lifecycle.legacy):
-        delattr(run_lifecycle.legacy, "_shared_catalog_fetch_has_terminal_error")
+        delattr(social_repo, "_shared_catalog_fetch_has_terminal_error")
     monkeypatch.setattr(social_repo, "_shared_catalog_fetch_has_terminal_error", func)
 
 
@@ -556,7 +556,7 @@ def _patch_run_lifecycle_column_exists(monkeypatch: pytest.MonkeyPatch, func: An
     from trr_backend.socials.control_plane import run_lifecycle
 
     if "_column_exists" in vars(run_lifecycle.legacy):
-        delattr(run_lifecycle.legacy, "_column_exists")
+        delattr(social_repo, "_column_exists")
     monkeypatch.setattr(social_repo, "_column_exists", func)
 
 
@@ -2486,12 +2486,11 @@ def test_get_social_account_catalog_run_diagnostics_endpoint(monkeypatch: pytest
         "created_at": datetime(2026, 6, 23, 16, 37, tzinfo=UTC),
     }
 
-    core = catalog_progress._core
-    monkeypatch.setattr(core, "_relation_exists", lambda *_a, **_k: True)
-    monkeypatch.setattr(core, "_scrape_jobs_features", lambda *_a, **_k: {"has_run_id": True})
-    monkeypatch.setattr(core, "_load_social_account_catalog_run_row", lambda **_k: run_row)
-    monkeypatch.setattr(core, "_load_social_account_catalog_jobs", lambda **_k: [])
-    monkeypatch.setattr(core, "_load_catalog_run_row_by_id", lambda *_a, **_k: recovery_row)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda *_a, **_k: True)
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda *_a, **_k: {"has_run_id": True})
+    monkeypatch.setattr(social_repo, "_load_social_account_catalog_run_row", lambda **_k: run_row)
+    monkeypatch.setattr(social_repo, "_load_social_account_catalog_jobs", lambda **_k: [])
+    monkeypatch.setattr(social_repo, "_load_catalog_run_row_by_id", lambda *_a, **_k: recovery_row)
 
     diagnostics = catalog_progress.get_social_account_catalog_run_diagnostics(
         platform="instagram", account_handle="bravotv", run_id=run_id
@@ -45322,7 +45321,7 @@ def test_finalize_run_status_starts_deferred_comments_followup_without_ui(monkey
     monkeypatch.setattr(social_repo, "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch", lambda **_kwargs: 0)
     _patch_shared_catalog_fetch_terminal_error(monkeypatch, lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "start_social_account_comments_scrape",
         lambda platform, account_handle, **kwargs: (
             started.append({"platform": platform, "account_handle": account_handle, **kwargs})
@@ -45384,12 +45383,12 @@ def test_deferred_comments_followup_starts_when_media_keeps_run_active(monkeypat
     }
 
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_account_catalog_scrape_complete",
         lambda **_kwargs: True,
     )
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "start_social_account_comments_scrape",
         lambda platform, account_handle, **kwargs: (
             started.append({"platform": platform, "account_handle": account_handle, **kwargs})
@@ -45429,12 +45428,12 @@ def test_finalization_reconciles_streaming_comments_without_deferred_relaunch(
 
     reconciled: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_account_catalog_scrape_complete",
         lambda **_kwargs: True,
     )
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "reconcile_instagram_catalog_comments_streaming_targets",
         lambda **kwargs: (
             reconciled.append(kwargs)
@@ -45449,7 +45448,7 @@ def test_finalization_reconciles_streaming_comments_without_deferred_relaunch(
         ),
     )
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "start_social_account_comments_scrape",
         lambda *_args, **_kwargs: pytest.fail("streaming finalization must not launch deferred comments"),
     )
@@ -45549,7 +45548,7 @@ def test_finalize_run_status_marks_uncooperative_deferred_comments_launch_failed
             detail={"run_id": "comments-active-1", "status": "queued"},
         )
 
-    monkeypatch.setattr(run_lifecycle.legacy, "start_social_account_comments_scrape", _raise_active_comments)
+    monkeypatch.setattr(social_repo, "start_social_account_comments_scrape", _raise_active_comments)
     monkeypatch.setattr(
         run_lifecycle,
         "_merge_run_config",
@@ -45583,7 +45582,7 @@ def test_deferred_comments_followup_failure_records_retryable_grouping_error(
     lock_conn = object()
 
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "_shared_account_catalog_scrape_complete",
         lambda *, run_config, summary, conn=None: True,
     )
@@ -45591,7 +45590,7 @@ def test_deferred_comments_followup_failure_records_retryable_grouping_error(
     def _raise_grouping_error(*_args, **_kwargs):
         raise RuntimeError('column "p.*" must appear in the GROUP BY clause or be used in an aggregate function')
 
-    monkeypatch.setattr(run_lifecycle.legacy, "start_social_account_comments_scrape", _raise_grouping_error)
+    monkeypatch.setattr(social_repo, "start_social_account_comments_scrape", _raise_grouping_error)
     monkeypatch.setattr(
         run_lifecycle,
         "_merge_run_config",
@@ -45991,7 +45990,7 @@ def test_finalize_run_status_records_deferred_comments_runtime_version(monkeypat
     monkeypatch.setattr(social_repo, "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch", lambda **_kwargs: 0)
     _patch_shared_catalog_fetch_terminal_error(monkeypatch, lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "start_social_account_comments_scrape",
         lambda *_args, **_kwargs: {
             "run_id": "comments-run-1",
@@ -46120,12 +46119,12 @@ def test_instagram_backfill_with_media_and_comments_materializes_posts_before_fo
     monkeypatch.setattr(social_repo, "_maybe_enqueue_shared_catalog_classify_jobs_after_fetch", lambda **_kwargs: 0)
     _patch_shared_catalog_fetch_terminal_error(monkeypatch, lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "reconcile_instagram_catalog_comments_streaming_targets",
         lambda *_args, **_kwargs: _assert_materialized_comments_start(events, materialized_state),
     )
     monkeypatch.setattr(
-        run_lifecycle.legacy,
+        social_repo,
         "start_social_account_comments_scrape",
         lambda *_args, **_kwargs: pytest.fail("streaming finalization should reconcile, not launch deferred comments"),
     )

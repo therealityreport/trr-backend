@@ -103,16 +103,16 @@ def test_backfill_health_provider_observes_late_legacy_monkeypatch(
         assert backfill_health._core._now_utc is replacement
 
 
-def test_backfill_health_provider_assignment_writes_through(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_backfill_health_provider_assignment_writes_through() -> None:
     original = legacy_core._now_utc
 
     def replacement() -> str:
         return "write-through-provider-value"
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(backfill_health._core, "_now_utc", replacement)
+    try:
+        backfill_health._core._now_utc = replacement
         assert legacy_core._now_utc is replacement
+    finally:
+        backfill_health._core._now_utc = original
 
     assert legacy_core._now_utc is original

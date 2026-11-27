@@ -144,7 +144,7 @@ def test_stale_deferred_followup_claim_is_reclaimed_with_a_new_lease(
     }
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(run_lifecycle._legacy_module(), "_now_utc", lambda: now)
 
     def fake_fetch_one(sql: str, params=None, *, conn=None, **_kwargs):
         normalized = " ".join(sql.lower().split())
@@ -180,7 +180,7 @@ def test_fresh_deferred_followup_claim_is_excluded_without_a_second_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
-    monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(run_lifecycle._legacy_module(), "_now_utc", lambda: now)
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
         "fetch_one",
@@ -648,7 +648,7 @@ def test_completed_parent_orphan_child_cancellation_is_retried(
             return {"config": payload}
         return {"id": "completed-parent"}
 
-    monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(run_lifecycle._legacy_module(), "_now_utc", lambda: now)
     monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_all", fake_fetch_all)
     monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(
@@ -686,7 +686,7 @@ def test_deferred_child_cancellation_recovery_respects_backoff_and_cas_loser(
         "state": "cancelled",
         "child_cancellation": {"state": "pending", "child_run_id": "child-loser"},
     }
-    monkeypatch.setattr(run_lifecycle.legacy, "_now_utc", lambda: now)
+    monkeypatch.setattr(run_lifecycle._legacy_module(), "_now_utc", lambda: now)
     monkeypatch.setattr(
         run_lifecycle.legacy.pg,
         "fetch_all",
