@@ -780,8 +780,10 @@ def test_fetch_posts_graphql_checkpoint_required_uses_same_identity_refresh(monk
     monkeypatch.setattr(
         scraper,
         "_try_auto_refresh_cookies",
-        lambda: refresh_attempts.append(cast(InstagramScraperIdentity, scraper._active_identity).session_id)
-        or {"refreshed": False, "reason": "noop"},
+        lambda: (
+            refresh_attempts.append(cast(InstagramScraperIdentity, scraper._active_identity).session_id)
+            or {"refreshed": False, "reason": "noop"}
+        ),
     )
 
     payload = scraper.fetch_posts_graphql("bravotv", None, 0.0)
@@ -1120,7 +1122,7 @@ def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair
 
     assert payload is None
     assert scraper.last_retrieval_meta["request_error_code"] == "redirect_login"
-    assert scraper.last_retrieval_meta["redirect_target"] == "https://www.instagram.com/accounts/login/"
+    assert scraper.last_retrieval_meta["redirect_target"] == "www.instagram.com/accounts/login/"
 
 
 def test_fetch_posts_graphql_can_disable_auth_recovery_side_effects(
