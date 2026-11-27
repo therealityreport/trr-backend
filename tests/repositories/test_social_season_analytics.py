@@ -216,6 +216,17 @@ def _disable_profile_summary_shared_connection(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
+def _stub_empty_comment_inventory(monkeypatch: pytest.MonkeyPatch, account: str, *, expected_conn: Any = None) -> None:
+    from trr_backend.socials.instagram import comment_counts
+
+    def profile_summary(actual_account: str, *, conn: Any | None) -> dict[str, Any]:
+        assert actual_account == account
+        assert conn is expected_conn
+        return comment_counts.summarize_comment_counts({})
+
+    monkeypatch.setattr(comment_counts, "profile_summary", profile_summary)
+
+
 _PROVIDER_REPAIR_SPECS: dict[str, list[dict[str, Any]]] = {
     "test_get_social_account_profile_posts_exposes_missing_comments_sort_metadata": [
         {"binding": "_instagram_post_comment_rollups_available", "conn": "non-null", "returns": False}
@@ -17212,6 +17223,7 @@ def test_put_targets_enforces_bravo_core_platform_accounts_on_write(monkeypatch:
 
 
 def test_get_social_account_profile_summary_includes_avatar_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravowwhl")
     rows = [
         {
             "user_avatar_url": "https://images.test/avatar-small.jpg",
@@ -17608,6 +17620,7 @@ def test_get_social_account_profile_summary_adds_effective_comments_coverage_fie
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     summary_conn = object()
+    _stub_empty_comment_inventory(monkeypatch, "thetraitorsus", expected_conn=summary_conn)
 
     monkeypatch.setattr(
         social_repo,
@@ -18715,6 +18728,7 @@ def test_update_instagram_comment_hosted_author_profile_pics_updates_normalized_
 def test_get_social_account_profile_summary_uses_instagram_live_total_posts_with_source_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravotv")
     monkeypatch.setattr(
         social_repo,
         "_assert_social_account_profile_exists",
@@ -18798,6 +18812,7 @@ def test_get_social_account_profile_summary_uses_instagram_live_total_posts_with
 def test_get_social_account_profile_summary_does_not_force_instagram_live_profile_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravotv")
     monkeypatch.setattr(
         social_repo,
         "_assert_social_account_profile_exists",
@@ -19037,6 +19052,7 @@ def test_shared_catalog_total_posts_uses_instagram_collab_account_match(
 def test_get_social_account_profile_summary_uses_instagram_collaborator_dataset_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravodailydish")
     rows = [
         {
             "id": "catalog-post-1",
@@ -19119,6 +19135,7 @@ def test_get_social_account_profile_summary_uses_instagram_collaborator_dataset_
 
 
 def test_get_social_account_profile_summary_normalizes_wwhl_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravowwhl")
     rows = [{"user_avatar_url": None, "hosted_user_avatar_url": None, "raw_data": {}}]
 
     def _assert_exists(platform: str, account_handle: str) -> list[dict[str, Any]]:
@@ -19174,6 +19191,7 @@ def test_get_social_account_profile_summary_normalizes_wwhl_alias(monkeypatch: p
 def test_get_social_account_profile_summary_lite_includes_header_stats_without_full_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravotv")
     rows = [{"user_avatar_url": None, "hosted_user_avatar_url": None, "raw_data": {}}]
 
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
@@ -19857,6 +19875,7 @@ def test_get_social_account_profile_summary_uses_loaded_rows_for_catalog_groupin
 def test_get_social_account_profile_summary_reuses_loaded_instagram_rows_for_hashtags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_empty_comment_inventory(monkeypatch, "bravotv")
     rows = [
         {
             "id": "post-1",
