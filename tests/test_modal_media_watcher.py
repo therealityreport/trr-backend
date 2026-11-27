@@ -13,10 +13,12 @@ WATCH_ID = "11111111-1111-1111-1111-111111111111"
 def test_media_watch_cron_is_installed_only_for_the_singleton_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", "1")
     monkeypatch.delenv("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", raising=False)
-    assert "schedule" in modal_jobs._modal_cron_schedule_kwargs("* * * * *")
+    enabled = modal_jobs._modal_cron_schedule_kwargs("* * * * *")
+    assert "schedule" in enabled
+    assert enabled["env"] == modal_jobs._maintenance_runtime_env()
 
     monkeypatch.delenv("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", raising=False)
-    assert modal_jobs._modal_cron_schedule_kwargs("* * * * *") == {}
+    assert modal_jobs._modal_cron_schedule_kwargs("* * * * *") == {"env": modal_jobs._maintenance_runtime_env()}
 
 
 def test_poller_claims_only_the_bounded_number_and_propagates_current_fences(
@@ -104,13 +106,15 @@ def test_worker_heartbeats_current_fence_and_passes_it_to_service(monkeypatch: p
     monkeypatch.setattr(
         service,
         "run_show_season_media_watch",
-        lambda watch, **kwargs: service_calls.append({"watch": watch, **kwargs})
-        or SimpleNamespace(
-            status="completed",
-            run_id="run-1",
-            summary={"added": 1},
-            continuation={},
-            error=None,
+        lambda watch, **kwargs: (
+            service_calls.append({"watch": watch, **kwargs})
+            or SimpleNamespace(
+                status="completed",
+                run_id="run-1",
+                summary={"added": 1},
+                continuation={},
+                error=None,
+            )
         ),
     )
     monkeypatch.setattr(modal_jobs, "_close_db_pools_after_worker", lambda *_args, **_kwargs: None)

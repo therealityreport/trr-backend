@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +34,14 @@ from trr_backend.socials.instagram.constants import resolve_comment_sort_order
 from trr_backend.socials.instagram.scraper import InstagramComment
 
 _FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "instagram" / "scrapling"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_rate_limit_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each test owns its pacing timestamps, including tests that set a synthetic clock.
+    from trr_backend.socials.instagram.comments_scrapling import fetcher
+
+    monkeypatch.setattr(fetcher, "tempfile", SimpleNamespace(gettempdir=lambda: str(tmp_path)))
 
 
 @pytest.fixture(autouse=True)
@@ -3289,6 +3298,7 @@ def test_sync_response_cookies_updates_parser_headers() -> None:
 
 def test_pace_api_requests_honors_comment_delay() -> None:
     fetcher = _build_fetcher()
+    fetcher._global_api_delay_seconds = 0
     fetcher._api_delay_seconds = 0.25
     fetcher._last_api_request_started_at = 10.0
     sleep_mock = AsyncMock()

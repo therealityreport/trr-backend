@@ -1,6 +1,7 @@
 """Real maintained fetcher/decoder with mock HTTP and isolated PostgreSQL only."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -20,6 +21,14 @@ database = existing.database
 OBSERVED = existing.OBSERVED
 HTTP_CLIENT = httpx.AsyncClient
 COOKIES = {"sessionid": "synthetic-session", "ds_user_id": "100", "csrftoken": "fixture"}
+
+
+@pytest.fixture
+def evidence_clock():
+    # Decode the retained fixture at capture time; exercise the real expiry check.
+    with patch("trr_backend.ingestion.evidence.datetime", wraps=datetime) as clock:
+        clock.now.return_value = OBSERVED
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -226,6 +235,7 @@ def test_complete_retained_scan_can_finish_after_receipt_failure_without_source(
 
 
 @pytest.mark.parametrize("child", [False, True])
+@pytest.mark.usefixtures("evidence_clock")
 def test_real_decoder_retains_native_list_body_and_explicit_pagination(monkeypatch, child):
     captured = []
     raw = [node("r1" if child else "p1"), {"has_more_tail_child_comments" if child else "has_more_comments": False}]
@@ -259,6 +269,7 @@ def test_real_decoder_retains_native_list_body_and_explicit_pagination(monkeypat
 
 
 @pytest.mark.parametrize("items", [[], [node("p1")]])
+@pytest.mark.usefixtures("evidence_clock")
 def test_bare_native_list_never_manufactures_exhaustion(items):
     page = parse_comment_evidence(existing.evidence({"source_snapshot_type": "native_rest_list_v1", "items": items}))
     assert not page.exhausted and page.next_cursor is None
@@ -313,6 +324,7 @@ def test_mock_boundary_denies_direct_constructor_and_browser(monkeypatch):
         asyncio.run(instance._fetcher.async_fetch("https://example.invalid"))
 
 
+@pytest.mark.usefixtures("evidence_clock")
 def test_native_list_rejects_conflicting_metadata_and_unbound_children():
     with pytest.raises(CommentSourceError, match="conflicts"):
         parse_comment_evidence(

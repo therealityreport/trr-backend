@@ -61,7 +61,7 @@ jobs:
         run: python -c "import api.main"
 
       - name: Run API tests
-        run: python -m pytest tests/api -q
+        run: python -m pytest tests/api -q --durations=20
 
 
   test-py312-canary:
@@ -236,6 +236,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          # The media performance guard replays a pinned historical implementation.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -253,5 +255,14 @@ jobs:
       - name: Install dependencies
         run: uv pip sync --system requirements.lock.txt
 
+      - name: Prepare offline video fixture tools
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
+          ffprobe -version
+
       - name: Run full suite (excluding browser/vision/live)
-        run: python -m pytest tests -q -m "not browser and not vision and not live"
+        run: python -m pytest tests -q --durations=20 -m "not browser and not vision and not live"
