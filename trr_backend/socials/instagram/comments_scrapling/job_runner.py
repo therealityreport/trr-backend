@@ -3070,8 +3070,7 @@ def _enqueue_auto_auth_fallback_targets(
         if existing:
             represented.append(str(existing["id"]))
             continue
-        child_id = repo._create_job(
-            None,
+        child_id = lifecycle.enqueue_job(
             run_id=run_id,
             platform="instagram",
             source_scope=str(source_job.get("source_scope") or "bravo"),
@@ -3079,7 +3078,6 @@ def _enqueue_auto_auth_fallback_targets(
             stage=repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
             config={**child_config, "comments_auth_fallback_source_id": target, "target_source_ids": [target]},
             initiated_by="comments-public-auto-auth-fallback",
-            status="queued",
             priority=max(1, _safe_int(source_job.get("priority")) or 100),
             max_attempts=max(1, _safe_int(source_job.get("max_attempts")) or _QUEUE_DEFAULT_MAX_ATTEMPTS),
         )
@@ -3238,7 +3236,6 @@ def _auth_context_metadata(auth_session: Any | None) -> dict[str, Any]:
 
 def _abort_queued_sibling_shards_after_run_fatal_error(
     *,
-    repo: Any,
     run_id: str,
     failed_job_id: str,
     stage: str,
@@ -3312,11 +3309,10 @@ def _abort_queued_sibling_shards_after_run_fatal_error(
         sibling_id = str(sibling.get("id") or "").strip()
         if not sibling_id:
             continue
-        if not repo._transition_job_state(
+        if not lifecycle.fail_job_from_snapshot(
             sibling_id,
             expected_status=str(sibling.get("status") or ""),
             expected_claim_token=(sibling.get("config") or {}).get("claim_token"),
-            status="failed",
             items_found=_safe_int(sibling.get("items_found")) or 0,
             error_message=(
                 f"Aborted because sibling shard {failed_job_id} failed with run-level "
@@ -5495,7 +5491,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         )
         with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
             if not current:
-                return repo._load_current_job_row(job_id)
+                return lifecycle.load_current_job_row(job_id)
             _prepare_completion_followups()
             residual_gap_targets = _completion_residual_gap_targets_from_health(target_source_ids=target_source_ids)
             completion_handoff_metadata = _completion_recovery_handoff_metadata(
@@ -5785,7 +5781,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         retry_target_source_ids = list(dict.fromkeys(retry_target_source_ids))
         with lifecycle.job_claim_write_scope(job_id, claim_token=claim_token, worker_id=worker_id) as current:
             if not current:
-                return repo._load_current_job_row(job_id)
+                return lifecycle.load_current_job_row(job_id)
             if can_retry and retry_target_source_ids:
                 repo._update_job_config(
                     job_id,
@@ -5883,7 +5879,6 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         if finish_accepted and terminal_status == "failed":
             try:
                 _abort_queued_sibling_shards_after_run_fatal_error(
-                    repo=repo,
                     run_id=run_id,
                     failed_job_id=job_id,
                     stage=stage,
