@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 
 import pytest
 
@@ -26,6 +27,8 @@ def test_touch_job_dispatch_metadata_updates_only_dispatch_key(
         normalized = " ".join(str(sql).split()).lower()
         calls.append((normalized, list(params or [])))
         if normalized.startswith("select metadata from social.scrape_jobs"):
+            assert "for update" in normalized
+            assert params == ["job-1", "running", "fixture-claim", "worker-1", "call-existing", None]
             return {"metadata": existing_metadata}
         if normalized.startswith("update social.scrape_jobs"):
             return {"id": "job-1"}
@@ -33,8 +36,16 @@ def test_touch_job_dispatch_metadata_updates_only_dispatch_key(
 
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
 
-    social_repo._touch_job_dispatch_metadata(  # noqa: SLF001
+    monkeypatch.setattr(social_repo.pg, "transaction", nullcontext)
+    assert social_repo._touch_job_dispatch_metadata(  # noqa: SLF001
         "job-1",
+        expected_job_snapshot={
+            "id": "job-1",
+            "worker_id": "worker-1",
+            "status": "running",
+            "config": {"claim_token": "fixture-claim"},
+            "metadata": existing_metadata,
+        },
         dispatch_backend="modal",
         remote_invocation_id=None,
         last_dispatch_error=None,

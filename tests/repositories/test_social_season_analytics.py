@@ -5914,7 +5914,16 @@ def test_upsert_instagram_post_preserves_rich_metadata_for_comments_header_paylo
 
     assert row == {"id": "db-post-1"}
     payload = captured["payload"]
-    assert payload["raw_data"] == existing_raw_data
+    raw = dict(payload["raw_data"])
+    observations = raw.pop("comment_count_observations")
+    assert set(observations) == {
+        "post_reported_count",
+        "facebook_count_observed_on_instagram",
+        "threads_count_observed_on_instagram",
+    }
+    assert all(item["status"] == "unknown" and item["value"] is None for item in observations.values())
+    assert raw.pop("comment_count_observation_conflicts") == []
+    assert raw == existing_raw_data
     assert payload["media_urls"] == ["https://source.example/rich.jpg"]
     assert payload["thumbnail_url"] == "https://source.example/rich-thumb.jpg"
     assert payload["views"] == 410_992
@@ -18171,6 +18180,21 @@ def test_get_social_account_profile_comments_filters_by_post_source_id(
 
     def _fake_fetch_all_with_cursor(_cur: Any, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         normalized_sql = " ".join(sql.lower().split())
+        if normalized_sql.startswith("select distinct on (source_id) source_id, raw_data"):
+            assert params == [["ABC123"], ["ABC123"]]
+            return [{"source_id": "ABC123", "raw_data": {}}]
+        if "as instagram_saved_count" in normalized_sql:
+            assert params == [["ABC123"]]
+            return [
+                {
+                    "shortcode": "ABC123",
+                    "instagram_saved_count": 144,
+                    "instagram_saved_top_level_count": 104,
+                    "instagram_saved_reply_count": 40,
+                    "instagram_saved_unclassified_count": 0,
+                    "instagram_marked_missing_count": 5,
+                }
+            ]
         if "from information_schema.columns" in normalized_sql:
             return [
                 {"column_name": "is_missing"},
@@ -18256,6 +18280,7 @@ def test_get_social_account_profile_comments_filters_by_post_source_id(
     assert payload["comment_breakdown"]["missing_comments"] == 0
     assert payload["comment_breakdown"]["missing_reasons"] == {"instagram_not_served_after_all_lanes": 5}
     assert payload["facebook_crosspost"]["comments_count"] == 0
+    assert payload["comment_counts"]["instagram_saved_count"] == 144
     assert payload["pagination_mode"] == "parent_threads"
 
 
