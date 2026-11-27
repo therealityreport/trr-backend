@@ -21,6 +21,7 @@ from trr_backend.ingestion.replay import (
     MEDIA_RESULT_REPLAY_VERSION,
     Replay,
     _decode_media_result,
+    _media,
     serialize_media_result,
 )
 from trr_backend.ingestion.replay_commands import ReplayCommands
@@ -44,6 +45,23 @@ def retained(database, *, comments=True):
     owned, token, source = test_media.launch_media(database, comments=comments)
     receipt = test_media.execute(database, owned, token, source)
     return owned, source, UUID(receipt["evidence_id"])
+
+
+def test_media_replay_checks_expiry_at_the_supplied_time():
+    source = test_media.snapshot()
+    result = mirror_snapshot(source, test_media.storage(), check=test_media.noop, request=test_media.noop)
+    retained_media = Evidence.capture(
+        source_identity=f"instagram:media:{source.shortcode}",
+        captured_at=source.observed_at,
+        parser_version=MEDIA_RESULT_REPLAY_VERSION,
+        payload=serialize_media_result(result),
+    )
+    args = {"target_key": source.shortcode, "parser_version": MEDIA_RESULT_REPLAY_VERSION}
+
+    assert _media(retained_media, **args, pinned=False, now=source.observed_at).result is not None
+    with pytest.raises(ReplayUnavailable, match="expired"):
+        _media(retained_media, **args, pinned=False, now=retained_media.expires_at)
+    assert _media(retained_media, **args, pinned=True, now=retained_media.expires_at).result is not None
 
 
 def test_result_round_trip_preserves_exact_proof_and_individual_observation_times():

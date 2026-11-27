@@ -1464,10 +1464,7 @@ def audit_target(
             content_hash=row["content_hash"],
             schema_version=row["schema_version"],
         )
-        evidence.read(now=at, pinned=pinned)
-        # _media performs an additional pure read; the first read established
-        # expiry using this audit's immutable snapshot clock.
-        parsed = _media(evidence, target_key=key, parser_version=MEDIA_RESULT_REPLAY_VERSION, pinned=pinned)
+        parsed = _media(evidence, target_key=key, parser_version=MEDIA_RESULT_REPLAY_VERSION, pinned=pinned, now=at)
         if parsed.source_unavailable is not None or parsed.result is None:
             return {"failure": {"shortcode": key, "codes": ["decoded_ordinary_result_required"]}}
         result, source = parsed.result, parsed.result.snapshot
