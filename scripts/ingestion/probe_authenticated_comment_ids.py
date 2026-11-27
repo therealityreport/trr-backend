@@ -33,7 +33,6 @@ def _require_target():
 
 def execute(options):
     _require_target()
-    import modal
 
     from trr_backend.ingestion.fixed_validation import AccountBudget
 
@@ -47,6 +46,8 @@ def execute(options):
         return 0 if result["verdict"] == "passed" else 2
 
     if options.reconcile:
+        import modal
+
         dispatch = json.loads((output / "dispatch.json").read_text())
         if dispatch.get("environment") != "main" or dispatch.get("app") != "trr-backend-jobs":
             raise ValueError("Dispatch target mismatch")
@@ -56,8 +57,10 @@ def execute(options):
     else:
         if (output / "started.json").exists():
             raise ValueError("One-shot already started; reconcile retained dispatch, never redispatch")
-        function = modal.Function.from_name(
-            "trr-backend-jobs", "probe_instagram_authenticated_comment_ids", environment_name="main"
+        from trr_backend.modal_dispatch import get_trr_modal_function_handle
+
+        function = get_trr_modal_function_handle(
+            "probe_instagram_authenticated_comment_ids", app_name="trr-backend-jobs", environment_name="main"
         )
         run_id = str(uuid4())
         budget = AccountBudget(options.budget_path, "bravotv")

@@ -16,6 +16,13 @@
       "reason": "Canonical guarded TRR deploy entrypoint; validates immutable profile, workspace, environment, app, and app ref."
     },
     {
+      "path": "TRR-Backend/scripts/modal/evaluate_fetcher_session.py",
+      "function": "_run_modal_evaluation",
+      "operation": "run",
+      "max_occurrences": 1,
+      "reason": "Explicit --run evaluation of the ephemeral trr-fetcher-eval app. Launches only this file in main after pinning and verifying the TRR workspace. The workload uses public requests with a fixed budget."
+    },
+    {
       "path": "TRR-Backend/scripts/modal/prepare_named_secrets.py",
       "function": "_modal_secret_create_command",
       "operation": "secret_create",

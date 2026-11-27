@@ -366,6 +366,7 @@ def test_checked_in_allowlist_exactly_matches_current_modal_invocations() -> Non
             "app_stop",
         ): 1,
         ("TRR-Backend/scripts/modal/deploy_backend.py", "build_deploy_command", "deploy"): 1,
+        ("TRR-Backend/scripts/modal/evaluate_fetcher_session.py", "_run_modal_evaluation", "run"): 1,
         ("TRR-Backend/scripts/modal/prepare_named_secrets.py", "_modal_secret_create_command", "secret_create"): 1,
         ("TRR-Backend/scripts/modal/reconcile_modal_runtime.py", "deploy_modal_app", "deploy"): 1,
         ("TRR-Backend/scripts/modal/refresh_instagram_cookies_from_chrome.py", "_deploy_modal", "deploy"): 1,

@@ -182,13 +182,12 @@ def execute(options):
         write_once(output / f"{options.arm}.started.json", report)
         try:
             if options.arm == "modal":
-                import modal
-
                 from scripts.modal.deploy_backend import verify_required_workspace
+                from trr_backend.modal_dispatch import get_trr_modal_function_handle
 
                 verify_required_workspace()
-                function = modal.Function.from_name(
-                    "trr-backend-jobs", "probe_instagram_child_reply_access", environment_name="main"
+                function = get_trr_modal_function_handle(
+                    "probe_instagram_child_reply_access", app_name="trr-backend-jobs", environment_name="main"
                 )
                 # Conservative reservations survive a caller/worker crash; never refund uncertain sends.
                 for kind in ("bootstrap_reserved", "348_reserved", "362_reserved"):

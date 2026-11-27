@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import sys
+from unittest.mock import Mock
+
 import pytest
 
+from scripts.modal import verify_maintenance_schedule as verifier
 from scripts.modal.verify_maintenance_schedule import SCHEDULES, validate_observed_maintenance
 from trr_backend.modal_runtime_config import (
     MAINTENANCE_API_ENV,
@@ -105,3 +109,35 @@ def test_deploy_preflight_rejects_invalid_owner_before_provider_access(monkeypat
 def test_api_owner_rejects_missing_or_multiple_replicas(scaling):
     with pytest.raises(RuntimeError, match="min/max containers"):
         validate_maintenance_deployment({MAINTENANCE_API_ENV: "1", **scaling})
+
+
+def test_verifier_checks_workspace_before_launch_and_cancels_a_timed_out_probe(monkeypatch):
+    env = {
+        "TRR_MODAL_API_MAX_CONTAINERS": "1",
+        MAINTENANCE_CRON_ENV: "1",
+        MAINTENANCE_API_ENV: "0",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["verify_maintenance_schedule.py", "--env", "main"])
+    monkeypatch.setattr(verifier, "pinned_modal_env", lambda: env)
+    workspace = Mock()
+    call = Mock()
+    call.get.side_effect = TimeoutError
+    probe = Mock()
+    probe.spawn.return_value = call
+
+    def lookup(function, *, app_name, environment_name):
+        workspace.assert_called_once_with()
+        assert (function, app_name, environment_name) == ("probe_modal_maintenance_config", "trr-backend-jobs", "main")
+        return probe
+
+    monkeypatch.setattr(verifier, "verify_required_workspace", workspace)
+    monkeypatch.setattr(verifier, "get_trr_modal_function_handle", lookup)
+
+    with pytest.raises(TimeoutError):
+        verifier.main()
+
+    probe.spawn.assert_called_once_with()
+    call.get.assert_called_once_with(timeout=60)
+    call.cancel.assert_called_once_with(terminate_containers=True)
